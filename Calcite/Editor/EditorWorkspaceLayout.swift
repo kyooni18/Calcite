@@ -128,7 +128,7 @@ private struct LayoutMetrics {
   }
 
   private var minimumSidebarWidth: CGFloat {
-    min(maximumSidebarWidth, usableWidth * 0.22)
+    min(maximumSidebarWidth, usableWidth * 0.1)
   }
 
   private var minimumUsefulSidebarWidth: CGFloat {
