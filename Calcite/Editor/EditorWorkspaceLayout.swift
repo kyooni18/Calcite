@@ -99,7 +99,7 @@ private struct LayoutMetrics {
   let preferredSidebarWidth: CGFloat
   let showsSidebar: Bool
 
-  let dividerWidth: CGFloat = 8
+  let dividerWidth: CGFloat = 10
 
   var displaysSidebar: Bool {
     showsSidebar && maximumSidebarWidth > minimumUsefulSidebarWidth
