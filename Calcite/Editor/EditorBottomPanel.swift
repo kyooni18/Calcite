@@ -26,8 +26,6 @@ import SwiftUI
 
     var body: some View {
       VStack(spacing: 0) {
-        header
-        Divider()
         Group {
           switch selection {
           case .problems:
@@ -51,9 +49,11 @@ import SwiftUI
       }
       .foregroundStyle(controller.profile.workbench.foreground.color)
       .background(controller.profile.workbench.panelBackground.color)
+      Divider()
+      footer
     }
 
-    private var header: some View {
+    private var footer: some View {
       HStack(spacing: 2) {
         ForEach(EditorBottomPanel.allCases) { item in
           Button {
