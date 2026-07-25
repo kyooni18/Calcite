@@ -46,6 +46,15 @@ struct EditorWorkspaceLayout<Sidebar: View, Detail: View>: View {
             .clipped()
 
           resizeHandle(metrics: metrics)
+            .frame(minWidth: 3)
+            .onHover(perform: { hovering in
+                if hovering {
+                    NSCursor.pointingHand.push()
+                  } else {
+                  NSCursor.pop()
+                }
+              }
+            )
         }
 
         detail
