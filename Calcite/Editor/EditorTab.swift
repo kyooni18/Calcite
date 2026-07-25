@@ -212,13 +212,11 @@ final class EditorTab: ObservableObject, Identifiable {
       from: previousSnapshot,
       to: resultingSnapshot
     )
-    serviceDiagnostics = EditorHighlightRangeMapper.remap(
-      serviceDiagnostics,
-      editedRange: range,
-      replacementUTF16Length: replacement.utf16.count,
-      from: previousSnapshot,
-      to: resultingSnapshot
-    )
+    // Language-service diagnostics belong to an exact document snapshot. Mapping
+    // them through an edit made old parser errors look current, while a new
+    // response was still in flight. Clear them now; `pipeline.applyUTF16Edit`
+    // asks the service to analyse the new snapshot and publishes its replacement.
+    serviceDiagnostics = []
     buildDiagnostics = EditorHighlightRangeMapper.remap(
       buildDiagnostics,
       editedRange: range,
@@ -820,6 +818,16 @@ final class EditorTab: ObservableObject, Identifiable {
       errorMessage = error.localizedDescription
       return false
     }
+  }
+
+  /// A successful compiler pass is authoritative for the exact on-disk snapshot
+  /// that was just saved. Language servers (notably rust-analyzer) may publish
+  /// diagnostics without a document version, so an older asynchronous response
+  /// cannot otherwise be distinguished from a response for this snapshot.
+  func clearSupersededServiceDiagnosticsAfterSuccessfulBuild() {
+    diagnosticUpdateGeneration &+= 1
+    serviceDiagnostics = []
+    publishDiagnostics()
   }
 
   func restoreRecoveredText(_ recoveredText: String) async throws {

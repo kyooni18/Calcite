@@ -14,7 +14,7 @@ nonisolated struct EditorRecoveredDocument: Codable, Equatable, Sendable {
   var diskFingerprint: String?
   var capturedAt: Date
 
-  nonisolated(unsafe) init(
+  nonisolated init(
     relativePath: String,
     text: String,
     diskModificationTime: TimeInterval?,

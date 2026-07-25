@@ -26,6 +26,17 @@ struct TerminalStyleSpan: Equatable, Sendable {
 struct TerminalRenderedSnapshot: Equatable, Sendable {
   var text: String
   var styleSpans: [TerminalStyleSpan]
+  var cursorUTF16Location: Int
+
+  init(
+    text: String,
+    styleSpans: [TerminalStyleSpan],
+    cursorUTF16Location: Int = 0
+  ) {
+    self.text = text
+    self.styleSpans = styleSpans
+    self.cursorUTF16Location = cursorUTF16Location
+  }
 }
 
 /// Cursor-aware VT screen model used by the embedded PTY view.
@@ -190,6 +201,7 @@ private struct TerminalScreenBuffer: Sendable {
     var text = ""
     var spans: [TerminalStyleSpan] = []
     var utf16Offset = 0
+    var cursorUTF16Location: Int?
 
     for (lineIndex, line) in lines.enumerated() {
       var activeStyle: TerminalTextStyle?
@@ -206,7 +218,10 @@ private struct TerminalScreenBuffer: Sendable {
           ))
       }
 
-      for cell in line {
+      for (columnIndex, cell) in line.enumerated() {
+        if lineIndex == cursorRow, columnIndex == cursorColumn {
+          cursorUTF16Location = utf16Offset
+        }
         guard let character = cell.character else { continue }
         let value = String(character)
         let length = (value as NSString).length
@@ -221,13 +236,20 @@ private struct TerminalScreenBuffer: Sendable {
         activeLength += length
       }
       finishSpan()
+      if lineIndex == cursorRow, cursorUTF16Location == nil {
+        cursorUTF16Location = utf16Offset
+      }
 
       if lineIndex < lines.count - 1 {
         text.append("\n")
         utf16Offset += 1
       }
     }
-    return TerminalRenderedSnapshot(text: text, styleSpans: spans)
+    return TerminalRenderedSnapshot(
+      text: text,
+      styleSpans: spans,
+      cursorUTF16Location: min(cursorUTF16Location ?? utf16Offset, utf16Offset)
+    )
   }
 
   mutating func resize(columns: Int, rows: Int) {

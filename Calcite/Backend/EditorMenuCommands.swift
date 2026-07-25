@@ -3,6 +3,8 @@ import SwiftUI
 // MARK: - Commands
 
 nonisolated enum EditorCommand: Equatable, Sendable {
+  case directionalSection(MainSectionDirection)
+  case selectTab(Int)
   case save
   case saveAll
 
@@ -29,7 +31,9 @@ nonisolated enum EditorCommand: Equatable, Sendable {
   case showTerminal
   case showProblems
   case toggleSidebar
+  case toggleFastPanel
   case toggleBottomPanel
+  case toggleLayoutCustomization
   case toggleHiddenFiles
   case toggleIgnoredFiles
   case toggleBuildArtifacts
@@ -37,6 +41,10 @@ nonisolated enum EditorCommand: Equatable, Sendable {
 
   case showCommandPalette
   case showQuickOpen
+  case nextTab
+  case previousTab
+  case nextSection
+  case previousSection
   case toggleInputMode
 
   case find
@@ -227,6 +235,30 @@ struct EditorProjectCommands: Commands {
         .disabled(handler == nil)
       Button("Show Problems") { handler?.perform(.showProblems) }
         .keyboardShortcut("m", modifiers: [.command, .shift])
+        .disabled(handler == nil)
+      Divider()
+      Button("Toggle Fast Panel") { handler?.perform(.toggleFastPanel) }
+        .keyboardShortcut("j", modifiers: [.command, .shift])
+        .disabled(handler == nil)
+      Button("Toggle File Tree") { handler?.perform(.toggleSidebar) }
+        .keyboardShortcut("b", modifiers: [.command, .shift])
+        .disabled(handler == nil)
+      Button("Toggle Bottom View") { handler?.perform(.toggleBottomPanel) }
+        .disabled(handler == nil)
+      Button("Customize Layout") { handler?.perform(.toggleLayoutCustomization) }
+        .disabled(handler == nil)
+      Divider()
+      Button("Next Tab") { handler?.perform(.nextTab) }
+        .keyboardShortcut(.tab, modifiers: .control)
+        .disabled(handler == nil)
+      Button("Previous Tab") { handler?.perform(.previousTab) }
+        .keyboardShortcut(.tab, modifiers: [.control, .shift])
+        .disabled(handler == nil)
+      Button("Next Section") { handler?.perform(.nextSection) }
+        .keyboardShortcut(.rightArrow, modifiers: [.control, .option])
+        .disabled(handler == nil)
+      Button("Previous Section") { handler?.perform(.previousSection) }
+        .keyboardShortcut(.leftArrow, modifiers: [.control, .option])
         .disabled(handler == nil)
       Divider()
       Button("Toggle GUI/Vim Mode") { handler?.perform(.toggleInputMode) }

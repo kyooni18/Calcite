@@ -73,6 +73,8 @@
       private var lastSize = (columns: 100, rows: 32)
       private var appliedPreferences: EditorTerminalPreferences?
       private var appliedAppearanceRevision: UInt64?
+      private var pendingSize: (columns: Int, rows: Int)?
+      private var resizePublicationScheduled = false
 
       init(parent: TerminalTextView) { self.parent = parent }
 
@@ -110,7 +112,9 @@
         textView.backgroundColor = appearance.background
         textView.textColor = appearance.foreground
         textView.font = appearance.font
-        textView.insertionPointColor = appearance.foreground
+        textView.insertionPointColor = appearance.cursor
+        textView.terminalCursorColor = appearance.cursor
+        textView.terminalCursorStyle = appearance.cursorStyle
         textView.selectedTextAttributes = [
           .backgroundColor: appearance.selection,
           .foregroundColor: appearance.foreground,
@@ -152,7 +156,24 @@
         )
         guard lastSize != next else { return }
         lastSize = next
-        parent.resize(next.columns, next.rows)
+        scheduleResizePublication(next)
+      }
+
+      /// `updateNSView` is part of SwiftUI's render pass. Resizing the terminal can publish a
+      /// new rendered snapshot, so publish it on the next main-actor turn instead of from here.
+      private func scheduleResizePublication(_ size: (columns: Int, rows: Int)) {
+        pendingSize = size
+        guard !resizePublicationScheduled else { return }
+        resizePublicationScheduled = true
+
+        Task { @MainActor [weak self] in
+          await Task.yield()
+          guard let self else { return }
+          self.resizePublicationScheduled = false
+          guard let size = self.pendingSize else { return }
+          self.pendingSize = nil
+          self.parent.resize(size.columns, size.rows)
+        }
       }
 
       func handle(_ event: NSEvent) -> Bool {
@@ -249,6 +270,7 @@
           storage.setAttributedString(appearance.attributedString(for: snapshot))
         }
         renderedSnapshot = snapshot
+        textView.terminalCursorLocation = snapshot.cursorUTF16Location
 
         guard preserveSelection, selection.length > 0 else { return }
         let length = (snapshot.text as NSString).length
@@ -305,17 +327,157 @@
   @MainActor
   final class TerminalInputTextView: NSTextView {
     var keyHandler: ((NSEvent) -> Bool)?
+    var terminalCursorLocation = 0 {
+      didSet {
+        resetCursorBlink()
+        needsDisplay = true
+      }
+    }
+    var terminalCursorStyle: EditorCursorStyle = .line {
+      didSet { needsDisplay = true }
+    }
+    var terminalCursorColor = NSColor.textColor {
+      didSet { needsDisplay = true }
+    }
+
+    private var cursorBlinkTimer: Timer?
+    private var cursorIsVisible = true
 
     override var acceptsFirstResponder: Bool { true }
 
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      if window?.firstResponder === self {
+        resetCursorBlink()
+      } else {
+        stopCursorBlinking()
+      }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+      let result = super.becomeFirstResponder()
+      if result { resetCursorBlink() }
+      return result
+    }
+
+    override func resignFirstResponder() -> Bool {
+      let result = super.resignFirstResponder()
+      stopCursorBlinking()
+      needsDisplay = true
+      return result
+    }
+
     override func mouseDown(with event: NSEvent) {
       window?.makeFirstResponder(self)
+      resetCursorBlink()
       super.mouseDown(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
+      resetCursorBlink()
       if keyHandler?(event) == true { return }
       super.keyDown(with: event)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+      super.draw(dirtyRect)
+      drawTerminalCursor(in: dirtyRect)
+    }
+
+    private func startCursorBlinking() {
+      guard cursorBlinkTimer == nil else { return }
+      cursorBlinkTimer = Timer.scheduledTimer(withTimeInterval: 0.55, repeats: true) {
+        [weak self] _ in
+        Task { @MainActor in
+          guard let self else { return }
+          self.cursorIsVisible.toggle()
+          self.needsDisplay = true
+        }
+      }
+    }
+
+    private func stopCursorBlinking() {
+      cursorBlinkTimer?.invalidate()
+      cursorBlinkTimer = nil
+      cursorIsVisible = false
+    }
+
+    private func resetCursorBlink() {
+      cursorIsVisible = true
+      if window?.firstResponder === self { startCursorBlinking() }
+      needsDisplay = true
+    }
+
+    private func drawTerminalCursor(in dirtyRect: NSRect) {
+      guard window?.firstResponder === self, cursorIsVisible else { return }
+      guard var rect = terminalCursorRect(), rect.intersects(dirtyRect) else { return }
+
+      let characterWidth =
+        font.map {
+          max(2, ("M" as NSString).size(withAttributes: [.font: $0]).width)
+        } ?? 8
+      switch terminalCursorStyle {
+      case .line:
+        rect.size.width = 2
+      case .block:
+        rect.size.width = max(rect.width, characterWidth)
+      case .underline:
+        rect.origin.y = rect.maxY - 2
+        rect.size.height = 2
+        rect.size.width = max(rect.width, characterWidth)
+      }
+
+      terminalCursorColor.setFill()
+      NSBezierPath(rect: rect).fill()
+    }
+
+    private func terminalCursorRect() -> NSRect? {
+      let length = (string as NSString).length
+      let location = min(max(0, terminalCursorLocation), length)
+      guard let layoutManager, let textContainer else { return nil }
+      layoutManager.ensureLayout(for: textContainer)
+
+      // `firstRect(forCharacterRange:)` is a screen-coordinate API intended for
+      // input methods. Converting its zero-length result back into this text view
+      // can resolve to the first line, especially at the end of a line. Keep the
+      // cursor entirely in the layout manager's local coordinate system instead.
+      if location == length, string.hasSuffix("\n") {
+        let rect = layoutManager.extraLineFragmentRect
+        guard !rect.isEmpty else { return nil }
+        return NSRect(
+          x: textContainerOrigin.x + rect.minX,
+          y: textContainerOrigin.y + rect.minY,
+          width: 2,
+          height: rect.height
+        )
+      }
+
+      let characterLocation = location == length ? max(0, length - 1) : location
+      guard length > 0 else {
+        let lineHeight = font.map { layoutManager.defaultLineHeight(for: $0) } ?? 14
+        return NSRect(
+          x: textContainerOrigin.x,
+          y: textContainerOrigin.y,
+          width: 2,
+          height: lineHeight
+        )
+      }
+
+      let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterLocation)
+      let glyphRange = NSRange(location: glyphIndex, length: 1)
+      let glyphRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+      let lineRect = layoutManager.lineFragmentRect(
+        forGlyphAt: glyphIndex,
+        effectiveRange: nil,
+        withoutAdditionalLayout: true
+      )
+      let x = location == length ? glyphRect.maxX : glyphRect.minX
+      return NSRect(
+        x: textContainerOrigin.x + x,
+        y: textContainerOrigin.y + lineRect.minY,
+        width: 2,
+        height: max(1, lineRect.height)
+      )
     }
   }
 #endif

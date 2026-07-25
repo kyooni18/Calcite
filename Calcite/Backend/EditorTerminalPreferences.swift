@@ -44,6 +44,8 @@
     var foreground: EditorTerminalColor
     var background: EditorTerminalColor
     var selection: EditorTerminalColor
+    var cursor: EditorTerminalColor
+    var cursorStyle: EditorCursorStyle
     var backgroundOpacity: Double
     var horizontalPadding: Double
     var verticalPadding: Double
@@ -52,6 +54,79 @@
     var brightensBoldText: Bool
     var ansiColors: [EditorTerminalColor]
 
+    init(
+      source: EditorTerminalAppearanceSource,
+      fontName: String,
+      fontSize: Double,
+      foreground: EditorTerminalColor,
+      background: EditorTerminalColor,
+      selection: EditorTerminalColor,
+      cursor: EditorTerminalColor? = nil,
+      cursorStyle: EditorCursorStyle = .line,
+      backgroundOpacity: Double,
+      horizontalPadding: Double,
+      verticalPadding: Double,
+      lineSpacing: Double,
+      enablesLigatures: Bool,
+      brightensBoldText: Bool,
+      ansiColors: [EditorTerminalColor]
+    ) {
+      self.source = source
+      self.fontName = fontName
+      self.fontSize = fontSize
+      self.foreground = foreground
+      self.background = background
+      self.selection = selection
+      self.cursor = cursor ?? foreground
+      self.cursorStyle = cursorStyle
+      self.backgroundOpacity = backgroundOpacity
+      self.horizontalPadding = horizontalPadding
+      self.verticalPadding = verticalPadding
+      self.lineSpacing = lineSpacing
+      self.enablesLigatures = enablesLigatures
+      self.brightensBoldText = brightensBoldText
+      self.ansiColors = ansiColors
+    }
+
+    private enum CodingKeys: String, CodingKey {
+      case source
+      case fontName
+      case fontSize
+      case foreground
+      case background
+      case selection
+      case cursor
+      case cursorStyle
+      case backgroundOpacity
+      case horizontalPadding
+      case verticalPadding
+      case lineSpacing
+      case enablesLigatures
+      case brightensBoldText
+      case ansiColors
+    }
+
+    init(from decoder: Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      source = try container.decode(EditorTerminalAppearanceSource.self, forKey: .source)
+      fontName = try container.decode(String.self, forKey: .fontName)
+      fontSize = try container.decode(Double.self, forKey: .fontSize)
+      foreground = try container.decode(EditorTerminalColor.self, forKey: .foreground)
+      background = try container.decode(EditorTerminalColor.self, forKey: .background)
+      selection = try container.decode(EditorTerminalColor.self, forKey: .selection)
+      cursor =
+        try container.decodeIfPresent(EditorTerminalColor.self, forKey: .cursor) ?? foreground
+      cursorStyle =
+        try container.decodeIfPresent(EditorCursorStyle.self, forKey: .cursorStyle) ?? .line
+      backgroundOpacity = try container.decode(Double.self, forKey: .backgroundOpacity)
+      horizontalPadding = try container.decode(Double.self, forKey: .horizontalPadding)
+      verticalPadding = try container.decode(Double.self, forKey: .verticalPadding)
+      lineSpacing = try container.decode(Double.self, forKey: .lineSpacing)
+      enablesLigatures = try container.decode(Bool.self, forKey: .enablesLigatures)
+      brightensBoldText = try container.decode(Bool.self, forKey: .brightensBoldText)
+      ansiColors = try container.decode([EditorTerminalColor].self, forKey: .ansiColors)
+    }
+
     static let `default` = Self(
       source: .macOSTerminal,
       fontName: "Menlo-Regular",
@@ -59,6 +134,8 @@
       foreground: .init(red: 0.88, green: 0.88, blue: 0.88),
       background: .init(red: 0.08, green: 0.08, blue: 0.09),
       selection: .init(red: 0.25, green: 0.45, blue: 0.78, alpha: 0.55),
+      cursor: .init(red: 0.42, green: 0.66, blue: 1),
+      cursorStyle: .line,
       backgroundOpacity: 1,
       horizontalPadding: 10,
       verticalPadding: 7,
@@ -76,6 +153,7 @@
       value.foreground = foreground.normalized()
       value.background = background.normalized()
       value.selection = selection.normalized()
+      value.cursor = cursor.normalized()
       value.backgroundOpacity = backgroundOpacity.clamped(to: 0.2...1)
       value.horizontalPadding = horizontalPadding.clamped(to: 0...40)
       value.verticalPadding = verticalPadding.clamped(to: 0...40)

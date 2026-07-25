@@ -7,6 +7,8 @@
     var foreground: NSColor
     var background: NSColor
     var selection: NSColor
+    var cursor: NSColor
+    var cursorStyle: EditorCursorStyle
     var ansiColors: [NSColor]
     var horizontalPadding: CGFloat
     var verticalPadding: CGFloat
@@ -16,7 +18,9 @@
 
     static func resolve(_ preferences: EditorTerminalPreferences) -> Self {
       let normalized = preferences.normalized()
-      if normalized.source == .macOSTerminal, let profile = terminalProfile() {
+      if normalized.source == .macOSTerminal, var profile = terminalProfile() {
+        profile.cursor = NSColor(normalized.cursor)
+        profile.cursorStyle = normalized.cursorStyle
         return profile
       }
       return custom(normalized)
@@ -31,6 +35,8 @@
         foreground: profile.foreground.terminalColor,
         background: profile.background.withAlphaComponent(1).terminalColor,
         selection: profile.selection.terminalColor,
+        cursor: profile.cursor.terminalColor,
+        cursorStyle: profile.cursorStyle,
         backgroundOpacity: profile.background.alphaComponent,
         horizontalPadding: profile.horizontalPadding,
         verticalPadding: profile.verticalPadding,
@@ -154,6 +160,8 @@
         foreground: NSColor(preferences.foreground),
         background: background,
         selection: NSColor(preferences.selection),
+        cursor: NSColor(preferences.cursor),
+        cursorStyle: preferences.cursorStyle,
         ansiColors: preferences.ansiColors.map(NSColor.init),
         horizontalPadding: preferences.horizontalPadding,
         verticalPadding: preferences.verticalPadding,
@@ -181,6 +189,9 @@
       let selection =
         decode(NSColor.self, value: settings["SelectionColor"])
         ?? fallback.selection
+      let cursor =
+        decode(NSColor.self, value: settings["CursorColor"])
+        ?? fallback.cursor
 
       return Self(
         font: decode(NSFont.self, value: settings["Font"]) ?? fallback.font,
@@ -189,6 +200,8 @@
           opacity.map { CGFloat(min(max($0, 0), 1)) } ?? background.alphaComponent
         ),
         selection: selection,
+        cursor: cursor,
+        cursorStyle: fallback.cursorStyle,
         ansiColors: palette,
         horizontalPadding: fallback.horizontalPadding,
         verticalPadding: fallback.verticalPadding,

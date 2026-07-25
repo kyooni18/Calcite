@@ -3,15 +3,30 @@ import EditorServices
 import Foundation
 
 @MainActor
+protocol EditorCommandExecutorDelegate: AnyObject {
+  var commandSelectedDocumentID: UUID? { get }
+  var commandSelectedSectionKind: MainSectionKind? { get }
+
+  func commandSelectDocument(_ id: UUID)
+  func commandPresentSection(_ kind: MainSectionKind)
+  func commandToggleSidebar()
+  func commandToggleFastPanel()
+  func commandToggleBottomPanel()
+  func commandToggleLayoutCustomization()
+  func commandNavigateTab(forward: Bool)
+  func commandSelectTab(number: Int)
+  func commandNavigateSection(forward: Bool)
+  func commandNavigateSection(direction: MainSectionDirection)
+}
+
+/// Executes commands against the project backend while delegating window presentation to the
+/// active `CalciteBackendWindowSession`.
+@MainActor
 final class EditorCommandExecutor: ObservableObject {
-  @Published var bottomPanel: EditorBottomPanel?
-  @Published var showsSidebar: Bool
-  @Published private(set) var tabCommandEvent: EditorTabCommandEvent?
-  @Published private(set) var layoutCommandEvent: EditorLayoutCommandEvent?
+  weak var delegate: EditorCommandExecutorDelegate?
 
   let controller: EditorWorkspaceController
   let terminal: EditorTerminalSession
-  let workspaceTabs: WorkspaceTabController
   let palette: CommandPaletteState
   let fileVisibility: FileVisibilitySettings
   let themeBuilderSession: ThemeBuilderSession
@@ -21,36 +36,29 @@ final class EditorCommandExecutor: ObservableObject {
   init(
     controller: EditorWorkspaceController,
     terminal: EditorTerminalSession,
-    workspaceTabs: WorkspaceTabController,
     palette: CommandPaletteState,
     fileVisibility: FileVisibilitySettings,
     themeBuilderSession: ThemeBuilderSession,
-    initialBottomPanel: EditorBottomPanel?,
-    initialSidebarVisibility: Bool,
     onOpenItem: @escaping () -> Void
   ) {
     self.controller = controller
     self.terminal = terminal
-    self.workspaceTabs = workspaceTabs
     self.palette = palette
     self.fileVisibility = fileVisibility
     self.themeBuilderSession = themeBuilderSession
-    bottomPanel = initialBottomPanel
-    showsSidebar = initialSidebarVisibility
     self.onOpenItem = onOpenItem
   }
 
   func perform(_ command: EditorCommand) {
     switch command {
     case .save:
-      switch workspaceTabs.selection {
-      case .document:
-        controller.saveActiveDocument()
-      case .themeBuilder:
+      if delegate?.commandSelectedSectionKind == .themeBuilder {
         themeBuilderSession.save()
-      case .settings, nil:
-        break
+      } else {
+        selectActiveDocument()
+        controller.saveActiveDocument()
       }
+
     case .saveAll:
       Task { _ = await controller.saveAllDocuments() }
 
@@ -69,7 +77,7 @@ final class EditorCommandExecutor: ObservableObject {
 
     case .startDebug:
       selectActiveDocument()
-      showPanel(.debug)
+      delegate?.commandPresentSection(.debug)
       controller.startDebugging()
     case .stopDebug:
       controller.stopDebugging()
@@ -85,31 +93,32 @@ final class EditorCommandExecutor: ObservableObject {
       controller.stepOut()
     case .toggleBreakpoint:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.toggleBreakpointAtCurrentLine()
 
     case .openSettings:
-      workspaceTabs.openSettings()
+      delegate?.commandPresentSection(.settings)
     case .openThemeBuilder:
-      workspaceTabs.openThemeBuilder()
       themeBuilderSession.beginEditing()
+      delegate?.commandPresentSection(.themeBuilder)
     case .openFileOrFolder:
       onOpenItem()
 
     case .showTerminal:
       selectActiveDocument()
-      showPanel(.terminal)
+      delegate?.commandPresentSection(.terminal)
       terminal.startIfNeeded()
     case .showProblems:
       selectActiveDocument()
-      showPanel(.problems)
+      delegate?.commandPresentSection(.problems)
     case .toggleSidebar:
-      showsSidebar.toggle()
+      delegate?.commandToggleSidebar()
+    case .toggleFastPanel:
+      delegate?.commandToggleFastPanel()
     case .toggleBottomPanel:
-      if bottomPanel == nil {
-        perform(.showTerminal)
-      } else {
-        bottomPanel = nil
-      }
+      delegate?.commandToggleBottomPanel()
+    case .toggleLayoutCustomization:
+      delegate?.commandToggleLayoutCustomization()
     case .toggleHiddenFiles:
       fileVisibility.showsHiddenFiles.toggle()
     case .toggleIgnoredFiles:
@@ -123,43 +132,56 @@ final class EditorCommandExecutor: ObservableObject {
       palette.present(mode: .commands)
     case .showQuickOpen:
       palette.present(mode: .files)
+    case .nextTab:
+      delegate?.commandNavigateTab(forward: true)
+    case .previousTab:
+      delegate?.commandNavigateTab(forward: false)
+    case .selectTab(let number):
+      delegate?.commandSelectTab(number: number)
+    case .nextSection:
+      delegate?.commandNavigateSection(forward: true)
+    case .previousSection:
+      delegate?.commandNavigateSection(forward: false)
+    case .directionalSection(let direction):
+      delegate?.commandNavigateSection(direction: direction)
     case .toggleInputMode:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.toggleEditorInputMode()
 
-    case .find:
-      sendTabCommand(.find)
-    case .replace:
-      sendTabCommand(.replace)
+    case .find, .replace, .zoomIn, .zoomOut, .resetZoom:
+      // These editor-instance commands are published by `CalciteBackendWindowSession` before the
+      // shared controller command is executed.
+      selectActiveDocument()
+
     case .format:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.activeTab?.format(
         tabWidth: controller.profile.behavior.tabWidth,
         insertSpaces: controller.profile.behavior.insertSpaces
       )
     case .requestCompletion:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.activeTab?.requestCompletionsExplicitly()
-    case .zoomIn:
-      sendTabCommand(.zoomIn)
-    case .zoomOut:
-      sendTabCommand(.zoomOut)
-    case .resetZoom:
-      sendTabCommand(.resetZoom)
 
     case .goToDefinition:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.goToDefinition()
     case .findReferences:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.findReferences()
     case .showQuickHelp:
       guard hasSelectedDocument else { return }
+      selectActiveDocument()
       controller.showQuickHelp()
 
     case .restartTerminal:
       selectActiveDocument()
-      showPanel(.terminal)
+      delegate?.commandPresentSection(.terminal)
       terminal.restart()
     case .clearTerminal:
       terminal.clear()
@@ -168,15 +190,10 @@ final class EditorCommandExecutor: ObservableObject {
     case .runTerminalCommand(let command):
       guard !command.isEmpty else { return }
       selectActiveDocument()
-      showPanel(.terminal)
+      delegate?.commandPresentSection(.terminal)
       terminal.startIfNeeded()
       terminal.send(command + "\r")
     }
-  }
-
-  func sendLayoutCommand(_ command: EditorLayoutCommand) {
-    guard hasSelectedDocument else { return }
-    layoutCommandEvent = EditorLayoutCommandEvent(command: command)
   }
 
   func openDocument(_ url: URL) {
@@ -194,41 +211,26 @@ final class EditorCommandExecutor: ObservableObject {
         $0.url.standardizedFileURL == standardizedURL
       })
     else { return nil }
-    workspaceTabs.selectDocument(tab.id)
+    delegate?.commandSelectDocument(tab.id)
     return tab
-  }
-
-  func showPanel(_ panel: EditorBottomPanel, toggle: Bool = false) {
-    if toggle, bottomPanel == panel {
-      bottomPanel = nil
-    } else {
-      bottomPanel = panel
-    }
   }
 
   private func runBuildTask(_ kind: EditorBuildTaskKind) {
     selectActiveDocument()
-    showPanel(.build)
+    delegate?.commandPresentSection(.buildOutput)
     controller.runBuildTask(kind)
   }
 
-  private func sendTabCommand(_ command: EditorTabCommand) {
-    guard case .document(let tabID) = workspaceTabs.selection,
-      controller.tabs.contains(where: { $0.id == tabID })
-    else { return }
-    if controller.selectedTabID != tabID {
-      controller.selectedTabID = tabID
-    }
-    tabCommandEvent = EditorTabCommandEvent(targetTabID: tabID, command: command)
-  }
-
   private var hasSelectedDocument: Bool {
-    guard case .document(let tabID) = workspaceTabs.selection else { return false }
-    return controller.activeTab?.id == tabID
+    guard let selectedID = delegate?.commandSelectedDocumentID else { return false }
+    return controller.tabs.contains(where: { $0.id == selectedID })
   }
 
   private func selectActiveDocument() {
-    guard let tabID = controller.selectedTabID else { return }
-    workspaceTabs.selectDocument(tabID)
+    guard let selectedID = delegate?.commandSelectedDocumentID else { return }
+    delegate?.commandSelectDocument(selectedID)
+    if controller.selectedTabID != selectedID {
+      controller.selectedTabID = selectedID
+    }
   }
 }

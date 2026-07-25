@@ -170,7 +170,7 @@ final class NowPlayingController: ObservableObject {
     else {
       return decodeArtworkPayload(from: run(script))
     }
-    return descriptor.data ?? decodeArtworkPayload(from: run(script))
+    return descriptor.data
   }
 
   nonisolated private static func decodeArtworkPayload(from value: String?) -> Data? {

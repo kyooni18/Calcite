@@ -92,6 +92,15 @@
         }
         .disabled(usesSystemProfile)
 
+        ColorPicker("Cursor", selection: colorBinding(\.cursor), supportsOpacity: true)
+
+        Picker("Cursor Shape", selection: valueBinding(\.cursorStyle)) {
+          ForEach(EditorCursorStyle.allCases) { style in
+            Text(style.title).tag(style)
+          }
+        }
+        .pickerStyle(.segmented)
+
         HStack {
           Text("Opacity")
           Slider(value: valueBinding(\.backgroundOpacity), in: 0.2...1, step: 0.01)

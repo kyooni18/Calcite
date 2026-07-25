@@ -19,8 +19,3 @@ nonisolated enum EditorLayoutCommand: Equatable, Sendable {
   case splitBelow
   case closeSplit
 }
-
-nonisolated struct EditorLayoutCommandEvent: Equatable, Sendable {
-  let id = UUID()
-  let command: EditorLayoutCommand
-}

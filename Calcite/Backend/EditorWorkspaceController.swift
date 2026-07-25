@@ -557,9 +557,13 @@ final class EditorWorkspaceController: ObservableObject {
       self.isPreparingBuildTask = false
       switch target {
       case .project(let command):
-        _ = await self.buildController.run(command)
+        if await self.buildController.run(command) {
+          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+        }
       case .standalone(let fileURL, _):
-        _ = await self.buildController.runSingleFile(fileURL, kind: kind)
+        if await self.buildController.runSingleFile(fileURL, kind: kind) {
+          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+        }
       }
     }
   }
@@ -576,13 +580,19 @@ final class EditorWorkspaceController: ObservableObject {
       guard await self.saveAllDocuments(), !Task.isCancelled else { return }
       self.isPreparingBuildTask = false
       if let selected = self.buildController.selectedCommand {
-        _ = await self.buildController.run(selected)
+        if await self.buildController.run(selected) {
+          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+        }
       } else if let target = self.resolvedBuildTask(.run) {
         switch target {
         case .project(let command):
-          _ = await self.buildController.run(command)
+          if await self.buildController.run(command) {
+            self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+          }
         case .standalone(let fileURL, _):
-          _ = await self.buildController.runSingleFile(fileURL, kind: .run)
+          if await self.buildController.runSingleFile(fileURL, kind: .run) {
+            self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+          }
         }
       }
     }
@@ -774,6 +784,18 @@ final class EditorWorkspaceController: ObservableObject {
       onVimCommand?(.find)
     case .custom(let command) where command.lowercased() == "replace":
       onVimCommand?(.replace)
+    case .custom(let command) where command.lowercased().hasPrefix("tab-"):
+      if let number = Int(command.dropFirst(4)) {
+        onVimCommand?(.selectTab(number))
+      }
+    case .custom(let command) where command.lowercased() == "section-left":
+      onVimCommand?(.directionalSection(.left))
+    case .custom(let command) where command.lowercased() == "section-right":
+      onVimCommand?(.directionalSection(.right))
+    case .custom(let command) where command.lowercased() == "section-up":
+      onVimCommand?(.directionalSection(.up))
+    case .custom(let command) where command.lowercased() == "section-down":
+      onVimCommand?(.directionalSection(.down))
     case .nextTab:
       selectAdjacentTab(delta: 1)
     case .previousTab:
@@ -856,6 +878,22 @@ final class EditorWorkspaceController: ObservableObject {
 
   private func runCodeActionFromVim() {
     guard let tab = activeTab else { return }
+    presentCodeActions(for: tab)
+  }
+
+  /// Shows language-server fixes for a diagnostic at its exact source range.
+  /// This is shared by the Problems list and the inline diagnostic popup.
+  func showQuickFixes(for diagnostic: Diagnostic, in tab: EditorTab) {
+    let snapshot = TextSnapshot(text: tab.text)
+    guard let range = try? snapshot.nsRange(for: diagnostic.range) else {
+      fileOperationError = "Could not locate this diagnostic in the current document."
+      return
+    }
+    tab.updateSelection(range)
+    presentCodeActions(for: tab)
+  }
+
+  private func presentCodeActions(for tab: EditorTab) {
     Task { [weak self] in
       guard let self else { return }
       do {
@@ -1223,6 +1261,7 @@ final class EditorWorkspaceController: ObservableObject {
         appendDebugMessage("Debug launch cancelled because the build failed.")
         return
       }
+      clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
     }
 
     let resolver = EditorDebugProgramResolver(workspaceURL: workspaceURL)
@@ -1596,6 +1635,12 @@ final class EditorWorkspaceController: ObservableObject {
     let grouped = Dictionary(grouping: values) { $0.url.standardizedFileURL }
     for tab in tabs {
       tab.setBuildDiagnostics(grouped[tab.url.standardizedFileURL] ?? [])
+    }
+  }
+
+  private func clearSupersededServiceDiagnosticsAfterSuccessfulBuild() {
+    for tab in tabs {
+      tab.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
     }
   }
 

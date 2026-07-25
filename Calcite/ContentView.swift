@@ -29,10 +29,11 @@ struct ContentView: View {
   var body: some View {
     Group {
       if let workspaceURL {
-        MainView(
+        CalciteWorkspaceHostView(
           workspaceURL: workspaceURL,
           initialFileURL: initialFileURL,
           documentOpenRequestID: documentOpenRequestID,
+          recentItems: recents,
           onOpenItem: presentItemPicker,
           onControllerReady: { controller in activeController = controller }
         )

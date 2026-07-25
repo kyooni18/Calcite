@@ -11,10 +11,20 @@
 		D8AA117A301147A900359160 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D8AA1179301147A900359160 /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		D8C0A00A310000000000000A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D859418F300F16C60041AC44 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D8594196300F16C60041AC44;
+			remoteInfo = Calcite;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		D8594197300F16C60041AC44 /* Calcite.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Calcite.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		D8C0A0013100000000000001 /* CalciteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CalciteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D8AA1179301147A900359160 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		D8C0A0013100000000000001 /* CalciteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CalciteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -39,10 +49,8 @@
 		};
 		D8C0A0053100000000000005 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
@@ -162,10 +170,8 @@
 		};
 		D8C0A0063100000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
@@ -177,22 +183,10 @@
 		};
 		D8C0A0043100000000000004 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXContainerItemProxy section */
-		D8C0A00A310000000000000A /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = D859418F300F16C60041AC44 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = D8594196300F16C60041AC44;
-			remoteInfo = Calcite;
-		};
-/* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
 		D8C0A00B310000000000000B /* PBXTargetDependency */ = {
@@ -474,7 +468,6 @@
 				D8C0A0083100000000000008 /* Debug configuration for PBXNativeTarget "CalciteTests" */,
 				D8C0A0093100000000000009 /* Release configuration for PBXNativeTarget "CalciteTests" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */

@@ -218,7 +218,6 @@ struct FilesListView: View {
   @ObservedObject private var visibility: FileVisibilitySettings
 
   let onOpen: (URL) -> Void
-  let onOpenToSide: (URL) -> Void
   let onCreateFile: (URL, String) async -> Bool
   let onCreateDirectory: (URL, String) async -> Bool
   let onRename: (URL, String) async -> Bool
@@ -232,7 +231,6 @@ struct FilesListView: View {
     visibility: FileVisibilitySettings,
     selectedURL: Binding<URL?>,
     onOpen: @escaping (URL) -> Void,
-    onOpenToSide: @escaping (URL) -> Void,
     onCreateFile: @escaping (URL, String) async -> Bool,
     onCreateDirectory: @escaping (URL, String) async -> Bool,
     onRename: @escaping (URL, String) async -> Bool,
@@ -245,7 +243,6 @@ struct FilesListView: View {
     _visibility = ObservedObject(wrappedValue: visibility)
     _selectedURL = selectedURL
     self.onOpen = onOpen
-    self.onOpenToSide = onOpenToSide
     self.onCreateFile = onCreateFile
     self.onCreateDirectory = onCreateDirectory
     self.onRename = onRename
@@ -408,7 +405,6 @@ struct FilesListView: View {
   private func contextMenu(for node: ProjectFileNode) -> some View {
     if !node.isDirectory {
       Button("Open", systemImage: "doc.text") { open(node) }
-      Button("Open to Side", systemImage: "rectangle.split.2x1") { onOpenToSide(node.url) }
       Button("Duplicate", systemImage: "plus.square.on.square") {
         Task {
           if await onDuplicate(node.url) { model.reload() }

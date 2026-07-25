@@ -19,6 +19,44 @@ struct InlineDiagnosticMessage: Equatable {
 }
 
 @MainActor
+private final class EditorInsertionCaretView: NSView {
+  var color = NSColor.textInsertionPointColor {
+    didSet { needsDisplay = true }
+  }
+  private var blinkTimer: Timer?
+
+  override func draw(_ dirtyRect: NSRect) {
+    color.setFill()
+    NSBezierPath(rect: bounds).fill()
+  }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+  func showImmediately() {
+    blinkTimer?.invalidate()
+    alphaValue = 1
+    isHidden = false
+    needsDisplay = true
+
+    let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, !self.isHidden else { return }
+        self.alphaValue = self.alphaValue == 0 ? 1 : 0
+      }
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    blinkTimer = timer
+  }
+
+  func hide() {
+    blinkTimer?.invalidate()
+    blinkTimer = nil
+    alphaValue = 1
+    isHidden = true
+  }
+}
+
+@MainActor
 final class CodeEditorTextView: NSTextView {
   var languageID = ""
   var keyEventHandler: ((NSEvent, NSTextView) -> Bool)?
@@ -43,6 +81,31 @@ final class CodeEditorTextView: NSTextView {
   var diagnosticMessageTextColor = NSColor.labelColor {
     didSet { needsDisplay = true }
   }
+  var editorCursorStyle: EditorCursorStyle = .line {
+    didSet {
+      guard oldValue != editorCursorStyle else { return }
+      refreshCustomInsertionPoint()
+      window?.invalidateCursorRects(for: self)
+    }
+  }
+  /// A mode-specific override supplied by the Vim input controller. Keeping it
+  /// separate from the profile style means switching back to GUI editing restores
+  /// the user's configured cursor without rewriting the profile.
+  var vimCursorStyle: EditorCursorStyle? {
+    didSet {
+      guard oldValue != vimCursorStyle else { return }
+      refreshCustomInsertionPoint()
+      window?.invalidateCursorRects(for: self)
+    }
+  }
+  var editorCursorColor = NSColor.labelColor {
+    didSet {
+      guard !oldValue.isEqual(editorCursorColor) else { return }
+      refreshCustomInsertionPoint()
+      window?.invalidateCursorRects(for: self)
+    }
+  }
+  private let customCursorView = EditorInsertionCaretView(frame: .zero)
   private enum InlineDiagnosticHitAction {
     case toggle(lineLocation: Int)
     case copy(message: String)
@@ -76,12 +139,89 @@ final class CodeEditorTextView: NSTextView {
   }
   private var codeBlockCopyButtons: [(rect: NSRect, code: String)] = []
 
-  private static let navigationMenuTags = Set([91_001, 91_002, 91_003, 91_004, 91_005, 91_006])
   private var isHandlingForceClick = false
 
   override func didChangeText() {
     super.didChangeText()
+    refreshCustomInsertionPoint()
     contentDidChangeHandler?(self)
+  }
+
+  override var shouldDrawInsertionPoint: Bool { false }
+
+  override func becomeFirstResponder() -> Bool {
+    let result = super.becomeFirstResponder()
+    if result { refreshCustomInsertionPoint() }
+    return result
+  }
+
+  override func resignFirstResponder() -> Bool {
+    let result = super.resignFirstResponder()
+    customCursorView.hide()
+    return result
+  }
+
+  func refreshCustomInsertionPoint() {
+    guard window?.firstResponder === self, selectedRange().length == 0,
+      let cursorRect = customInsertionPointRect()
+    else {
+      customCursorView.hide()
+      return
+    }
+    if customCursorView.superview !== self {
+      customCursorView.hide()
+      addSubview(customCursorView)
+    }
+    customCursorView.color = editorCursorColor
+    customCursorView.frame = cursorRect
+    customCursorView.showImmediately()
+  }
+
+  private func customInsertionPointRect() -> NSRect? {
+    guard let layoutManager, let textContainer else { return nil }
+
+    let sourceLength = (string as NSString).length
+    let location = min(max(selectedRange().location, 0), sourceLength)
+    let layoutLocation = min(location, max(0, sourceLength - 1))
+    layoutManager.ensureLayout(
+      forCharacterRange: NSRange(
+        location: layoutLocation,
+        length: sourceLength == 0 ? 0 : 1
+      )
+    )
+    let layoutRect: NSRect
+    if sourceLength == 0 || location == sourceLength {
+      layoutRect = layoutManager.extraLineFragmentRect
+    } else {
+      let glyph = layoutManager.glyphIndexForCharacter(at: location)
+      layoutRect = layoutManager.boundingRect(
+        forGlyphRange: NSRange(location: glyph, length: 1),
+        in: textContainer
+      )
+    }
+
+    let lineHeight = max(layoutRect.height, font?.boundingRectForFont.height ?? 14)
+    var cursorRect = NSRect(
+      x: layoutRect.minX + textContainerOrigin.x,
+      y: layoutRect.minY + textContainerOrigin.y,
+      width: max(1, layoutRect.width),
+      height: lineHeight
+    )
+    switch vimCursorStyle ?? editorCursorStyle {
+    case .line:
+      cursorRect.size.width = max(1.5, min(2, lineHeight * 0.12))
+    case .block:
+      let characterWidth = max(2, font?.maximumAdvancement.width ?? cursorRect.width)
+      // A Vim block occupies exactly one editor cell. The glyph bounding rect
+      // can span a tab, ligature, or fallback run and must not widen the cursor.
+      cursorRect.size.width = characterWidth
+    case .underline:
+      cursorRect.origin.y = cursorRect.maxY - 2
+      cursorRect.size.height = 2
+      let characterWidth = max(2, font?.maximumAdvancement.width ?? cursorRect.width)
+      cursorRect.size.width = characterWidth
+    }
+    return cursorRect
   }
 
   override func drawBackground(in rect: NSRect) {
@@ -494,6 +634,9 @@ final class CodeEditorTextView: NSTextView {
     }
     if keyEventHandler?(event, self) == true { return }
     super.keyDown(with: event)
+    // Selection notifications can arrive while TextKit is still processing the
+    // key event. Refresh once more from the final selection and layout state.
+    refreshCustomInsertionPoint()
   }
 
   override func mouseDown(with event: NSEvent) {
@@ -531,6 +674,13 @@ final class CodeEditorTextView: NSTextView {
       return
     }
     super.mouseDown(with: event)
+    // NSTextView updates its selection during super.
+    refreshCustomInsertionPoint()
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    super.mouseDragged(with: event)
+    refreshCustomInsertionPoint()
   }
 
   override func pressureChange(with event: NSEvent) {
@@ -657,10 +807,15 @@ final class CodeEditorTextView: NSTextView {
 
   override func menu(for event: NSEvent) -> NSMenu? {
     selectSymbol(at: event, preservingExistingSelection: true)
-    let menu = super.menu(for: event) ?? NSMenu(title: "Editor")
-    for item in menu.items where Self.navigationMenuTags.contains(item.tag) {
-      menu.removeItem(item)
-    }
+    // NSTextView's default-menu lookup synchronously waits on an AppKit default-QoS
+    // worker when this method is entered from the interactive event thread. Keep the
+    // standard edit commands on the responder chain without that blocking lookup.
+    let menu = NSMenu(title: "Editor")
+    menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "")
+    menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
+    menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "")
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "")
 
     let separator = NSMenuItem.separator()
     separator.tag = 91_004
@@ -946,7 +1101,9 @@ struct EditorTextStyler {
     textView.drawsBackground = true
     textView.backgroundColor = background
     textView.textColor = profile.surface.foreground.nsColor
-    textView.insertionPointColor = profile.surface.cursor.nsColor
+    // Suppress NSTextView's native insertion caret. CodeEditorTextView draws
+    // the configured cursor independently, including Vim-mode overrides.
+    textView.insertionPointColor = .clear
     textView.selectedTextAttributes = [
       .backgroundColor: profile.surface.selection.nsColor,
       .foregroundColor: profile.surface.foreground.nsColor,
@@ -975,6 +1132,8 @@ struct EditorTextStyler {
     let snapshot = TextSnapshot(text: textView.string)
     let isLargeDocument = storage.length > editorRichPresentationUTF16Limit
     if let codeTextView = textView as? CodeEditorTextView {
+      codeTextView.editorCursorStyle = profile.surface.cursorStyle
+      codeTextView.editorCursorColor = profile.surface.cursor.nsColor
       codeTextView.errorLineRanges = errorLineRanges(
         in: textView.string,
         diagnostics: diagnostics,

@@ -13,7 +13,15 @@
           "value" : "hard-light"
         }
       ],
-      "blur-material" : 0.03,
+      "blur-material-specializations" : [
+        {
+          "value" : 0.03
+        },
+        {
+          "appearance" : "dark",
+          "value" : 0
+        }
+      ],
       "layers" : [
         {
           "image-name" : "CalciteAppIcon.png",
@@ -27,6 +35,13 @@
           }
         }
       ],
+      "position" : {
+        "scale" : 0.81,
+        "translation-in-points" : [
+          0,
+          0
+        ]
+      },
       "refractivity" : {
         "depth" : 0.556015625,
         "enabled" : true,
@@ -54,13 +69,27 @@
           }
         }
       ],
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.49
-      }
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.49
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.55
+          }
+        }
+      ]
     },
     {
       "blend-mode-specializations" : [
+        {
+          "value" : "darken"
+        },
         {
           "appearance" : "dark",
           "value" : "hard-light"
@@ -95,6 +124,13 @@
           "value" : 0
         }
       ],
+      "position" : {
+        "scale" : 1,
+        "translation-in-points" : [
+          0,
+          0
+        ]
+      },
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.68

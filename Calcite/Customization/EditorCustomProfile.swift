@@ -29,12 +29,96 @@ struct EditorFontProfile: Codable, Equatable, Sendable {
   var lineSpacing: Double
 }
 
+enum EditorCursorStyle: String, CaseIterable, Codable, Identifiable, Sendable {
+  case line
+  case block
+  case underline
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .line: "Line"
+    case .block: "Block"
+    case .underline: "Underline"
+    }
+  }
+}
+
+/// Vim modes can inherit the editor-wide cursor shape or opt into an explicit
+/// shape for that mode.
+enum EditorVimCursorStyle: String, CaseIterable, Codable, Identifiable, Sendable {
+  case `default`
+  case line
+  case block
+  case underline
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .default: "Default"
+    case .line: "Line"
+    case .block: "Block"
+    case .underline: "Underline"
+    }
+  }
+
+  /// `nil` deliberately leaves the editor-wide cursor untouched; non-nil values
+  /// are the Vim-only override.
+  var overrideStyle: EditorCursorStyle? {
+    switch self {
+    case .default: nil
+    case .line: .line
+    case .block: .block
+    case .underline: .underline
+    }
+  }
+}
+
 struct EditorSurfaceProfile: Codable, Equatable, Sendable {
   var foreground: EditorRGBAColor
   var background: EditorRGBAColor
   var backgroundOpacity: Double
   var cursor: EditorRGBAColor
+  var cursorStyle: EditorCursorStyle
   var selection: EditorRGBAColor
+
+  init(
+    foreground: EditorRGBAColor,
+    background: EditorRGBAColor,
+    backgroundOpacity: Double,
+    cursor: EditorRGBAColor,
+    cursorStyle: EditorCursorStyle = .line,
+    selection: EditorRGBAColor
+  ) {
+    self.foreground = foreground
+    self.background = background
+    self.backgroundOpacity = backgroundOpacity
+    self.cursor = cursor
+    self.cursorStyle = cursorStyle
+    self.selection = selection
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case foreground
+    case background
+    case backgroundOpacity
+    case cursor
+    case cursorStyle
+    case selection
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    foreground = try container.decode(EditorRGBAColor.self, forKey: .foreground)
+    background = try container.decode(EditorRGBAColor.self, forKey: .background)
+    backgroundOpacity = try container.decode(Double.self, forKey: .backgroundOpacity)
+    cursor = try container.decode(EditorRGBAColor.self, forKey: .cursor)
+    cursorStyle =
+      try container.decodeIfPresent(EditorCursorStyle.self, forKey: .cursorStyle) ?? .line
+    selection = try container.decode(EditorRGBAColor.self, forKey: .selection)
+  }
 }
 
 struct EditorHighlightProfile: Codable, Equatable, Sendable {
@@ -196,10 +280,11 @@ struct EditorBehaviorProfile: Codable, Equatable, Sendable {
     suggestionDelay = try container.decode(Double.self, forKey: .suggestionDelay)
     showLineNumbers = try container.decode(Bool.self, forKey: .showLineNumbers)
     showDiagnostics = try container.decode(Bool.self, forKey: .showDiagnostics)
-    showInlineDiagnosticMessages = try container.decodeIfPresent(
-      Bool.self,
-      forKey: .showInlineDiagnosticMessages
-    ) ?? true
+    showInlineDiagnosticMessages =
+      try container.decodeIfPresent(
+        Bool.self,
+        forKey: .showInlineDiagnosticMessages
+      ) ?? true
   }
 }
 
@@ -268,7 +353,77 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   var startInInsertMode: Bool
   var leader: String
   var relativeLineNumbers: Bool
+  var normalCursorStyle: EditorVimCursorStyle
+  var insertCursorStyle: EditorVimCursorStyle
+  var replaceCursorStyle: EditorVimCursorStyle
   var mappings: [EditorVimMappingProfile]
+
+  init(
+    enabled: Bool,
+    startInInsertMode: Bool,
+    leader: String,
+    relativeLineNumbers: Bool,
+    normalCursorStyle: EditorVimCursorStyle = .default,
+    insertCursorStyle: EditorVimCursorStyle = .default,
+    replaceCursorStyle: EditorVimCursorStyle = .default,
+    mappings: [EditorVimMappingProfile]
+  ) {
+    self.enabled = enabled
+    self.startInInsertMode = startInInsertMode
+    self.leader = leader
+    self.relativeLineNumbers = relativeLineNumbers
+    self.normalCursorStyle = normalCursorStyle
+    self.insertCursorStyle = insertCursorStyle
+    self.replaceCursorStyle = replaceCursorStyle
+    self.mappings = mappings
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case enabled, startInInsertMode, leader, relativeLineNumbers
+    case normalCursorStyle, insertCursorStyle, replaceCursorStyle, mappings
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    enabled = try container.decode(Bool.self, forKey: .enabled)
+    startInInsertMode = try container.decode(Bool.self, forKey: .startInInsertMode)
+    leader = try container.decode(String.self, forKey: .leader)
+    relativeLineNumbers = try container.decode(Bool.self, forKey: .relativeLineNumbers)
+    normalCursorStyle = try Self.decodeCursorStyle(
+      from: container,
+      key: .normalCursorStyle,
+      legacyDefault: .block
+    )
+    insertCursorStyle = try Self.decodeCursorStyle(
+      from: container,
+      key: .insertCursorStyle,
+      legacyDefault: .line
+    )
+    replaceCursorStyle = try Self.decodeCursorStyle(
+      from: container,
+      key: .replaceCursorStyle,
+      legacyDefault: .underline
+    )
+    mappings = try container.decode([EditorVimMappingProfile].self, forKey: .mappings)
+  }
+
+  private static func decodeCursorStyle(
+    from container: KeyedDecodingContainer<CodingKeys>,
+    key: CodingKeys,
+    legacyDefault: EditorVimCursorStyle
+  ) throws -> EditorVimCursorStyle {
+    if let style = try container.decodeIfPresent(EditorVimCursorStyle.self, forKey: key) {
+      return style
+    }
+    return legacyDefault
+  }
+
+  /// A native key event produces one character token. Older saved profiles may
+  /// contain an empty or multi-character leader, so normalize at the boundary
+  /// before handing it to the Vim engine.
+  var normalizedLeader: String {
+    leader.first.map(String.init) ?? " "
+  }
 
   static let standard = EditorVimProfile(
     enabled: false,
@@ -283,7 +438,19 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
       .init(sequence: "<leader>e", command: "<host:sidebar>"),
       .init(sequence: "<leader>f", command: ":format"),
       .init(sequence: "<leader>s", command: "<host:find>"),
-      .init(sequence: "<leader>h", command: "<host:replace>"),
+      .init(sequence: "<leader>h", command: "<host:section-left>"),
+      .init(sequence: "<leader>j", command: "<host:section-down>"),
+      .init(sequence: "<leader>k", command: "<host:section-up>"),
+      .init(sequence: "<leader>l", command: "<host:section-right>"),
+      .init(sequence: "<leader>1", command: "<host:tab-1>"),
+      .init(sequence: "<leader>2", command: "<host:tab-2>"),
+      .init(sequence: "<leader>3", command: "<host:tab-3>"),
+      .init(sequence: "<leader>4", command: "<host:tab-4>"),
+      .init(sequence: "<leader>5", command: "<host:tab-5>"),
+      .init(sequence: "<leader>6", command: "<host:tab-6>"),
+      .init(sequence: "<leader>7", command: "<host:tab-7>"),
+      .init(sequence: "<leader>8", command: "<host:tab-8>"),
+      .init(sequence: "<leader>9", command: "<host:tab-9>"),
     ]
   )
 }
@@ -336,11 +503,14 @@ struct EditorCustomProfile: Codable, Equatable, Sendable {
     surface = try container.decode(EditorSurfaceProfile.self, forKey: .surface)
     highlights = try container.decode(EditorHighlightProfile.self, forKey: .highlights)
     syntax = try container.decode(EditorSyntaxPalette.self, forKey: .syntax)
-    workbench = try container.decodeIfPresent(EditorWorkbenchProfile.self, forKey: .workbench)
+    workbench =
+      try container.decodeIfPresent(EditorWorkbenchProfile.self, forKey: .workbench)
       ?? Self.defaultWorkbench(surface: surface)
-    terminal = try container.decodeIfPresent(EditorTerminalProfile.self, forKey: .terminal)
+    terminal =
+      try container.decodeIfPresent(EditorTerminalProfile.self, forKey: .terminal)
       ?? Self.defaultTerminal(surface: surface)
-    themeMetadata = try container.decodeIfPresent(EditorThemeMetadataProfile.self, forKey: .themeMetadata)
+    themeMetadata =
+      try container.decodeIfPresent(EditorThemeMetadataProfile.self, forKey: .themeMetadata)
       ?? .custom
     behavior = try container.decode(EditorBehaviorProfile.self, forKey: .behavior)
     typing = try container.decodeIfPresent(EditorTypingProfile.self, forKey: .typing) ?? .standard
@@ -509,7 +679,9 @@ extension EditorCustomProfile {
 
     if let previousBaseline {
       if current.surface != previousBaseline.surface { imported.surface = current.surface }
-      if current.highlights != previousBaseline.highlights { imported.highlights = current.highlights }
+      if current.highlights != previousBaseline.highlights {
+        imported.highlights = current.highlights
+      }
       if current.syntax != previousBaseline.syntax { imported.syntax = current.syntax }
       if current.workbench != previousBaseline.workbench { imported.workbench = current.workbench }
       if current.terminal != previousBaseline.terminal { imported.terminal = current.terminal }
@@ -562,15 +734,19 @@ extension EditorCustomProfile {
     syntax.literals.string = syntaxColor("string") ?? syntax.literals.string
     syntax.literals.number = syntaxColor("number") ?? syntax.literals.number
     syntax.literals.comment = syntaxColor("comment") ?? syntax.literals.comment
-    syntax.literals.directive = syntaxColor("attribute") ?? syntaxColor("preproc") ?? syntax.literals.directive
+    syntax.literals.directive =
+      syntaxColor("attribute") ?? syntaxColor("preproc") ?? syntax.literals.directive
     syntax.symbols.type = syntaxColor("type") ?? syntaxColor("type.builtin") ?? syntax.symbols.type
-    syntax.symbols.function = syntaxColor("function.call") ?? syntaxColor("function") ?? syntax.symbols.function
+    syntax.symbols.function =
+      syntaxColor("function.call") ?? syntaxColor("function") ?? syntax.symbols.function
     syntax.symbols.variable = syntaxColor("variable") ?? syntax.symbols.variable
     syntax.symbols.property = syntaxColor("property") ?? syntax.symbols.property
     syntax.symbols.operator = syntaxColor("operator") ?? syntax.symbols.operator
     syntax.symbols.punctuation = syntaxColor("punctuation.delimiter") ?? syntax.symbols.punctuation
 
-    func assign(_ value: EditorRGBAColor?, to keyPath: WritableKeyPath<EditorCustomProfile, EditorRGBAColor>) {
+    func assign(
+      _ value: EditorRGBAColor?, to keyPath: WritableKeyPath<EditorCustomProfile, EditorRGBAColor>
+    ) {
       if let value { self[keyPath: keyPath] = value }
     }
     assign(cursor, to: \.surface.cursor)
@@ -583,42 +759,55 @@ extension EditorCustomProfile {
       }
       return nil
     }
-    workbench.foreground = firstColor(["foreground", "editor.foreground"])
+    workbench.foreground =
+      firstColor(["foreground", "editor.foreground"])
       ?? surface.foreground
-    workbench.mutedForeground = firstColor([
-      "descriptionForeground", "sideBar.foreground", "activityBar.inactiveForeground",
-    ]) ?? workbench.mutedForeground
-    workbench.windowBackground = firstColor([
-      "window.background", "editorGroup.emptyBackground", "editor.background",
-    ]) ?? surface.background
-    workbench.sidebarBackground = firstColor([
-      "sideBar.background", "activityBar.background", "editor.background",
-    ]) ?? workbench.sidebarBackground
-    workbench.panelBackground = firstColor([
-      "panel.background", "terminal.background", "editor.background",
-    ]) ?? workbench.panelBackground
-    workbench.toolbarBackground = firstColor([
-      "titleBar.activeBackground", "activityBar.background", "sideBar.background",
-    ]) ?? workbench.toolbarBackground
-    workbench.activeTabBackground = firstColor([
-      "tab.activeBackground", "editor.background",
-    ]) ?? workbench.activeTabBackground
-    workbench.inactiveTabBackground = firstColor([
-      "tab.inactiveBackground", "titleBar.activeBackground", "sideBar.background",
-    ]) ?? workbench.inactiveTabBackground
-    workbench.inputBackground = firstColor([
-      "input.background", "editorWidget.background", "editorSuggestWidget.background",
-    ]) ?? workbench.inputBackground
-    workbench.border = firstColor([
-      "editorGroup.border", "panel.border", "sideBar.border", "contrastBorder",
-    ]) ?? workbench.border
-    workbench.accent = firstColor([
-      "focusBorder", "button.background", "textLink.foreground", "editorCursor.foreground",
-    ]) ?? surface.cursor
+    workbench.mutedForeground =
+      firstColor([
+        "descriptionForeground", "sideBar.foreground", "activityBar.inactiveForeground",
+      ]) ?? workbench.mutedForeground
+    workbench.windowBackground =
+      firstColor([
+        "window.background", "editorGroup.emptyBackground", "editor.background",
+      ]) ?? surface.background
+    workbench.sidebarBackground =
+      firstColor([
+        "sideBar.background", "activityBar.background", "editor.background",
+      ]) ?? workbench.sidebarBackground
+    workbench.panelBackground =
+      firstColor([
+        "panel.background", "terminal.background", "editor.background",
+      ]) ?? workbench.panelBackground
+    workbench.toolbarBackground =
+      firstColor([
+        "titleBar.activeBackground", "activityBar.background", "sideBar.background",
+      ]) ?? workbench.toolbarBackground
+    workbench.activeTabBackground =
+      firstColor([
+        "tab.activeBackground", "editor.background",
+      ]) ?? workbench.activeTabBackground
+    workbench.inactiveTabBackground =
+      firstColor([
+        "tab.inactiveBackground", "titleBar.activeBackground", "sideBar.background",
+      ]) ?? workbench.inactiveTabBackground
+    workbench.inputBackground =
+      firstColor([
+        "input.background", "editorWidget.background", "editorSuggestWidget.background",
+      ]) ?? workbench.inputBackground
+    workbench.border =
+      firstColor([
+        "editorGroup.border", "panel.border", "sideBar.border", "contrastBorder",
+      ]) ?? workbench.border
+    workbench.accent =
+      firstColor([
+        "focusBorder", "button.background", "textLink.foreground", "editorCursor.foreground",
+      ]) ?? surface.cursor
 
-    terminal.foreground = firstColor(["terminal.foreground", "editor.foreground"])
+    terminal.foreground =
+      firstColor(["terminal.foreground", "editor.foreground"])
       ?? terminal.foreground
-    terminal.background = firstColor(["terminal.background", "panel.background", "editor.background"])
+    terminal.background =
+      firstColor(["terminal.background", "panel.background", "editor.background"])
       ?? terminal.background
     let ansiKeys = [
       "terminal.ansiBlack", "terminal.ansiRed", "terminal.ansiGreen", "terminal.ansiYellow",

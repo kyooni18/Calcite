@@ -495,6 +495,11 @@ struct EditorProfileSettingsView: View {
       ProfileColorRow(title: "Text", value: $profile.surface.foreground)
       ProfileColorRow(title: "Background", value: $profile.surface.background)
       ProfileColorRow(title: "Insertion Cursor", value: $profile.surface.cursor)
+      Picker("Cursor Shape", selection: $profile.surface.cursorStyle) {
+        ForEach(EditorCursorStyle.allCases) { style in
+          Text(style.title).tag(style)
+        }
+      }
       ProfileColorRow(title: "Selection", value: $profile.surface.selection)
       VStack(alignment: .leading) {
         LabeledContent(
@@ -607,8 +612,38 @@ struct EditorProfileSettingsView: View {
         .disabled(!profile.vim.enabled)
       Toggle("Relative Line Numbers", isOn: $profile.vim.relativeLineNumbers)
         .disabled(!profile.vim.enabled)
-      TextField("Leader Key", text: $profile.vim.leader)
-        .disabled(!profile.vim.enabled)
+      Picker("Normal Cursor Shape", selection: $profile.vim.normalCursorStyle) {
+        ForEach(EditorVimCursorStyle.allCases) { style in
+          Text(style.title).tag(style)
+        }
+      }
+      .disabled(!profile.vim.enabled)
+      Picker("Insert Cursor Shape", selection: $profile.vim.insertCursorStyle) {
+        ForEach(EditorVimCursorStyle.allCases) { style in
+          Text(style.title).tag(style)
+        }
+      }
+      .disabled(!profile.vim.enabled)
+      Picker("Replace Cursor Shape", selection: $profile.vim.replaceCursorStyle) {
+        ForEach(EditorVimCursorStyle.allCases) { style in
+          Text(style.title).tag(style)
+        }
+      }
+      .disabled(!profile.vim.enabled)
+      HStack {
+        Text("Leader Key")
+        Spacer()
+        TextField("Space", text: leaderKey)
+          .textFieldStyle(.roundedBorder)
+          .frame(width: 90)
+          .accessibilityIdentifier("calcite.vim.leader-key")
+      }
+      Text("Current leader: \(leaderKeyDescription)")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      Text("Type one printable key. Clearing the field restores Space.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
       ForEach($profile.vim.mappings) { $mapping in
         HStack {
           TextField("Keys", text: $mapping.sequence)
@@ -623,10 +658,33 @@ struct EditorProfileSettingsView: View {
         profile.vim.mappings.append(.init(sequence: "<leader>", command: ""))
       }
       Text(
-        "Commands may be Vim notation, Ex commands such as :w, or host actions such as <host:find>, <host:replace>, <host:build>, <host:run>, <host:test>, and <host:terminal>. Default mappings: <leader>s opens Find and <leader>h opens Replace."
+        "Commands may be Vim notation, Ex commands such as :w, or host actions such as <host:find>, <host:replace>, <host:build>, <host:run>, <host:test>, and <host:terminal>. Default mappings: <leader>s opens Find; <leader>h/j/k/l navigate sections."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+    }
+  }
+
+  /// Vim's leader is a single input token. Keep the persisted value nonempty so
+  /// an unfinished edit can never turn ordinary commands into leader mappings.
+  private var leaderKey: Binding<String> {
+    Binding(
+      get: {
+        let leader = profile.vim.normalizedLeader
+        return leader == " " ? "" : leader
+      },
+      set: { input in
+        var updatedProfile = profile
+        updatedProfile.vim.leader = input.first.map(String.init) ?? " "
+        profile = updatedProfile
+      }
+    )
+  }
+
+  private var leaderKeyDescription: String {
+    switch profile.vim.normalizedLeader {
+    case " ": return "Space"
+    default: return profile.vim.normalizedLeader
     }
   }
 
@@ -786,7 +844,10 @@ private struct ProfileColorRow: View {
     Binding(
       get: { value.color },
       set: { color in
-        guard let converted = NSColor(color).usingColorSpace(.sRGB) else { return }
+        // ColorPicker can return a dynamic AppKit color. It is not always
+        // convertible through `usingColorSpace`, but its resolved components
+        // remain usable and should still be written back to the profile.
+        let converted = NSColor(color).usingColorSpace(.sRGB) ?? NSColor(color)
         value = EditorRGBAColor(
           Double(converted.redComponent),
           Double(converted.greenComponent),
