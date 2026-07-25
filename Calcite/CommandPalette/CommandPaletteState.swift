@@ -1,0 +1,32 @@
+import Combine
+import SwiftUI
+
+@MainActor
+final class CommandPaletteState: ObservableObject {
+  @Published var isPresented = false
+  @Published var mode: EditorCommandPalette.Mode = .all
+  @Published var query = ""
+  @Published var keyboardEvent: EditorCommandPalette.KeyboardEvent?
+  @Published private(set) var focusRequestID = UUID()
+
+  func present(mode: EditorCommandPalette.Mode) {
+    self.mode = mode
+    isPresented = true
+    focusRequestID = UUID()
+  }
+
+  func dismiss() {
+    isPresented = false
+  }
+
+  func send(_ command: EditorCommandPalette.KeyboardCommand) {
+    if command == .dismiss {
+      dismiss()
+      return
+    }
+    if !isPresented {
+      present(mode: .all)
+    }
+    keyboardEvent = .init(command: command)
+  }
+}

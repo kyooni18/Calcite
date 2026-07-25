@@ -1,0 +1,126 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "features" : [
+    "refractivity"
+  ],
+  "fill" : {
+    "solid" : "display-p3:0.97334,1.00000,0.96154,1.00000"
+  },
+  "groups" : [
+    {
+      "blur-material" : 0,
+      "hidden" : false,
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "‘‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨’의 배경이 제거됨.png",
+          "name" : "‘‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨’의 배경이 제거됨",
+          "position" : {
+            "scale" : 1.06,
+            "translation-in-points" : [
+              18,
+              35.471393492077084
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "opacity" : 0.85,
+      "position" : {
+        "scale" : 1.1,
+        "translation-in-points" : [
+          1,
+          9
+        ]
+      },
+      "refractivity" : {
+        "depth" : 0.5325390625,
+        "enabled" : true,
+        "strength" : 0.549921875
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 1.68
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.57
+      }
+    },
+    {
+      "blur-material" : null,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : false,
+          "image-name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨.png",
+          "name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 5.24,
+            "translation-in-points" : [
+              -2228.7103067874964,
+              -59.66579642060128
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : false,
+          "image-name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨.png",
+          "name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.59,
+            "translation-in-points" : [
+              -989.525319500134,
+              294.5769010000342
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨.png",
+          "name" : "‘a4ad9b90-b8c5-452a-98ce-b00572313ba9’의 배경이 제거됨",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.7,
+            "translation-in-points" : [
+              8.74259882421336,
+              -1021.4857964206019
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Group",
+      "opacity" : 1,
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : false,
+        "strength" : 0.5
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.2
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
