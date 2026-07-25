@@ -40,6 +40,16 @@ struct EditorBottomPanelLayout<EditorContent: View, PanelContent: View>: View {
           .clipped()
 
         resizeHandle(metrics: metrics)
+          .frame(minHeight: 3)
+          .onHover(perform: { hovering in
+              if hovering {
+                  NSCursor.pointingHand.push()
+                } else {
+                NSCursor.pop()
+              }
+            }
+          )
+        
 
         panel
           .frame(minWidth: 0, maxWidth: .infinity)
