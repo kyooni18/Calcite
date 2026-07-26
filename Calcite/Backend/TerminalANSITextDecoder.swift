@@ -48,6 +48,7 @@ struct TerminalANSITextDecoder: Sendable {
   private enum State: Sendable {
     case text
     case escape
+    case escapeIntermediate
     case controlSequence
     case operatingSystemCommand
     case operatingSystemCommandEscape
@@ -79,6 +80,9 @@ struct TerminalANSITextDecoder: Sendable {
 
       case .escape:
         consumeEscape(scalar)
+
+      case .escapeIntermediate:
+        consumeEscapeIntermediate(scalar)
 
       case .controlSequence:
         if (0x40...0x7E).contains(scalar.value) {
@@ -129,6 +133,12 @@ struct TerminalANSITextDecoder: Sendable {
 
   private mutating func consumeEscape(_ scalar: UnicodeScalar) {
     switch scalar.value {
+    case 0x20...0x2F:
+      // VT escape sequences may contain one or more intermediate bytes before
+      // their final byte. Vim and Neovim commonly emit ESC ( B to designate
+      // the ASCII character set; treating "(" as the complete sequence leaks
+      // its trailing "B" into the editor display.
+      state = .escapeIntermediate
     case 0x5B:  // CSI
       controlSequence = ""
       state = .controlSequence
@@ -154,6 +164,21 @@ struct TerminalANSITextDecoder: Sendable {
       screen.hardReset()
       state = .text
     default:
+      state = .text
+    }
+  }
+
+  private mutating func consumeEscapeIntermediate(_ scalar: UnicodeScalar) {
+    switch scalar.value {
+    case 0x20...0x2F:
+      // Continue consuming intermediate bytes until the sequence's final byte.
+      return
+    case 0x1B:
+      state = .escape
+    default:
+      // The final byte selects a terminal capability (for example "B" in
+      // ESC ( B). Calcite does not need to model character-set designation,
+      // but it must consume the complete sequence.
       state = .text
     }
   }

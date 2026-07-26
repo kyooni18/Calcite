@@ -9,6 +9,8 @@
   final class EditorTerminalSession: ObservableObject {
     let workspaceURL: URL
     let shellPath: String
+    private let initialCommand: String?
+    private let monitorsPythonEnvironment: Bool
 
     @Published private(set) var output = ""
     @Published private(set) var outputEpoch: UInt64 = 0
@@ -28,12 +30,17 @@
     private var outputUTF8Count = 0
     private var outputFlushTask: Task<Void, Never>?
     private var terminalDecoder = TerminalANSITextDecoder()
+    private var terminalQueryBuffer = ""
     private var terminalSize = (columns: 100, rows: 32)
     private var visibleGeneration: UInt64 = 0
     private var startRequested = false
     private var attachedViewCount = 0
 
-    init(workspaceURL: URL) {
+    init(
+      workspaceURL: URL,
+      initialCommand: String? = nil,
+      monitorsPythonEnvironment: Bool = true
+    ) {
       let workspaceURL = workspaceURL.standardizedFileURL
       let shellPath = Self.defaultShellPath()
       let eventChannel = AsyncStream<EditorTerminalEvent>.makeStream(
@@ -42,11 +49,16 @@
 
       self.workspaceURL = workspaceURL
       self.shellPath = shellPath
+      self.initialCommand = initialCommand
+      self.monitorsPythonEnvironment = monitorsPythonEnvironment
       let pythonSelection = Self.pythonSelection(for: workspaceURL)
-      self.pythonEnvironment = EditorPythonEnvironmentResolver.detect(
-        workspaceURL: pythonSelection.workspaceURL,
-        explicitInterpreterURL: pythonSelection.interpreterURL
-      )
+      self.pythonEnvironment =
+        monitorsPythonEnvironment
+        ? EditorPythonEnvironmentResolver.detect(
+          workspaceURL: pythonSelection.workspaceURL,
+          explicitInterpreterURL: pythonSelection.interpreterURL
+        )
+        : nil
       self.worker = EditorTerminalWorker(
         workspaceURL: workspaceURL,
         shellPath: shellPath,
@@ -102,7 +114,9 @@
     }
 
     private func startEnvironmentMonitoringIfNeeded() {
-      guard attachedViewCount > 0, environmentMonitorTask == nil else { return }
+      guard monitorsPythonEnvironment, attachedViewCount > 0, environmentMonitorTask == nil else {
+        return
+      }
       environmentMonitorTask = Task { [weak self] in
         while !Task.isCancelled {
           do {
@@ -123,6 +137,7 @@
     }
 
     func refreshEnvironment(restartIfChanged: Bool = false) {
+      guard monitorsPythonEnvironment else { return }
       guard environmentRefreshTask == nil else { return }
       let workspaceURL = workspaceURL
       environmentRefreshTask = Task { [weak self] in
@@ -253,11 +268,16 @@
         outputEpoch &+= 1
         output = ""
         outputUTF8Count = 0
+        terminalQueryBuffer = ""
         terminalDecoder.reset(columns: terminalSize.columns, rows: terminalSize.rows)
         renderedSnapshot = terminalDecoder.renderedSnapshot
         isRunning = true
         isStopping = false
         exitDescription = nil
+        if let initialCommand {
+          let worker = worker
+          Task { await worker.send(initialCommand + "\r") }
+        }
 
       case .stopping(let generation, let restarting):
         guard generation == visibleGeneration else { return }
@@ -269,6 +289,7 @@
 
       case .output(let value, let generation):
         guard generation == visibleGeneration else { return }
+        respondToTerminalQueries(in: value)
         enqueueOutput(value)
 
       case .finished(let generation, let description, let restarting):
@@ -287,6 +308,38 @@
         isRunning = false
         isStopping = false
         exitDescription = message
+      }
+    }
+
+    /// Respond to the small set of terminal identity queries that interactive editors use
+    /// during startup. In particular, Neovim asks OSC 11 for the background color; leaving
+    /// that unanswered delays startup and produces an on-screen E1568 warning.
+    private func respondToTerminalQueries(in output: String) {
+      terminalQueryBuffer += output
+
+      let backgroundQueries = [
+        "\u{1b}]11;?\u{7}",
+        "\u{1b}]11;?\u{1b}\\",
+      ]
+      let backgroundResponse = "\u{1b}]11;rgb:1c1c/1d1d/2323\u{7}"
+      for query in backgroundQueries where terminalQueryBuffer.contains(query) {
+        let worker = worker
+        Task { await worker.send(backgroundResponse) }
+        terminalQueryBuffer = terminalQueryBuffer.replacingOccurrences(of: query, with: "")
+      }
+
+      // Device-status reports are used as the reply boundary for Neovim's color
+      // probe. A normal "terminal OK" response avoids its E1568 startup warning.
+      if terminalQueryBuffer.contains("\u{1b}[5n") {
+        let worker = worker
+        Task { await worker.send("\u{1b}[0n") }
+        terminalQueryBuffer = terminalQueryBuffer.replacingOccurrences(
+          of: "\u{1b}[5n", with: "")
+      }
+
+      // Preserve enough trailing output to recognize a query that arrives across PTY reads.
+      if terminalQueryBuffer.utf8.count > 64 {
+        terminalQueryBuffer = String(terminalQueryBuffer.suffix(64))
       }
     }
 

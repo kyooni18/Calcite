@@ -10,6 +10,7 @@
     let send: (String) -> Void
     let clear: () -> Void
     let resize: (Int, Int) -> Void
+    var save: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -196,6 +197,11 @@
           case "k":
             parent.clear()
             return true
+          case "s":
+            if let save = parent.save {
+              save()
+              return true
+            }
           default:
             break
           }

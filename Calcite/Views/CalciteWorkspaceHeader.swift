@@ -34,6 +34,14 @@ struct CalciteWorkspaceHeader: View {
         get: { windowSession.markdownWrapsLines },
         set: { windowSession.markdownWrapsLines = $0 }
       ),
+      showsBuildProjectControl: binding(
+        get: { windowSession.showsBuildProjectControl },
+        set: { windowSession.showsBuildProjectControl = $0 }
+      ),
+      showsNowPlaying: binding(
+        get: { windowSession.showsNowPlaying },
+        set: { windowSession.showsNowPlaying = $0 }
+      ),
       searchQuery: binding(
         get: { windowSession.palette.query },
         set: { windowSession.palette.query = $0 }
@@ -60,6 +68,8 @@ struct CalciteWorkspaceHeader: View {
       build: { windowSession.perform(.build) },
       run: { windowSession.perform(.run) },
       stop: { windowSession.perform(.stopBuild) },
+      openSettings: { windowSession.perform(.openSettings) },
+      openThemeBuilder: { windowSession.perform(.openThemeBuilder) },
       showPalette: { windowSession.showUnifiedPalette() },
       searchCommand: { windowSession.sendPaletteKeyboardCommand($0) },
       layout: windowSession.sectionalLayout
@@ -87,6 +97,8 @@ private struct CalciteWorkspaceHeaderContent: View {
   @Binding var usesLiveMarkdownEditor: Bool
   @Binding var showsMarkdownSyntax: Bool
   @Binding var wrapsMarkdownLines: Bool
+  @Binding var showsBuildProjectControl: Bool
+  @Binding var showsNowPlaying: Bool
   @Binding var searchQuery: String
   @Binding var showsSearchResults: Bool
   let searchFocus: FocusState<Bool>.Binding
@@ -101,12 +113,23 @@ private struct CalciteWorkspaceHeaderContent: View {
   let build: () -> Void
   let run: () -> Void
   let stop: () -> Void
+  let openSettings: () -> Void
+  let openThemeBuilder: () -> Void
   let showPalette: () -> Void
   let searchCommand: (CalciteCommandPaletteSurface.KeyboardCommand) -> Void
   let layout: MainSectionalLayoutController
 
   var body: some View {
     HStack(spacing: 8) {
+      CalciteWorkspaceSettingsMenu(
+        openSettings: openSettings,
+        openThemeBuilder: openThemeBuilder
+      )
+      CalciteWorkspaceSidebarSectionsMenu(
+        showsBuildProjectControl: $showsBuildProjectControl,
+        showsNowPlaying: $showsNowPlaying
+      )
+
       if mode == .regular {
         EditorLanguageServerStatusIndicator(
           languageID: activeLanguageID,
@@ -148,6 +171,41 @@ private struct CalciteWorkspaceHeaderContent: View {
 
       CalciteLayoutCustomizationControls(layout: layout)
     }
+  }
+}
+
+private struct CalciteWorkspaceSettingsMenu: View {
+  let openSettings: () -> Void
+  let openThemeBuilder: () -> Void
+
+  var body: some View {
+    Menu {
+      Button("Settings", systemImage: "gearshape", action: openSettings)
+      Button("Theme Builder", systemImage: "paintpalette", action: openThemeBuilder)
+    } label: {
+      Image(systemName: "gearshape")
+    }
+    .menuStyle(.borderlessButton)
+    .accessibilityLabel("Workspace settings")
+    .help("Workspace settings")
+  }
+}
+
+private struct CalciteWorkspaceSidebarSectionsMenu: View {
+  @Binding var showsBuildProjectControl: Bool
+  @Binding var showsNowPlaying: Bool
+
+  var body: some View {
+    Menu {
+      Toggle("Now Playing", systemImage: "music.note", isOn: $showsNowPlaying)
+      Toggle("Build folder", systemImage: "hammer", isOn: $showsBuildProjectControl)
+    } label: {
+      Image(systemName: "ellipsis.circle")
+        .foregroundStyle(.secondary)
+    }
+    .menuStyle(.borderlessButton)
+    .accessibilityLabel("Sidebar sections")
+    .help("Show or hide sidebar sections")
   }
 }
 

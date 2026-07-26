@@ -26,17 +26,7 @@ struct CalciteWorkspaceSidebar: View {
       }
 
       CalciteSidebarFooter(
-        phase: backend.workspacePhase,
-        showsBuildProjectControl: binding(
-          get: { windowSession.showsBuildProjectControl },
-          set: { windowSession.showsBuildProjectControl = $0 }
-        ),
-        showsNowPlaying: binding(
-          get: { windowSession.showsNowPlaying },
-          set: { windowSession.showsNowPlaying = $0 }
-        ),
-        openSettings: { windowSession.perform(.openSettings) },
-        openThemeBuilder: { windowSession.perform(.openThemeBuilder) }
+        phase: backend.workspacePhase
       )
     }
     .onChange(of: windowSession.selectedFileURL) { _, url in
@@ -49,12 +39,6 @@ struct CalciteWorkspaceSidebar: View {
     .onDisappear(perform: windowSession.stopNowPlaying)
   }
 
-  private func binding<Value>(
-    get: @escaping @MainActor @Sendable () -> Value,
-    set: @escaping @MainActor @Sendable (Value) -> Void
-  ) -> Binding<Value> {
-    Binding(get: get, set: set)
-  }
 }
 
 @MainActor
@@ -162,33 +146,9 @@ private struct CalciteNowPlayingSidebarSection: View {
 
 private struct CalciteSidebarFooter: View {
   let phase: EditorWorkspacePhase
-  @Binding var showsBuildProjectControl: Bool
-  @Binding var showsNowPlaying: Bool
-  let openSettings: () -> Void
-  let openThemeBuilder: () -> Void
 
   var body: some View {
     HStack {
-      Menu {
-        Toggle("Now Playing", systemImage: "music.note", isOn: $showsNowPlaying)
-        Toggle("Build folder", systemImage: "hammer", isOn: $showsBuildProjectControl)
-      } label: {
-        Image(systemName: "ellipsis.circle")
-          .foregroundStyle(.secondary)
-      }
-      .menuStyle(.borderlessButton)
-      .accessibilityLabel("Sidebar sections")
-      .help("Show or hide sidebar sections")
-
-      Menu {
-        Button("Settings", systemImage: "gearshape", action: openSettings)
-        Button("Theme Builder", systemImage: "paintpalette", action: openThemeBuilder)
-      } label: {
-        Image(systemName: "gearshape")
-      }
-      .menuStyle(.borderlessButton)
-      .accessibilityLabel("Workspace settings")
-
       Spacer()
       CalciteWorkspaceStatus(phase: phase)
     }

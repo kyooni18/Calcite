@@ -89,7 +89,8 @@ struct ServiceSettingsView: View {
   private func keywords(for page: Page) -> String {
     switch page {
     case .services: return "language server completion syntax diagnostics formatter"
-    case .editor: return "theme font color typing vim keybindings snippets search replace"
+    case .editor:
+      return "theme font color typing vim neovim terminal editor keybindings snippets search replace"
     case .build: return "build run test check task command"
     case .debug: return "debug executable arguments working directory"
     }
@@ -110,6 +111,8 @@ struct EditorProfileSettingsView: View {
   private var externalTerminalRaw = EditorExternalTerminalApplication.automatic.rawValue
   @AppStorage(EditorExternalTerminalPreferences.customCommandKey)
   private var externalTerminalCommand = ""
+  @AppStorage(EditorInterfacePreferences.interfaceKey)
+  private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
 
   init(controller: EditorWorkspaceController) {
     self.controller = controller
@@ -302,7 +305,7 @@ struct EditorProfileSettingsView: View {
   }
 
   private var appearanceAndTerminal: some View {
-    Section("Window and External Terminal") {
+    Section("Window and Terminal Editors") {
       Picker("App Appearance", selection: $appearanceModeRaw) {
         ForEach(EditorInterfaceAppearance.allCases) { appearance in
           Text(appearance.title).tag(appearance.rawValue)
@@ -317,6 +320,16 @@ struct EditorProfileSettingsView: View {
         TextField("Command; use {path} for the workspace", text: $externalTerminalCommand)
           .font(.system(.body, design: .monospaced))
       }
+      Picker("Editor Interface", selection: $editorInterfaceRaw) {
+        ForEach(EditorInterface.allCases) { interface in
+          Text(interface.title).tag(interface.rawValue)
+        }
+      }
+      Text(
+        "Terminal editors run the actual Vim or Neovim executable in a dedicated PTY. Files written by them are reloaded from disk when the built-in buffer has no unsaved changes."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
     }
   }
 

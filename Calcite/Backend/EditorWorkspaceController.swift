@@ -1393,12 +1393,19 @@ final class EditorWorkspaceController: ObservableObject {
     case .conflict(let file):
       let url = file.url.standardizedFileURL
       let message = "\(file.name) changed on disk while it is open in the editor."
-      tabs.first { $0.url.standardizedFileURL == url }?.reportExternalFileIssue(message)
+      let tab = tabs.first { $0.url.standardizedFileURL == url }
+      tab?.reportExternalFileIssue(message)
       externalConflictIDs[url] = file.id
       enqueueExternalFileConflict(
         EditorExternalFileConflict(url: url, message: message)
       )
       appendDebugMessage("Workspace conflict: \(file.relativePath)")
+      if EditorInterfacePreferences.selectedInterface.usesTerminalEditor,
+        tab?.isDirty == false,
+        externalFileConflict?.url.standardizedFileURL == url
+      {
+        resolveExternalFileConflict(using: .useDisk)
+      }
     case .removed(_, let relativePath):
       scheduleProjectContextRefresh()
       let url = workspaceURL.appendingPathComponent(relativePath).standardizedFileURL
