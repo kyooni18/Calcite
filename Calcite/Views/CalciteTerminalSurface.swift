@@ -5,7 +5,6 @@
   struct CalciteTerminalSurface: View {
     @ObservedObject var session: EditorTerminalSession
     let themeProfile: EditorTerminalProfile?
-    let hostLeader: String
     let navigateSection: (MainSectionDirection) -> Void
     @StateObject private var appearanceStore = EditorTerminalPreferencesStore()
     @State private var showsSettings = false
@@ -28,7 +27,6 @@
           send: session.send,
           clear: session.clear,
           resize: session.resize,
-          hostLeader: hostLeader,
           navigateSectionDirection: navigateSection
         )
       }

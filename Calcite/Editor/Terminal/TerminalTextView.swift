@@ -13,7 +13,6 @@
     let resize: (Int, Int) -> Void
     var save: (() -> Void)? = nil
     var navigateSection: ((Bool) -> Void)? = nil
-    var hostLeader: String? = nil
     var navigateSectionDirection: ((MainSectionDirection) -> Void)? = nil
     var allowsScrolling = true
     /// Vim/Neovim use the terminal mouse protocol; consuming these events here
@@ -98,8 +97,6 @@
       private var appliedAppearanceRevision: UInt64?
       private var pendingSize: (columns: Int, rows: Int)?
       private var resizePublicationTask: Task<Void, Never>?
-      private var pendingHostLeader: String?
-
       init(parent: TerminalTextView) { self.parent = parent }
 
       func focusInput() {
@@ -224,28 +221,10 @@
           }
         }
 
-        if let leader = pendingHostLeader {
-          pendingHostLeader = nil
-          if let direction = hostSectionDirection(for: event, flags: flags),
-            let navigateSectionDirection = parent.navigateSectionDirection
-          {
-            navigateSectionDirection(direction)
-            return true
-          }
-          // This was not one of Calcite's host mappings. Return the leader to the
-          // terminal before delivering the current key so Vim/Neovim receives the
-          // original sequence unchanged.
-          parent.send(leader)
-        }
-
-        if let leader = parent.hostLeader,
-          !leader.isEmpty,
-          !flags.contains(.command),
-          !flags.contains(.control),
-          !flags.contains(.option),
-          event.characters == leader
+        if let direction = hostSectionDirection(for: event, flags: flags),
+          let navigateSectionDirection = parent.navigateSectionDirection
         {
-          pendingHostLeader = leader
+          navigateSectionDirection(direction)
           return true
         }
 
@@ -357,7 +336,10 @@
         for event: NSEvent,
         flags: NSEvent.ModifierFlags
       ) -> MainSectionDirection? {
-        guard !flags.contains(.command), !flags.contains(.control), !flags.contains(.option) else {
+        guard flags.contains([.command, .option]),
+          !flags.contains(.control),
+          !flags.contains(.shift)
+        else {
           return nil
         }
         switch event.charactersIgnoringModifiers?.lowercased() {

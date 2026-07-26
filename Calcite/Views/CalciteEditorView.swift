@@ -173,7 +173,6 @@ struct CalciteEditorView: View {
             navigateSection: { forward in
               navigateSection(forward ? .right : .left)
             },
-            hostLeader: profile.vim.normalizedLeader,
             navigateSectionDirection: navigateSection,
             allowsScrolling: false,
             routesPointerEventsToTerminal: true
@@ -186,9 +185,10 @@ struct CalciteEditorView: View {
       .background(profile.surface.background.color)
       .onAppear {
         appearanceStore.apply(theme: profile.terminal)
-        session.setPreservesEraseCellBackgrounds(
-          appearanceStore.preferences.preservesEraseCellBackgrounds
-        )
+        // Neovim draws its own context and completion menus with styled blank
+        // terminal cells. Those cells are part of the menu rectangle, not
+        // trailing document whitespace, so keep them in this embedded editor.
+        session.setPreservesEraseCellBackgrounds(true)
         if launchCommand != nil {
           session.reattachView()
         }
@@ -200,9 +200,6 @@ struct CalciteEditorView: View {
       }
       .onChange(of: profile.terminal) { _, value in
         appearanceStore.apply(theme: value)
-      }
-      .onChange(of: appearanceStore.preferences.preservesEraseCellBackgrounds) { _, enabled in
-        session.setPreservesEraseCellBackgrounds(enabled)
       }
     }
 

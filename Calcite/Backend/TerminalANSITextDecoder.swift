@@ -147,7 +147,14 @@ struct TerminalANSITextDecoder: Sendable {
     case 0x1B:
       state = .escape
     case 0x20...0x10FFFF:
-      screen.write(Character(String(scalar)))
+      if Self.isZeroWidthTerminalScalar(scalar) {
+        // A variation selector or combining scalar belongs to the glyph in the
+        // preceding cell. Dropping it changes Nerd Font glyph selection and
+        // makes the AppKit run no longer match the terminal grid.
+        screen.appendToPreviousCell(scalar)
+      } else {
+        screen.write(Character(String(scalar)))
+      }
     default:
       return
     }
@@ -187,6 +194,22 @@ struct TerminalANSITextDecoder: Sendable {
       state = .text
     default:
       state = .text
+    }
+  }
+
+  private static func isZeroWidthTerminalScalar(_ scalar: UnicodeScalar) -> Bool {
+    switch scalar.value {
+    case 0x0300...0x036F,
+      0x1AB0...0x1AFF,
+      0x1DC0...0x1DFF,
+      0x200D,
+      0x20D0...0x20FF,
+      0xFE00...0xFE0F,
+      0xFE20...0xFE2F,
+      0xE0100...0xE01EF:
+      true
+    default:
+      false
     }
   }
 
@@ -354,6 +377,14 @@ private struct TerminalScreenBuffer: Sendable {
     }
     cursorColumn += width
     trimScrollbackIfNeeded()
+  }
+
+  mutating func appendToPreviousCell(_ scalar: UnicodeScalar) {
+    guard cursorRow < lines.count, cursorColumn > 0 else { return }
+    var column = min(cursorColumn - 1, lines[cursorRow].count - 1)
+    while column > 0, lines[cursorRow][column].columnWidth == 0 { column -= 1 }
+    guard let character = lines[cursorRow][column].character else { return }
+    lines[cursorRow][column].character = Character(String(character) + String(scalar))
   }
 
   mutating func carriageReturn() {

@@ -657,7 +657,7 @@ struct EditorProfileSettingsView: View {
       }
       .disabled(editorMode != .calciteVim)
       HStack {
-        Text("Calcite / Host Leader")
+        Text("Calcite Vim Leader")
         Spacer()
         TextField("\\", text: leaderKey)
           .textFieldStyle(.roundedBorder)
@@ -667,7 +667,10 @@ struct EditorProfileSettingsView: View {
       Text("Current leader: \(leaderKeyDescription)")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Text("Type one non-space printable key. In Vim/Neovim mode, this host leader plus h/j/k/l switches sections. Clearing the field restores \\.")
+      Text("Type one non-space printable key. Clearing the field restores \\.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      Text("Vim/Neovim section navigation uses Command-Option-H/J/K/L, so text input is never held while Calcite waits for a leader key.")
         .font(.caption)
         .foregroundStyle(.secondary)
       HStack {

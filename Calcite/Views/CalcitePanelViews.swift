@@ -42,7 +42,6 @@ struct CalciteTerminalView: View {
     CalciteTerminalSurface(
       session: backend.terminal,
       themeProfile: backend.controller.profile.terminal,
-      hostLeader: backend.controller.profile.vim.normalizedLeader,
       navigateSection: windowSession.commandNavigateSection(direction:)
     )
   }
