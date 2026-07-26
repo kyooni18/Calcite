@@ -203,7 +203,21 @@ private struct TerminalScreenBuffer: Sendable {
     var utf16Offset = 0
     var cursorUTF16Location: Int?
 
-    for (lineIndex, line) in lines.enumerated() {
+    // Interactive shells may temporarily clear rows below the cursor while
+    // repainting after SIGWINCH. Those rows belong to the terminal screen, but
+    // serializing them as document newlines makes a horizontal resize appear to
+    // add permanent lines. Keep the cursor row and all visible content while
+    // omitting only trailing, blank screen rows from the rendered text.
+    let lastContentRow =
+      lines.lastIndex { line in
+        line.contains { cell in
+          guard let character = cell.character else { return false }
+          return character != " " || cell.style != .plain
+        }
+      } ?? 0
+    let lastRenderedRow = min(lines.count - 1, max(cursorRow, lastContentRow))
+
+    for (lineIndex, line) in lines.prefix(lastRenderedRow + 1).enumerated() {
       var activeStyle: TerminalTextStyle?
       var activeLocation = utf16Offset
       var activeLength = 0
@@ -240,7 +254,7 @@ private struct TerminalScreenBuffer: Sendable {
         cursorUTF16Location = utf16Offset
       }
 
-      if lineIndex < lines.count - 1 {
+      if lineIndex < lastRenderedRow {
         text.append("\n")
         utf16Offset += 1
       }

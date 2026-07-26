@@ -74,7 +74,7 @@
       private var appliedPreferences: EditorTerminalPreferences?
       private var appliedAppearanceRevision: UInt64?
       private var pendingSize: (columns: Int, rows: Int)?
-      private var resizePublicationScheduled = false
+      private var resizePublicationTask: Task<Void, Never>?
 
       init(parent: TerminalTextView) { self.parent = parent }
 
@@ -159,19 +159,24 @@
         scheduleResizePublication(next)
       }
 
-      /// `updateNSView` is part of SwiftUI's render pass. Resizing the terminal can publish a
-      /// new rendered snapshot, so publish it on the next main-actor turn instead of from here.
-      private func scheduleResizePublication(_ size: (columns: Int, rows: Int)) {
+      /// A horizontal window drag can cross many terminal columns before zsh has finished
+      /// repainting the first one. Publish only the settled size so output from an intermediate
+      /// SIGWINCH is never decoded using a later width.
+      func scheduleResizePublication(_ size: (columns: Int, rows: Int)) {
         pendingSize = size
-        guard !resizePublicationScheduled else { return }
-        resizePublicationScheduled = true
+        resizePublicationTask?.cancel()
 
-        Task { @MainActor [weak self] in
-          await Task.yield()
+        resizePublicationTask = Task { @MainActor [weak self] in
+          do {
+            try await Task.sleep(for: .milliseconds(50))
+          } catch {
+            return
+          }
           guard let self else { return }
-          self.resizePublicationScheduled = false
+          guard !Task.isCancelled else { return }
           guard let size = self.pendingSize else { return }
           self.pendingSize = nil
+          self.resizePublicationTask = nil
           self.parent.resize(size.columns, size.rows)
         }
       }

@@ -448,8 +448,9 @@
         ws_xpixel: 0,
         ws_ypixel: 0
       )
+      // On macOS, a successful TIOCSWINSZ delivers SIGWINCH to the PTY's
+      // foreground process group. Sending another signal makes shells repaint twice.
       _ = ioctl(masterFileDescriptor, TIOCSWINSZ, &size)
-      Self.signalProcessGroup(childPID, signal: SIGWINCH)
     }
 
     func shutdown() async {

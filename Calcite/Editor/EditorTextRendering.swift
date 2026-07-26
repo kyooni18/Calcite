@@ -177,7 +177,7 @@ final class CodeEditorTextView: NSTextView {
     customCursorView.showImmediately()
   }
 
-  private func customInsertionPointRect() -> NSRect? {
+  func customInsertionPointRect() -> NSRect? {
     guard let layoutManager, let textContainer else { return nil }
 
     let sourceLength = (string as NSString).length
@@ -190,14 +190,32 @@ final class CodeEditorTextView: NSTextView {
       )
     )
     let layoutRect: NSRect
-    if sourceLength == 0 || location == sourceLength {
+    if sourceLength == 0 || (location == sourceLength && string.hasSuffix("\n")) {
       layoutRect = layoutManager.extraLineFragmentRect
     } else {
-      let glyph = layoutManager.glyphIndexForCharacter(at: location)
-      layoutRect = layoutManager.boundingRect(
+      let characterLocation = min(location, sourceLength - 1)
+      let glyph = layoutManager.glyphIndexForCharacter(at: characterLocation)
+      let glyphRect = layoutManager.boundingRect(
         forGlyphRange: NSRange(location: glyph, length: 1),
         in: textContainer
       )
+      if location == sourceLength {
+        // TextKit's extra-line-fragment rect is empty at EOF unless the text
+        // ends in a newline. Anchor the insertion point after the final glyph
+        // so Vim's cursor remains visible and correctly positioned at EOF.
+        let lineRect = layoutManager.lineFragmentRect(
+          forGlyphAt: glyph,
+          effectiveRange: nil
+        )
+        layoutRect = NSRect(
+          x: glyphRect.maxX,
+          y: lineRect.minY,
+          width: 0,
+          height: lineRect.height
+        )
+      } else {
+        layoutRect = glyphRect
+      }
     }
 
     let lineHeight = max(layoutRect.height, font?.boundingRectForFont.height ?? 14)
