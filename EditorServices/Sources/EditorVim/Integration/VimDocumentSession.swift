@@ -1,5 +1,5 @@
-import Foundation
 import EditorCore
+import Foundation
 
 public actor VimDocumentSession {
   public let document: EditorDocument
@@ -24,7 +24,8 @@ public actor VimDocumentSession {
     do {
       let snapshot = TextSnapshot(text: before.text)
       let end = try snapshot.position(atUTF16Offset: snapshot.utf16Count)
-      _ = try await document.apply(TextEdit(range: EditorTextRange(start: .zero, end: end), replacement: result.state.text))
+      _ = try await document.apply(
+        TextEdit(range: EditorTextRange(start: .zero, end: end), replacement: result.state.text))
       return result
     } catch {
       engine.synchronize(text: before.text, cursor: before.cursor)

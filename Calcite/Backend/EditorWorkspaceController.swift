@@ -1681,9 +1681,34 @@ final class EditorWorkspaceController: ObservableObject {
       onVimCommand?(.replace)
     case "sidebar", "toggle-sidebar":
       onVimCommand?(.toggleSidebar)
+    case "next-diagnostic":
+      navigateVimDiagnostic(forward: true)
+    case "previous-diagnostic":
+      navigateVimDiagnostic(forward: false)
     default:
       appendDebugMessage("Unknown Vim command: \(command)")
     }
+  }
+
+  private func navigateVimDiagnostic(forward: Bool) {
+    guard let tab = activeTab, !tab.diagnostics.isEmpty else { return }
+    let snapshot = TextSnapshot(text: tab.text)
+    let ranges = tab.diagnostics.compactMap { diagnostic in
+      try? snapshot.nsRange(for: diagnostic.range)
+    }.sorted { lhs, rhs in
+      if lhs.location == rhs.location { return lhs.length < rhs.length }
+      return lhs.location < rhs.location
+    }
+    guard !ranges.isEmpty else { return }
+
+    let cursor = tab.selectedRange.location
+    let target: NSRange
+    if forward {
+      target = ranges.first(where: { $0.location > cursor }) ?? ranges[0]
+    } else {
+      target = ranges.last(where: { $0.location < cursor }) ?? ranges[ranges.count - 1]
+    }
+    tab.updateSelection(target)
   }
 
   private func scheduleSessionPersistence() {

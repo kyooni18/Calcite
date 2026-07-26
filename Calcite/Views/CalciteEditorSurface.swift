@@ -1024,13 +1024,7 @@ struct CodeTextEditor: NSViewRepresentable {
       vimConfigurationSignature = signature
 
       if let controller = vimController {
-        let cursor = textView.selectedRange().location
-        if synchronizedVimTextRevision != parent.textRevision
-          || controller.engine.state.cursor != cursor
-        {
-          controller.synchronize(text: textView.string, cursor: cursor)
-          synchronizedVimTextRevision = parent.textRevision
-        }
+        synchronizeVimControllerIfNeeded(controller, with: textView)
         let mode = controller.engine.state.mode
         updateVimCursorStyle(for: mode, in: textView)
         publishVimMode(mode)
@@ -1047,13 +1041,7 @@ struct CodeTextEditor: NSViewRepresentable {
         let token = vimToken(for: event, mode: controller.engine.state.mode)
       else { return false }
 
-      let cursor = textView.selectedRange().location
-      if synchronizedVimTextRevision != parent.textRevision
-        || controller.engine.state.cursor != cursor
-      {
-        controller.synchronize(text: textView.string, cursor: cursor)
-        synchronizedVimTextRevision = parent.textRevision
-      }
+      synchronizeVimControllerIfNeeded(controller, with: textView)
       do {
         let result = try controller.handle(token: token)
         guard result.consumed else { return false }
@@ -1244,7 +1232,7 @@ struct CodeTextEditor: NSViewRepresentable {
         codeTextView.vimCursorStyle = parent.profile.vim.insertCursorStyle.overrideStyle
       case .replace:
         codeTextView.vimCursorStyle = parent.profile.vim.replaceCursorStyle.overrideStyle
-      case .normal, .visualCharacter, .visualLine, .commandLine, .search:
+      case .normal, .visualCharacter, .visualLine, .visualBlock, .commandLine, .search:
         codeTextView.vimCursorStyle = parent.profile.vim.normalCursorStyle.overrideStyle
       }
     }
@@ -1300,19 +1288,22 @@ struct CodeTextEditor: NSViewRepresentable {
       }
     }
 
-    private func vimToken(for event: NSEvent, mode: VimMode) -> String? {
+    private func vimToken(for event: NSEvent, mode _: VimMode) -> String? {
       let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       switch event.keyCode {
       case 36, 76: return "<CR>"
-      case 48: return mode == .insert || mode == .replace ? "\t" : nil
+      case 48: return "<Tab>"
       case 51: return "<BS>"
       case 53: return "<Esc>"
-      case 123: return mode == .insert || mode == .replace ? nil : "h"
-      case 124: return mode == .insert || mode == .replace ? nil : "l"
-      case 125: return mode == .insert || mode == .replace ? nil : "j"
-      case 126: return mode == .insert || mode == .replace ? nil : "k"
-      case 116: return mode == .insert || mode == .replace ? nil : "<C-b>"
-      case 121: return mode == .insert || mode == .replace ? nil : "<C-f>"
+      case 115: return "<Home>"
+      case 117: return "<Del>"
+      case 119: return "<End>"
+      case 123: return "<Left>"
+      case 124: return "<Right>"
+      case 125: return "<Down>"
+      case 126: return "<Up>"
+      case 116: return "<PageUp>"
+      case 121: return "<PageDown>"
       default: break
       }
       guard let characters = event.charactersIgnoringModifiers, !characters.isEmpty else {
@@ -1324,23 +1315,40 @@ struct CodeTextEditor: NSViewRepresentable {
       return event.characters ?? characters
     }
 
+    private func synchronizeVimControllerIfNeeded(
+      _ controller: VimKeymapController,
+      with textView: NSTextView
+    ) {
+      let currentRanges = textView.selectedRanges.map(\.rangeValue)
+      let expectedRanges = vimSelections(from: controller.engine.state)
+      let textChanged =
+        synchronizedVimTextRevision != parent.textRevision
+        || controller.engine.state.text != textView.string
+      guard textChanged || currentRanges != expectedRanges else { return }
+      let cursor = currentRanges.first?.location ?? textView.selectedRange().location
+      controller.synchronize(text: textView.string, cursor: cursor)
+      synchronizedVimTextRevision = parent.textRevision
+    }
+
     private func applyVimExecution(_ execution: VimExecutionResult, to textView: NSTextView) {
       let state = execution.state
       updateVimCursorStyle(for: state.mode, in: textView)
-      let selection = vimSelection(from: state)
+      let selections = vimSelections(from: state)
+      let primarySelection = vimPrimarySelection(from: selections, state: state)
+      let selectionValues = selections.map { NSValue(range: $0) }
       if state.text != textView.string {
         let edit = Self.singleEdit(from: textView.string, to: state.text)
         isApplyingExternalUpdate = true
         textView.textStorage?.replaceCharacters(in: edit.range, with: edit.replacement)
-        textView.setSelectedRange(selection)
-        textView.scrollRangeToVisible(selection)
+        textView.setSelectedRanges(selectionValues, affinity: .downstream, stillSelecting: false)
+        textView.scrollRangeToVisible(primarySelection)
         isApplyingExternalUpdate = false
         (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
         synchronizedVimTextRevision = publishEdit(
           range: edit.range,
           replacement: edit.replacement,
           resultingText: state.text,
-          selection: selection
+          selection: primarySelection
         )
         pendingPresentationRange = affectedPresentationRange(
           in: state.text,
@@ -1353,28 +1361,43 @@ struct CodeTextEditor: NSViewRepresentable {
           replacement: edit.replacement
         )
         scheduleCaretPublication(for: textView)
-      } else if textView.selectedRange() != selection {
-        isApplyingExternalUpdate = true
-        textView.setSelectedRange(selection)
-        textView.scrollRangeToVisible(selection)
-        isApplyingExternalUpdate = false
-        (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
-        publishSelection(selection)
-        reloadEditorGeometry(for: textView)
-        scheduleCaretPublication(for: textView)
+      } else {
+        let currentRanges = textView.selectedRanges.map(\.rangeValue)
+        if currentRanges != selections {
+          isApplyingExternalUpdate = true
+          textView.setSelectedRanges(selectionValues, affinity: .downstream, stillSelecting: false)
+          textView.scrollRangeToVisible(primarySelection)
+          isApplyingExternalUpdate = false
+          (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+          publishSelection(primarySelection)
+          reloadEditorGeometry(for: textView)
+          scheduleCaretPublication(for: textView)
+        }
       }
       publishVimMode(state.mode)
       for request in execution.hostRequests { parent.onVimHostRequest(request) }
     }
 
-    private func vimSelection(from state: VimState) -> NSRange {
+    private func vimSelections(from state: VimState) -> [NSRange] {
       let length = (state.text as NSString).length
-      if let visual = state.selection {
-        let lower = min(max(visual.lowerBound, 0), length)
-        let upper = min(max(visual.upperBound, lower), length)
-        return NSRange(location: lower, length: upper - lower)
+      if let visual = state.selection, !visual.ranges.isEmpty {
+        return visual.ranges.map { range in
+          let lower = min(max(range.lowerBound, 0), length)
+          let upper = min(max(range.upperBound, lower), length)
+          return NSRange(location: lower, length: upper - lower)
+        }
       }
-      return NSRange(location: min(max(state.cursor, 0), length), length: 0)
+      return [NSRange(location: min(max(state.cursor, 0), length), length: 0)]
+    }
+
+    private func vimPrimarySelection(from selections: [NSRange], state: VimState) -> NSRange {
+      guard let first = selections.first else {
+        return NSRange(location: max(0, state.cursor), length: 0)
+      }
+      guard selections.count > 1 else { return first }
+      let lower = selections.map(\.location).min() ?? first.location
+      let upper = selections.map(NSMaxRange).max() ?? NSMaxRange(first)
+      return NSRange(location: lower, length: max(0, upper - lower))
     }
 
     private static func applying(
