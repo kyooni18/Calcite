@@ -60,6 +60,7 @@ private final class EditorInsertionCaretView: NSView {
 final class CodeEditorTextView: NSTextView {
   var languageID = ""
   var keyEventHandler: ((NSEvent, NSTextView) -> Bool)?
+  var textInputHandler: ((Any, NSRange, NSTextView) -> Bool)?
   var zoomHandler: ((CGFloat, NSTextView) -> Bool)?
   var goToDefinitionHandler: (() -> Void)?
   var findReferencesHandler: (() -> Void)?
@@ -645,6 +646,12 @@ final class CodeEditorTextView: NSTextView {
     case .information: return "i"
     case .hint: return "~"
     }
+  }
+
+  override func insertText(_ insertString: Any, replacementRange: NSRange) {
+    if textInputHandler?(insertString, replacementRange, self) == true { return }
+    super.insertText(insertString, replacementRange: replacementRange)
+    refreshCustomInsertionPoint()
   }
 
   override func keyDown(with event: NSEvent) {

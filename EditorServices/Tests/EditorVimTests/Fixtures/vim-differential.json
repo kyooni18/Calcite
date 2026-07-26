@@ -1,0 +1,402 @@
+[
+  {
+    "name": "word-forward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "w",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "counted-word-forward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2w",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 8
+  },
+  {
+    "name": "word-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "e",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 2
+  },
+  {
+    "name": "counted-word-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2e",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 6
+  },
+  {
+    "name": "word-backward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "b",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "counted-word-backward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "2b",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "line-start",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "0",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "first-nonblank",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "^",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "line-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "$",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 12
+  },
+  {
+    "name": "document-start",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 42,
+    "notation": "gg",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "document-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "G",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 49
+  },
+  {
+    "name": "line-by-count",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "3G",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 32
+  },
+  {
+    "name": "line-down",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "j",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 22
+  },
+  {
+    "name": "counted-line-down",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "2j",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 40
+  },
+  {
+    "name": "line-up",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 42,
+    "notation": "k",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 24
+  },
+  {
+    "name": "next-line-first-nonblank",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "+",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "previous-line-first-nonblank",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 42,
+    "notation": "-",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "current-line-first-nonblank",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 18,
+    "notation": "_",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "counted-underscore",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2_",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "column",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "7|",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 6
+  },
+  {
+    "name": "delete-character",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "x",
+    "expectedText": "ne two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-counted-characters",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "3x",
+    "expectedText": " two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-line",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "dd",
+    "expectedText": "    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "delete-counted-lines",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2dd",
+    "expectedText": "seven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-word",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "dw",
+    "expectedText": "two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-counted-words",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2dw",
+    "expectedText": "three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-word-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "de",
+    "expectedText": " two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-backward-word",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "db",
+    "expectedText": "one three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "delete-to-line-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 4,
+    "notation": "d$",
+    "expectedText": "one \n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 3
+  },
+  {
+    "name": "delete-to-line-start",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 8,
+    "notation": "d0",
+    "expectedText": "three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-to-first-nonblank",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 18,
+    "notation": "d^",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 18
+  },
+  {
+    "name": "delete-to-document-end",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 27,
+    "notation": "dG",
+    "expectedText": "one two three\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-to-document-start",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 42,
+    "notation": "dgg",
+    "expectedText": "last line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "yank-word-no-text-change",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "yw",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "yank-line-no-text-change",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "yy",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "indent-line",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": ">>",
+    "expectedText": "  one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 2
+  },
+  {
+    "name": "indent-counted-lines",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2>>",
+    "expectedText": "  one two three\n      four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 2
+  },
+  {
+    "name": "outdent-line",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 18,
+    "notation": "<<",
+    "expectedText": "one two three\n  four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 16
+  },
+  {
+    "name": "join-lines",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "J",
+    "expectedText": "one two three four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 13
+  },
+  {
+    "name": "join-three-lines",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "2J",
+    "expectedText": "one two three four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 13
+  },
+  {
+    "name": "swap-case",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "~",
+    "expectedText": "One two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "swap-case-count",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "3~",
+    "expectedText": "ONE two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 3
+  },
+  {
+    "name": "find-forward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "f-",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 22
+  },
+  {
+    "name": "till-forward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "t-",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 21
+  },
+  {
+    "name": "find-backward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 27,
+    "notation": "F-",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 22
+  },
+  {
+    "name": "till-backward",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 27,
+    "notation": "T-",
+    "expectedText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 23
+  },
+  {
+    "name": "repeat-find",
+    "initialText": "a-b-c-d\n",
+    "initialCursor": 0,
+    "notation": "f-;",
+    "expectedText": "a-b-c-d\n",
+    "expectedCursor": 3
+  },
+  {
+    "name": "reverse-find",
+    "initialText": "a-b-c-d\n",
+    "initialCursor": 0,
+    "notation": "f-;,",
+    "expectedText": "a-b-c-d\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "visual-delete",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "vwx",
+    "expectedText": "wo three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "visual-line-delete",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "Vjd",
+    "expectedText": "seven eight nine\nlast line\n",
+    "expectedCursor": 0
+  }
+]

@@ -85,7 +85,11 @@ let package = Package(
     .testTarget(name: "EditorCoreTests", dependencies: ["EditorCore"]),
     .testTarget(name: "EditorWorkspaceTests", dependencies: ["EditorWorkspace"]),
     .testTarget(name: "EditorServiceKitTests", dependencies: ["EditorServiceKit"]),
-    .testTarget(name: "EditorVimTests", dependencies: ["EditorVim"]),
+    .testTarget(
+      name: "EditorVimTests",
+      dependencies: ["EditorVim"],
+      resources: [.copy("Fixtures")]
+    ),
     .testTarget(
       name: "EditorDAPTests",
       dependencies: [
