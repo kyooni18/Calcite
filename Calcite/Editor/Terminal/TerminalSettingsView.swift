@@ -18,6 +18,7 @@
             fontSection
             colorSection
             spacingSection
+            tuiSection
             ansiSection
           }
           .padding(20)
@@ -121,6 +122,20 @@
         terminalSlider("Line spacing", keyPath: \.lineSpacing, range: 0...12)
       }
       .disabled(usesSystemProfile)
+    }
+
+    private var tuiSection: some View {
+      TerminalSettingsSection("Terminal UI") {
+        Toggle(
+          "Full-width TUI backgrounds",
+          isOn: valueBinding(\.preservesEraseCellBackgrounds)
+        )
+        Text(
+          "Off keeps Vim and Neovim completion menus compact. Turn it on for exact erase-to-end-of-line background cells."
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
     }
 
     private var ansiSection: some View {

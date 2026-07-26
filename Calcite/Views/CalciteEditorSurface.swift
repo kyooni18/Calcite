@@ -15,12 +15,13 @@ struct CalciteEditorSurface: View {
   let showsMarkdownSyntax: Bool
   let wrapsMarkdownLines: Bool
   let profile: EditorCustomProfile
+  let editorMode: EditorInterface
   let onVimHostRequest: (VimHostRequest) -> Void
   let onGoToDefinition: () -> Void
   let onFindReferences: () -> Void
   let onShowQuickHelp: () -> Void
   let onShowQuickFixes: (Diagnostic) -> Void
-  let onToggleInputMode: () -> Void
+  let onSelectInputMode: (EditorInterface) -> Void
   let commandEvent: EditorTabCommandEvent?
 
   var body: some View {
@@ -30,7 +31,8 @@ struct CalciteEditorSurface: View {
       EditorStatusBar(
         tab: tab,
         profile: profile,
-        onToggleInputMode: onToggleInputMode
+        editorMode: editorMode,
+        onSelectInputMode: onSelectInputMode
       )
     }
     .clipped()
@@ -500,7 +502,8 @@ private struct EditorDiagnosticOverlay: View {
 private struct EditorStatusBar: View {
   @ObservedObject var tab: EditorTab
   let profile: EditorCustomProfile
-  let onToggleInputMode: () -> Void
+  let editorMode: EditorInterface
+  let onSelectInputMode: (EditorInterface) -> Void
 
   var body: some View {
     HStack(spacing: 10) {
@@ -514,13 +517,26 @@ private struct EditorStatusBar: View {
         Spacer()
       }
 
-      Button(profile.vim.enabled ? "VIM" : "GUI") {
-        onToggleInputMode()
+      Menu {
+        ForEach(EditorInterface.allCases) { mode in
+          Button {
+            onSelectInputMode(mode)
+          } label: {
+            if mode == editorMode {
+              Label(mode.title, systemImage: "checkmark")
+            } else {
+              Text(mode.title)
+            }
+          }
+        }
+      } label: {
+        Text(editorMode.title.uppercased())
+          .font(.caption.monospaced().weight(.semibold))
+          .foregroundStyle(profile.vim.enabled ? Color.accentColor : Color.secondary)
       }
-      .buttonStyle(.plain)
-      .font(.caption.monospaced().weight(.semibold))
-      .foregroundStyle(profile.vim.enabled ? Color.accentColor : Color.secondary)
-      .help(profile.vim.enabled ? "Use GUI editing" : "Use Vim editing")
+      .menuStyle(.borderlessButton)
+      .fixedSize()
+      .help("Choose editor mode")
 
       if profile.vim.enabled, tab.vimPrompt == nil {
         Text(tab.vimMode.rawValue.uppercased())

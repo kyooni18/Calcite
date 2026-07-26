@@ -180,6 +180,17 @@
       Task { await worker.send(value) }
     }
 
+    /// Sends pointer input only while the program in the PTY has opted into a
+    /// VT mouse mode. This keeps ordinary shells from receiving synthetic bytes.
+    func sendMouse(_ input: TerminalMouseInput) {
+      guard let value = terminalDecoder.mouseSequence(for: input) else { return }
+      send(value)
+    }
+
+    func setPreservesEraseCellBackgrounds(_ enabled: Bool) {
+      terminalDecoder.preservesEraseCellBackgrounds = enabled
+    }
+
     func resize(columns: Int, rows: Int) {
       let next = (columns: max(2, columns), rows: max(2, rows))
       if terminalSize != next {

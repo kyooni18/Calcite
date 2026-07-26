@@ -8,17 +8,26 @@
     let preferences: EditorTerminalPreferences
     let appearanceRevision: UInt64
     let send: (String) -> Void
+    var sendMouse: ((TerminalMouseInput) -> Void)? = nil
     let clear: () -> Void
     let resize: (Int, Int) -> Void
     var save: (() -> Void)? = nil
+    var navigateSection: ((Bool) -> Void)? = nil
+    var hostLeader: String? = nil
+    var navigateSectionDirection: ((MainSectionDirection) -> Void)? = nil
+    var allowsScrolling = true
+    /// Vim/Neovim use the terminal mouse protocol; consuming these events here
+    /// prevents NSTextView from creating a native text selection.
+    var routesPointerEventsToTerminal = false
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeNSView(context: Context) -> NSScrollView {
       let scrollView = TerminalScrollView()
-      scrollView.hasVerticalScroller = true
+      scrollView.hasVerticalScroller = allowsScrolling
       scrollView.hasHorizontalScroller = false
       scrollView.autohidesScrollers = true
+      scrollView.allowsScrolling = allowsScrolling
       scrollView.borderType = .noBorder
       scrollView.drawsBackground = true
       // Leave room below the shell prompt when the terminal view is remounted.
@@ -26,7 +35,8 @@
 
       let textView = TerminalInputTextView()
       textView.isEditable = false
-      textView.isSelectable = true
+      textView.isSelectable = !routesPointerEventsToTerminal
+      textView.suppressesNativePointerInteraction = routesPointerEventsToTerminal
       textView.isRichText = false
       textView.drawsBackground = true
       textView.textContainer?.lineFragmentPadding = 0
@@ -36,6 +46,9 @@
       textView.isAutomaticTextReplacementEnabled = false
       textView.isContinuousSpellCheckingEnabled = false
       textView.keyHandler = context.coordinator.handle
+      textView.pointerHandler = { [weak coordinator = context.coordinator] event, input in
+        coordinator?.routePointer(input, from: event) ?? false
+      }
       scrollView.documentView = textView
 
       context.coordinator.textView = textView
@@ -48,6 +61,9 @@
         coordinator?.focusInput()
         coordinator?.scrollToBottom()
       }
+      scrollView.pointerHandler = { [weak coordinator] event in
+        coordinator?.routeScroll(event) ?? false
+      }
       context.coordinator.updateAppearance(force: true)
       context.coordinator.updateSize()
       context.coordinator.updateSnapshot(snapshot)
@@ -57,6 +73,12 @@
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
       context.coordinator.parent = self
+      scrollView.hasVerticalScroller = allowsScrolling
+      (scrollView as? TerminalScrollView)?.allowsScrolling = allowsScrolling
+      if let textView = scrollView.documentView as? TerminalInputTextView {
+        textView.isSelectable = !routesPointerEventsToTerminal
+        textView.suppressesNativePointerInteraction = routesPointerEventsToTerminal
+      }
       context.coordinator.updateAppearance()
       context.coordinator.updateSize()
       context.coordinator.updateSnapshot(snapshot)
@@ -76,6 +98,7 @@
       private var appliedAppearanceRevision: UInt64?
       private var pendingSize: (columns: Int, rows: Int)?
       private var resizePublicationTask: Task<Void, Never>?
+      private var pendingHostLeader: String?
 
       init(parent: TerminalTextView) { self.parent = parent }
 
@@ -184,6 +207,48 @@
 
       func handle(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains([.control, .option]),
+          !flags.contains(.command),
+          !flags.contains(.shift),
+          let navigateSection = parent.navigateSection
+        {
+          switch event.keyCode {
+          case 123:
+            navigateSection(false)
+            return true
+          case 124:
+            navigateSection(true)
+            return true
+          default:
+            break
+          }
+        }
+
+        if let leader = pendingHostLeader {
+          pendingHostLeader = nil
+          if let direction = hostSectionDirection(for: event, flags: flags),
+            let navigateSectionDirection = parent.navigateSectionDirection
+          {
+            navigateSectionDirection(direction)
+            return true
+          }
+          // This was not one of Calcite's host mappings. Return the leader to the
+          // terminal before delivering the current key so Vim/Neovim receives the
+          // original sequence unchanged.
+          parent.send(leader)
+        }
+
+        if let leader = parent.hostLeader,
+          !leader.isEmpty,
+          !flags.contains(.command),
+          !flags.contains(.control),
+          !flags.contains(.option),
+          event.characters == leader
+        {
+          pendingHostLeader = leader
+          return true
+        }
+
         if flags.contains(.command) {
           switch event.charactersIgnoringModifiers?.lowercased() {
           case "c":
@@ -245,6 +310,63 @@
         guard let value else { return false }
         parent.send(value)
         return true
+      }
+
+      func routePointer(_ input: TerminalPointerInput, from event: NSEvent) -> Bool {
+        guard parent.routesPointerEventsToTerminal else { return false }
+        focusInput()
+        guard let mouse = mouseInput(input, event: event) else { return true }
+        parent.sendMouse?(mouse)
+        return true
+      }
+
+      func routeScroll(_ event: NSEvent) -> Bool {
+        guard parent.routesPointerEventsToTerminal else { return false }
+        focusInput()
+        let delta = event.scrollingDeltaY
+        guard delta != 0, let point = terminalPoint(for: event) else { return true }
+        parent.sendMouse?(.scroll(up: delta > 0, column: point.column, row: point.row))
+        return true
+      }
+
+      private func mouseInput(_ input: TerminalPointerInput, event: NSEvent) -> TerminalMouseInput? {
+        guard let point = terminalPoint(for: event) else { return nil }
+        switch input {
+        case .leftDown: return .buttonDown(0, column: point.column, row: point.row)
+        case .leftUp: return .buttonUp(0, column: point.column, row: point.row)
+        case .leftDrag: return .drag(0, column: point.column, row: point.row)
+        case .rightDown: return .buttonDown(2, column: point.column, row: point.row)
+        case .rightUp: return .buttonUp(2, column: point.column, row: point.row)
+        case .rightDrag: return .drag(2, column: point.column, row: point.row)
+        }
+      }
+
+      private func terminalPoint(for event: NSEvent) -> (column: Int, row: Int)? {
+        guard let textView, let font = textView.font else { return nil }
+        let location = textView.convert(event.locationInWindow, from: nil)
+        let origin = textView.textContainerOrigin
+        let width = max(1, ("M" as NSString).size(withAttributes: [.font: font]).width)
+        let height = max(1, textView.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize)
+        return (
+          column: max(1, Int((location.x - origin.x) / width) + 1),
+          row: max(1, Int((location.y - origin.y) / height) + 1)
+        )
+      }
+
+      private func hostSectionDirection(
+        for event: NSEvent,
+        flags: NSEvent.ModifierFlags
+      ) -> MainSectionDirection? {
+        guard !flags.contains(.command), !flags.contains(.control), !flags.contains(.option) else {
+          return nil
+        }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "h": return .left
+        case "j": return .down
+        case "k": return .up
+        case "l": return .right
+        default: return nil
+        }
       }
 
       private func renderSnapshot(
@@ -322,6 +444,8 @@
   private final class TerminalScrollView: NSScrollView {
     var resizeHandler: (() -> Void)?
     var focusHandler: (() -> Void)?
+    var allowsScrolling = true
+    var pointerHandler: ((NSEvent) -> Bool)?
 
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
@@ -333,11 +457,22 @@
       super.layout()
       resizeHandler?()
     }
+
+    override func scrollWheel(with event: NSEvent) {
+      if pointerHandler?(event) == true { return }
+      guard allowsScrolling else {
+        focusHandler?()
+        return
+      }
+      super.scrollWheel(with: event)
+    }
   }
 
   @MainActor
   final class TerminalInputTextView: NSTextView {
     var keyHandler: ((NSEvent) -> Bool)?
+    var pointerHandler: ((NSEvent, TerminalPointerInput) -> Bool)?
+    var suppressesNativePointerInteraction = false
     var terminalCursorLocation = 0 {
       didSet {
         resetCursorBlink()
@@ -379,9 +514,40 @@
     }
 
     override func mouseDown(with event: NSEvent) {
+      if pointerHandler?(event, .leftDown) == true { return }
       window?.makeFirstResponder(self)
       resetCursorBlink()
       super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+      if pointerHandler?(event, .leftUp) == true { return }
+      super.mouseUp(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+      if pointerHandler?(event, .leftDrag) == true { return }
+      super.mouseDragged(with: event)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+      if pointerHandler?(event, .rightDown) == true { return }
+      super.rightMouseDown(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+      if pointerHandler?(event, .rightUp) == true { return }
+      super.rightMouseUp(with: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+      if pointerHandler?(event, .rightDrag) == true { return }
+      super.rightMouseDragged(with: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+      if suppressesNativePointerInteraction { return nil }
+      return super.menu(for: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -490,5 +656,9 @@
         height: max(1, lineRect.height)
       )
     }
+  }
+
+enum TerminalPointerInput {
+    case leftDown, leftUp, leftDrag, rightDown, rightUp, rightDrag
   }
 #endif

@@ -1,6 +1,8 @@
+import AppKit
 import Combine
 import EditorServices
 import Foundation
+import SwiftUI
 
 @MainActor
 protocol EditorCommandExecutorDelegate: AnyObject {
@@ -32,6 +34,7 @@ final class EditorCommandExecutor: ObservableObject {
   let themeBuilderSession: ThemeBuilderSession
 
   private let onOpenItem: () -> Void
+  private var settingsWindow: NSWindow?
 
   init(
     controller: EditorWorkspaceController,
@@ -97,7 +100,7 @@ final class EditorCommandExecutor: ObservableObject {
       controller.toggleBreakpointAtCurrentLine()
 
     case .openSettings:
-      delegate?.commandPresentSection(.settings)
+      showSettingsWindow()
     case .openThemeBuilder:
       themeBuilderSession.beginEditing()
       delegate?.commandPresentSection(.themeBuilder)
@@ -200,6 +203,30 @@ final class EditorCommandExecutor: ObservableObject {
     Task {
       _ = await openAndSelectDocument(url)
     }
+  }
+
+  private func showSettingsWindow() {
+    if let settingsWindow {
+      settingsWindow.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      return
+    }
+
+    let rootView = ServiceSettingsView(
+      controller: controller,
+      openFile: openDocument
+    )
+    let hostingController = NSHostingController(rootView: rootView)
+    let window = NSWindow(contentViewController: hostingController)
+    window.title = "Calcite Settings"
+    window.setContentSize(NSSize(width: 1_080, height: 760))
+    window.minSize = NSSize(width: 820, height: 560)
+    window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+    window.isReleasedWhenClosed = false
+    window.center()
+    settingsWindow = window
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
   }
 
   @discardableResult

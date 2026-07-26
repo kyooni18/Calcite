@@ -36,11 +36,14 @@ struct CalciteDebugPanelView: View {
 @MainActor
 struct CalciteTerminalView: View {
   @ObservedObject var backend: CalciteBackend
+  @ObservedObject var windowSession: CalciteBackendWindowSession
 
   var body: some View {
     CalciteTerminalSurface(
       session: backend.terminal,
-      themeProfile: backend.controller.profile.terminal
+      themeProfile: backend.controller.profile.terminal,
+      hostLeader: backend.controller.profile.vim.normalizedLeader,
+      navigateSection: windowSession.commandNavigateSection(direction:)
     )
   }
 }

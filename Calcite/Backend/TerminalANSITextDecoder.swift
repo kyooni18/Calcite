@@ -15,6 +15,8 @@ struct TerminalTextStyle: Equatable, Sendable {
   var isInverse = false
 
   static let plain = Self()
+
+  var hasBackgroundFill: Bool { background != nil || isInverse }
 }
 
 struct TerminalStyleSpan: Equatable, Sendable {
@@ -39,6 +41,15 @@ struct TerminalRenderedSnapshot: Equatable, Sendable {
   }
 }
 
+/// A pointer event expressed in terminal cell coordinates (which are one-based
+/// in the VT mouse protocols).
+enum TerminalMouseInput: Sendable {
+  case buttonDown(Int, column: Int, row: Int)
+  case buttonUp(Int, column: Int, row: Int)
+  case drag(Int, column: Int, row: Int)
+  case scroll(up: Bool, column: Int, row: Int)
+}
+
 /// Cursor-aware VT screen model used by the embedded PTY view.
 ///
 /// It supports the control and SGR sequences commonly emitted by shells, line editors,
@@ -58,12 +69,23 @@ struct TerminalANSITextDecoder: Sendable {
   private var controlSequence = ""
   private var screen = TerminalScreenBuffer()
 
+  /// Opt-in for exact terminal-cell backgrounds after EL. Keeping this off
+  /// makes popup menus from Vim/Neovim compact in Calcite's native text view.
+  var preservesEraseCellBackgrounds = false {
+    didSet { screen.preservesEraseCellBackgrounds = preservesEraseCellBackgrounds }
+  }
+
   var renderedSnapshot: TerminalRenderedSnapshot { screen.renderedSnapshot }
+
+  mutating func mouseSequence(for input: TerminalMouseInput) -> String? {
+    screen.mouseSequence(for: input)
+  }
 
   mutating func reset(columns: Int = 100, rows: Int = 32) {
     state = .text
     controlSequence = ""
     screen = TerminalScreenBuffer(columns: columns, rows: rows)
+    screen.preservesEraseCellBackgrounds = preservesEraseCellBackgrounds
   }
 
   mutating func resize(columns: Int, rows: Int) {
@@ -203,6 +225,9 @@ private struct TerminalSavedScreen: Sendable {
   var cursorRow: Int
   var cursorColumn: Int
   var savedCursor: (row: Int, column: Int)?
+  var scrollTop: Int
+  var scrollBottom: Int
+  var hasActiveScrollRegion: Bool
 }
 
 private struct TerminalScreenBuffer: Sendable {
@@ -214,12 +239,20 @@ private struct TerminalScreenBuffer: Sendable {
   private var savedCursor: (row: Int, column: Int)?
   private var primaryScreen: TerminalSavedScreen?
   private var currentStyle = TerminalTextStyle.plain
+  private var mouseReportingModes: Set<Int> = []
+  var preservesEraseCellBackgrounds = false
+  /// DECSTBM margins. Full-screen terminal applications such as Neovim use
+  /// these to scroll their editing grid without moving the status line.
+  private var scrollTop = 0
+  private var scrollBottom: Int
+  private var hasActiveScrollRegion = false
   private(set) var columns: Int
   private(set) var rows: Int
 
   init(columns: Int = 100, rows: Int = 32) {
     self.columns = max(2, columns)
     self.rows = max(2, rows)
+    self.scrollBottom = max(2, rows) - 1
   }
 
   var renderedSnapshot: TerminalRenderedSnapshot {
@@ -294,6 +327,8 @@ private struct TerminalScreenBuffer: Sendable {
   mutating func resize(columns: Int, rows: Int) {
     self.columns = max(2, columns)
     self.rows = max(2, rows)
+    scrollTop = min(scrollTop, self.rows - 1)
+    scrollBottom = max(scrollTop, min(scrollBottom, self.rows - 1))
     cursorColumn = min(cursorColumn, self.columns - 1)
     normalizeCursor()
   }
@@ -326,8 +361,12 @@ private struct TerminalScreenBuffer: Sendable {
   }
 
   mutating func lineFeed() {
-    cursorRow += 1
-    ensureRow(cursorRow)
+    if hasActiveScrollRegion, cursorRow == scrollBottom {
+      scrollRegionUp()
+    } else {
+      cursorRow += 1
+      ensureRow(cursorRow)
+    }
     trimScrollbackIfNeeded()
   }
 
@@ -403,7 +442,8 @@ private struct TerminalScreenBuffer: Sendable {
     case "s": saveCursor()
     case "u": restoreCursor()
     case "m": applyGraphicRendition(parameters)
-    case "h", "l", "n", "r", "t", "q": break
+    case "r": setScrollRegion(parameters)
+    case "h", "l", "n", "t", "q": break
     default: break
     }
   }
@@ -418,11 +458,65 @@ private struct TerminalScreenBuffer: Sendable {
         enabled ? enterAlternateScreen() : leaveAlternateScreen()
       case 1048:
         enabled ? saveCursor() : restoreCursor()
+      case 1000, 1002, 1003, 1006:
+        if enabled {
+          mouseReportingModes.insert(mode)
+        } else {
+          mouseReportingModes.remove(mode)
+        }
       default:
         break
       }
     }
     return true
+  }
+
+  mutating func mouseSequence(for input: TerminalMouseInput) -> String? {
+    guard !mouseReportingModes.isEmpty else { return nil }
+
+    let code: Int
+    let column: Int
+    let row: Int
+    let isRelease: Bool
+    switch input {
+    case .buttonDown(let button, let inputColumn, let inputRow):
+      code = button
+      column = inputColumn
+      row = inputRow
+      isRelease = false
+    case .buttonUp(let button, let inputColumn, let inputRow):
+      code = button
+      column = inputColumn
+      row = inputRow
+      isRelease = true
+    case .drag(let button, let inputColumn, let inputRow):
+      code = 32 + button
+      column = inputColumn
+      row = inputRow
+      isRelease = false
+    case .scroll(let up, let inputColumn, let inputRow):
+      code = up ? 64 : 65
+      column = inputColumn
+      row = inputRow
+      isRelease = false
+    }
+
+    let safeColumn = max(1, column)
+    let safeRow = max(1, row)
+    if mouseReportingModes.contains(1006) {
+      return "\u{1B}[<\(code);\(safeColumn);\(safeRow)\(isRelease ? "m" : "M")"
+    }
+
+    // X10 encoding can address 223 cells. Editors that need larger terminals
+    // enable SGR (1006), so clamping here preserves the older protocol safely.
+    let legacyCode = isRelease ? 3 : code
+    let x = min(223, safeColumn)
+    let y = min(223, safeRow)
+    guard let codeScalar = UnicodeScalar(32 + legacyCode),
+      let xScalar = UnicodeScalar(32 + x),
+      let yScalar = UnicodeScalar(32 + y)
+    else { return nil }
+    return "\u{1B}[M\(Character(codeScalar))\(Character(xScalar))\(Character(yScalar))"
   }
 
   private mutating func enterAlternateScreen() {
@@ -431,9 +525,18 @@ private struct TerminalScreenBuffer: Sendable {
       lines: lines,
       cursorRow: cursorRow,
       cursorColumn: cursorColumn,
-      savedCursor: savedCursor
+      savedCursor: savedCursor,
+      scrollTop: scrollTop,
+      scrollBottom: scrollBottom,
+      hasActiveScrollRegion: hasActiveScrollRegion
     )
-    clearDisplay()
+    lines = Array(repeating: [], count: rows)
+    cursorRow = 0
+    cursorColumn = 0
+    savedCursor = nil
+    scrollTop = 0
+    scrollBottom = rows - 1
+    hasActiveScrollRegion = true
   }
 
   private mutating func leaveAlternateScreen() {
@@ -442,6 +545,9 @@ private struct TerminalScreenBuffer: Sendable {
     cursorRow = primaryScreen.cursorRow
     cursorColumn = primaryScreen.cursorColumn
     savedCursor = primaryScreen.savedCursor
+    scrollTop = primaryScreen.scrollTop
+    scrollBottom = primaryScreen.scrollBottom
+    hasActiveScrollRegion = primaryScreen.hasActiveScrollRegion
     self.primaryScreen = nil
     normalizeCursor()
   }
@@ -549,13 +655,21 @@ private struct TerminalScreenBuffer: Sendable {
     cursorRow = 0
     cursorColumn = 0
     savedCursor = nil
+    scrollTop = 0
+    scrollBottom = rows - 1
+    hasActiveScrollRegion = false
   }
 
   private mutating func eraseLine(mode: Int) {
     ensureRow(cursorRow)
     switch mode {
     case 1: eraseCurrentLinePrefix()
-    case 2: lines[cursorRow] = []
+    case 2:
+      if !preservesEraseCellBackgrounds || !currentStyle.hasBackgroundFill {
+        lines[cursorRow] = []
+      } else {
+        lines[cursorRow] = Array(repeating: .blank(style: currentStyle), count: columns)
+      }
     default: eraseCurrentLineSuffix()
     }
   }
@@ -568,8 +682,16 @@ private struct TerminalScreenBuffer: Sendable {
   }
 
   private mutating func eraseCurrentLineSuffix() {
-    guard cursorColumn < lines[cursorRow].count else { return }
-    lines[cursorRow].removeSubrange(cursorColumn..<lines[cursorRow].count)
+    guard preservesEraseCellBackgrounds, currentStyle.hasBackgroundFill else {
+      guard cursorColumn < lines[cursorRow].count else { return }
+      lines[cursorRow].removeSubrange(cursorColumn..<lines[cursorRow].count)
+      return
+    }
+
+    ensureCurrentLineLength(columns)
+    for index in cursorColumn..<columns {
+      lines[cursorRow][index] = .blank(style: currentStyle)
+    }
   }
 
   private mutating func deleteCharacters(_ count: Int) {
@@ -602,32 +724,58 @@ private struct TerminalScreenBuffer: Sendable {
   }
 
   private mutating func insertLines(_ count: Int) {
-    ensureRow(cursorRow)
-    lines.insert(contentsOf: repeatElement([], count: count), at: cursorRow)
-    trimScrollbackIfNeeded()
+    guard cursorRow >= scrollTop, cursorRow <= scrollBottom else { return }
+    ensureRow(scrollBottom)
+    let amount = min(count, scrollBottom - cursorRow + 1)
+    lines.insert(contentsOf: repeatElement([], count: amount), at: cursorRow)
+    lines.removeSubrange((scrollBottom + 1)...(scrollBottom + amount))
   }
 
   private mutating func deleteLines(_ count: Int) {
-    ensureRow(cursorRow)
-    let end = min(lines.count, cursorRow + count)
-    guard cursorRow < end else { return }
-    lines.removeSubrange(cursorRow..<end)
-    if lines.isEmpty { lines = [[]] }
-    normalizeCursor()
+    guard cursorRow >= scrollTop, cursorRow <= scrollBottom else { return }
+    ensureRow(scrollBottom)
+    let amount = min(count, scrollBottom - cursorRow + 1)
+    lines.removeSubrange(cursorRow..<(cursorRow + amount))
+    lines.insert(contentsOf: repeatElement([], count: amount), at: scrollBottom - amount + 1)
   }
 
   private mutating func scrollUp(_ count: Int) {
-    for _ in 0..<count {
-      lines.append([])
-      cursorRow += 1
-    }
-    trimScrollbackIfNeeded()
+    for _ in 0..<count { scrollRegionUp() }
   }
 
   private mutating func scrollDown(_ count: Int) {
-    lines.insert(contentsOf: repeatElement([], count: count), at: 0)
-    cursorRow += count
-    trimScrollbackIfNeeded()
+    for _ in 0..<count { scrollRegionDown() }
+  }
+
+  private mutating func setScrollRegion(_ parameters: [Int]) {
+    let top = parameters.indices.contains(0) ? parameters[0] : 1
+    let bottom = parameters.indices.contains(1) ? parameters[1] : rows
+    guard top > 0, bottom > top, bottom <= rows else {
+      scrollTop = 0
+      scrollBottom = rows - 1
+      hasActiveScrollRegion = true
+      cursorRow = 0
+      cursorColumn = 0
+      return
+    }
+    scrollTop = top - 1
+    scrollBottom = bottom - 1
+    hasActiveScrollRegion = true
+    ensureRow(scrollBottom)
+    cursorRow = 0
+    cursorColumn = 0
+  }
+
+  private mutating func scrollRegionUp() {
+    ensureRow(scrollBottom)
+    lines.remove(at: scrollTop)
+    lines.insert([], at: scrollBottom)
+  }
+
+  private mutating func scrollRegionDown() {
+    ensureRow(scrollBottom)
+    lines.remove(at: scrollBottom)
+    lines.insert([], at: scrollTop)
   }
 
   private mutating func ensureRow(_ row: Int) {

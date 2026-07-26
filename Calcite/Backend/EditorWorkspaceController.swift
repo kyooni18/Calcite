@@ -691,7 +691,7 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func toggleEditorInputMode() {
-    profile.vim.enabled.toggle()
+    EditorInterfacePreferences.selectNext()
   }
 
   func refreshProjectContext() {

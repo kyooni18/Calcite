@@ -415,7 +415,9 @@ private final class MainSectionKeyboardFocusLocatorView: NSView {
     let matchesInput: (NSView) -> Bool
     switch kind {
     case .workspace, .editor:
-      matchesInput = { $0 is CodeEditorTextView }
+      // An editor section may host Calcite's native editor or a real Vim/Neovim
+      // terminal. Focus whichever input belongs to the newly active section.
+      matchesInput = { $0 is CodeEditorTextView || $0 is TerminalInputTextView }
     case .panel, .terminal:
       matchesInput = { $0 is TerminalInputTextView }
     case .sidebar, .settings, .themeBuilder, .problems, .buildOutput, .debug, .empty:
@@ -459,6 +461,8 @@ private struct MainSectionLeafView: View {
   @ObservedObject var windowSession: CalciteBackendWindowSession
   @ObservedObject var layout: MainSectionalLayoutController
   let parentSplitAxis: MainSectionSplitAxis?
+  @AppStorage(EditorInterfacePreferences.showsEditorTabBarKey)
+  private var showsEditorTabBar = true
 
   @State private var isHovering = false
 
@@ -468,14 +472,17 @@ private struct MainSectionLeafView: View {
   private var primaryEditorTabID: UUID? {
     node.visibleTabs.first(where: { isEditorHost($0.kind) })?.id
   }
+  private var isEditorSection: Bool {
+    node.visibleTabs.contains { isEditorHost($0.kind) }
+  }
 
   var body: some View {
     VStack(spacing: 0) {
       if node.isSectionVisible {
-        if node.showsTabBar {
+        if node.showsTabBar && (!isEditorSection || showsEditorTabBar) {
           integratedTabBar
           Divider()
-        } else {
+        } else if !isEditorSection || showsEditorTabBar || layout.isCustomizing {
           compactSectionHeader
           Divider()
         }
@@ -983,7 +990,7 @@ private struct MainSectionContentView: View {
       )
 
     case .panel, .terminal:
-      CalciteTerminalView(backend: backend)
+      CalciteTerminalView(backend: backend, windowSession: windowSession)
 
     case .sidebar:
       CalciteWorkspaceSidebar(

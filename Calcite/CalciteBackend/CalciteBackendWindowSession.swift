@@ -48,6 +48,15 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     case sectionTab(UUID)
   }
 
+  #if os(macOS)
+    private struct TerminalEditorSessionEntry {
+      let command: String?
+      let session: EditorTerminalSession
+    }
+
+    private var terminalEditorSessions: [String: TerminalEditorSessionEntry] = [:]
+  #endif
+
   /// A single presentation of a document. Document contents remain owned by `EditorTab`; this
   /// object owns only editor-instance state such as selection, scrolling, and zoom.
   @MainActor
@@ -376,6 +385,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     nowPlaying.stop()
     observations.removeAll()
     editorSessions.removeAll()
+    #if os(macOS)
+      terminalEditorSessions.removeAll()
+    #endif
     activeEditorSessionID = nil
     pendingDocumentOpenURLs.removeAll()
     pendingDocumentClose = nil
@@ -737,6 +749,50 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard let sectionID = sectionalLayout.navigateSection(forward: forward) else { return }
     activateSection(sectionID)
   }
+
+  #if os(macOS)
+    /// Starts terminal editor processes for every open document so changing a
+    /// Vim/Neovim tab or section does not wait for the editor to launch.
+    func preloadTerminalEditors(interface: EditorInterface) {
+      guard interface.usesTerminalEditor, let backend else { return }
+      let openPaths = Set(backend.documents.map { $0.url.standardizedFileURL.path })
+      let staleKeys = terminalEditorSessions.keys.filter { key in
+        !openPaths.contains(where: { key.hasSuffix("|\($0)") })
+      }
+      for key in staleKeys {
+        terminalEditorSessions.removeValue(forKey: key)?.session.stop()
+      }
+      for document in backend.documents {
+        _ = terminalEditorSession(interface: interface, fileURL: document.url)
+      }
+    }
+
+    func terminalEditorSession(
+      interface: EditorInterface,
+      fileURL: URL
+    ) -> EditorTerminalSession {
+      let command = EditorInterfacePreferences.launchCommand(
+        interface: interface,
+        fileURL: fileURL,
+        workspaceURL: backend?.workspaceURL ?? fileURL.deletingLastPathComponent()
+      )
+      let key = "\(interface.rawValue)|\(fileURL.standardizedFileURL.path)"
+      if let existing = terminalEditorSessions[key], existing.command == command {
+        if existing.command != nil { existing.session.startIfNeeded() }
+        return existing.session
+      }
+
+      terminalEditorSessions[key]?.session.stop()
+      let session = EditorTerminalSession(
+        workspaceURL: backend?.workspaceURL ?? fileURL.deletingLastPathComponent(),
+        initialCommand: command,
+        monitorsPythonEnvironment: false
+      )
+      terminalEditorSessions[key] = TerminalEditorSessionEntry(command: command, session: session)
+      if command != nil { session.startIfNeeded() }
+      return session
+    }
+  #endif
 
   func navigateTab(forward: Bool) {
     guard let backend, let context = tabNavigationContext() else { return }

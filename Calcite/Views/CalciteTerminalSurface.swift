@@ -5,6 +5,8 @@
   struct CalciteTerminalSurface: View {
     @ObservedObject var session: EditorTerminalSession
     let themeProfile: EditorTerminalProfile?
+    let hostLeader: String
+    let navigateSection: (MainSectionDirection) -> Void
     @StateObject private var appearanceStore = EditorTerminalPreferencesStore()
     @State private var showsSettings = false
 
@@ -25,7 +27,9 @@
           appearanceRevision: appearanceStore.revision,
           send: session.send,
           clear: session.clear,
-          resize: session.resize
+          resize: session.resize,
+          hostLeader: hostLeader,
+          navigateSectionDirection: navigateSection
         )
       }
       .onAppear {
@@ -34,6 +38,9 @@
         } else {
           appearanceStore.refresh()
         }
+        session.setPreservesEraseCellBackgrounds(
+          appearanceStore.preferences.preservesEraseCellBackgrounds
+        )
         session.reattachView()
       }
       .onDisappear {
@@ -41,6 +48,9 @@
       }
       .onChange(of: themeProfile) { _, value in
         if let value { appearanceStore.apply(theme: value) }
+      }
+      .onChange(of: appearanceStore.preferences.preservesEraseCellBackgrounds) { _, enabled in
+        session.setPreservesEraseCellBackgrounds(enabled)
       }
       .sheet(isPresented: $showsSettings) {
         TerminalSettingsView(store: appearanceStore)

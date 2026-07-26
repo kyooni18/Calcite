@@ -4,6 +4,94 @@ import XCTest
 @testable import Calcite
 
 nonisolated final class TerminalResizeRegressionTests: XCTestCase {
+  func testCustomVimLaunchCommandPassesDefaultArgumentsToAnAlias() async {
+    await MainActor.run {
+      let suiteName = "CalciteTests.launchCommand.\(UUID().uuidString)"
+      let defaults = UserDefaults(suiteName: suiteName)!
+      defer { defaults.removePersistentDomain(forName: suiteName) }
+      defaults.set("edit", forKey: EditorInterfacePreferences.neovimLaunchCommandKey)
+
+      let command = EditorInterfacePreferences.launchCommand(
+        interface: .neovim,
+        fileURL: URL(fileURLWithPath: "/tmp/My File.swift"),
+        workspaceURL: URL(fileURLWithPath: "/tmp/Project"),
+        defaults: defaults
+      )
+
+      XCTAssertTrue(command?.hasPrefix("edit --cmd ") == true)
+      XCTAssertTrue(command?.contains(" -- '/tmp/My File.swift'") == true)
+    }
+  }
+
+  func testCustomVimLaunchCommandDoesNotDuplicateExplicitArguments() async {
+    await MainActor.run {
+      let suiteName = "CalciteTests.launchCommand.\(UUID().uuidString)"
+      let defaults = UserDefaults(suiteName: suiteName)!
+      defer { defaults.removePersistentDomain(forName: suiteName) }
+      defaults.set("edit --cmd {leaderCommand} -- {file}", forKey: EditorInterfacePreferences.neovimLaunchCommandKey)
+
+      let command = EditorInterfacePreferences.launchCommand(
+        interface: .neovim,
+        fileURL: URL(fileURLWithPath: "/tmp/File.swift"),
+        workspaceURL: URL(fileURLWithPath: "/tmp/Project"),
+        defaults: defaults
+      )
+
+      XCTAssertEqual(command?.components(separatedBy: "--cmd").count, 2)
+      XCTAssertEqual(command?.components(separatedBy: "'/tmp/File.swift'").count, 2)
+    }
+  }
+
+  func testVimMouseModesEncodeSGRPointerInputAndStopWhenDisabled() async {
+    await MainActor.run {
+      var decoder = TerminalANSITextDecoder()
+      decoder.decode("\u{1B}[?1002;1006h")
+
+      XCTAssertEqual(
+        decoder.mouseSequence(for: .buttonDown(0, column: 12, row: 4)),
+        "\u{1B}[<0;12;4M"
+      )
+      XCTAssertEqual(
+        decoder.mouseSequence(for: .buttonUp(2, column: 12, row: 4)),
+        "\u{1B}[<2;12;4m"
+      )
+      XCTAssertEqual(
+        decoder.mouseSequence(for: .scroll(up: true, column: 12, row: 4)),
+        "\u{1B}[<64;12;4M"
+      )
+
+      decoder.decode("\u{1B}[?1002;1006l")
+      XCTAssertNil(decoder.mouseSequence(for: .buttonDown(0, column: 1, row: 1)))
+    }
+  }
+
+  func testNeovimScrollRegionKeepsStatusLineDuringGridScroll() async {
+    await MainActor.run {
+      var decoder = TerminalANSITextDecoder()
+      decoder.reset(columns: 40, rows: 5)
+      decoder.decode("\u{1B}[?1049h")
+      decoder.decode("\u{1B}[5;1Hstatus")
+      decoder.decode("\u{1B}[1;4r")
+      decoder.decode("\u{1B}[1;1Ha\r\nb\r\nc\r\nd\r\ne")
+
+      XCTAssertEqual(decoder.renderedSnapshot.text, "b\nc\nd\ne\nstatus")
+    }
+  }
+
+  func testStyledEraseLineRetainsNeovimPopupBackgroundCells() async {
+    await MainActor.run {
+      var decoder = TerminalANSITextDecoder()
+      decoder.reset(columns: 12, rows: 4)
+      decoder.preservesEraseCellBackgrounds = true
+      decoder.decode("\u{1B}[48;2;32;55;82mitem\u{1B}[K")
+
+      let snapshot = decoder.renderedSnapshot
+      XCTAssertEqual(snapshot.text, "item" + String(repeating: " ", count: 8))
+      XCTAssertEqual(snapshot.styleSpans.count, 1)
+      XCTAssertEqual(snapshot.styleSpans[0].utf16Length, 12)
+    }
+  }
+
   func testZshResizeRepaintDoesNotAddTrailingDocumentLines() async {
     await MainActor.run {
       let prompt = "PROMPT> echo 1234567890abcdefghijklmnopqrstuvwxyz"

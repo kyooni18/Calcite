@@ -261,7 +261,7 @@ struct EditorProjectCommands: Commands {
         .keyboardShortcut(.leftArrow, modifiers: [.control, .option])
         .disabled(handler == nil)
       Divider()
-      Button("Toggle GUI/Vim Mode") { handler?.perform(.toggleInputMode) }
+      Button("Cycle Editor Mode") { handler?.perform(.toggleInputMode) }
         .keyboardShortcut("v", modifiers: [.command, .control])
         .disabled(handler == nil || availability?.hasDocument != true)
     }

@@ -419,16 +419,19 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   }
 
   /// A native key event produces one character token. Older saved profiles may
-  /// contain an empty or multi-character leader, so normalize at the boundary
-  /// before handing it to the Vim engine.
+  /// contain an empty, whitespace, or multi-character leader, so normalize at
+  /// the boundary before handing it to the Vim engine. Space cannot be a host
+  /// leader: terminal-backed Vim/Neovim has to hold that event while it waits
+  /// to see whether a Calcite host mapping follows it, delaying normal typing.
   var normalizedLeader: String {
-    leader.first.map(String.init) ?? " "
+    guard let leader = leader.first, !leader.isWhitespace else { return "\\" }
+    return String(leader)
   }
 
   static let standard = EditorVimProfile(
     enabled: false,
     startInInsertMode: false,
-    leader: " ",
+    leader: "\\",
     relativeLineNumbers: false,
     mappings: [
       .init(sequence: "<leader>w", command: ":w"),

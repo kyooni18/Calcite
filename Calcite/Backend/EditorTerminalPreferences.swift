@@ -52,6 +52,10 @@
     var lineSpacing: Double
     var enablesLigatures: Bool
     var brightensBoldText: Bool
+    /// Retain active background attributes in erase-to-end-of-line cells.
+    /// Terminal TUIs use this for exact grid rendering, but it can make popup
+    /// menus appear unnecessarily wide in a text-view-backed terminal.
+    var preservesEraseCellBackgrounds: Bool
     var ansiColors: [EditorTerminalColor]
 
     init(
@@ -69,6 +73,7 @@
       lineSpacing: Double,
       enablesLigatures: Bool,
       brightensBoldText: Bool,
+      preservesEraseCellBackgrounds: Bool = false,
       ansiColors: [EditorTerminalColor]
     ) {
       self.source = source
@@ -85,6 +90,7 @@
       self.lineSpacing = lineSpacing
       self.enablesLigatures = enablesLigatures
       self.brightensBoldText = brightensBoldText
+      self.preservesEraseCellBackgrounds = preservesEraseCellBackgrounds
       self.ansiColors = ansiColors
     }
 
@@ -103,6 +109,7 @@
       case lineSpacing
       case enablesLigatures
       case brightensBoldText
+      case preservesEraseCellBackgrounds
       case ansiColors
     }
 
@@ -124,6 +131,8 @@
       lineSpacing = try container.decode(Double.self, forKey: .lineSpacing)
       enablesLigatures = try container.decode(Bool.self, forKey: .enablesLigatures)
       brightensBoldText = try container.decode(Bool.self, forKey: .brightensBoldText)
+      preservesEraseCellBackgrounds =
+        try container.decodeIfPresent(Bool.self, forKey: .preservesEraseCellBackgrounds) ?? false
       ansiColors = try container.decode([EditorTerminalColor].self, forKey: .ansiColors)
     }
 

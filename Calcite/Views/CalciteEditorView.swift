@@ -11,38 +11,71 @@ struct CalciteEditorView: View {
   let activate: () -> Void
   @AppStorage(EditorInterfacePreferences.interfaceKey)
   private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
+  @AppStorage(EditorInterfacePreferences.neovimLaunchCommandKey)
+  private var neovimLaunchCommand = ""
+  @AppStorage(EditorInterfacePreferences.vimLaunchCommandKey)
+  private var vimLaunchCommand = ""
+  @AppStorage(EditorInterfacePreferences.terminalLeaderKey)
+  private var terminalLeader = "\\"
 
   var body: some View {
     Group {
       if editorInterface.usesTerminalEditor {
         ActualVimEditorSurface(
           workspaceURL: backend.workspaceURL,
+          windowSession: windowSession,
           tab: tab,
           interface: editorInterface,
-          profile: backend.controller.profile
+          profile: backend.controller.profile,
+          navigateSection: { direction in
+            activate()
+            windowSession.commandNavigateSection(direction: direction)
+          }
         )
       } else {
         builtInEditor
       }
     }
-    .id("\(editorSession.id.uuidString)-\(editorInterface.rawValue)")
+    .id(
+      [
+        editorSession.id.uuidString,
+        editorInterface.rawValue,
+        neovimLaunchCommand,
+        vimLaunchCommand,
+        terminalLeader,
+      ].joined(separator: "|")
+    )
     .onChange(of: tab.selectedRange) { _, range in
       guard windowSession.activeEditorSessionID == editorSession.id else { return }
       editorSession.updateSelection(range)
     }
+    .onAppear(perform: preloadTerminalEditors)
+    .onChange(of: editorInterfaceRaw) { _, _ in preloadTerminalEditors() }
+    .onChange(of: documentIDs) { _, _ in preloadTerminalEditors() }
   }
 
   private var editorInterface: EditorInterface {
     EditorInterface(rawValue: editorInterfaceRaw) ?? .builtIn
   }
 
+  private var documentIDs: [UUID] {
+    backend.documents.map(\.id)
+  }
+
+  private func preloadTerminalEditors() {
+    windowSession.preloadTerminalEditors(interface: editorInterface)
+  }
+
   private var builtInEditor: some View {
-    CalciteEditorSurface(
+    var profile = backend.controller.profile
+    profile.vim.enabled = editorInterface.usesCalciteVim
+    return CalciteEditorSurface(
       tab: tab,
       liveMarkdownStyling: windowSession.usesLiveMarkdownEditor,
       showsMarkdownSyntax: windowSession.showsMarkdownSyntax,
       wrapsMarkdownLines: windowSession.markdownWrapsLines,
-      profile: backend.controller.profile,
+      profile: profile,
+      editorMode: editorInterface,
       onVimHostRequest: { request in
         activate()
         backend.handleVimHostRequest(request)
@@ -63,9 +96,9 @@ struct CalciteEditorView: View {
         activate()
         backend.controller.showQuickFixes(for: diagnostic, in: tab)
       },
-      onToggleInputMode: {
+      onSelectInputMode: { mode in
         activate()
-        backend.toggleEditorInputMode()
+        editorInterfaceRaw = mode.rawValue
       },
       commandEvent: previousCommandEvent
     )
@@ -91,7 +124,8 @@ struct CalciteEditorView: View {
     @ObservedObject var tab: EditorTab
     let interface: EditorInterface
     let profile: EditorCustomProfile
-    @StateObject private var session: EditorTerminalSession
+    let navigateSection: (MainSectionDirection) -> Void
+    @ObservedObject private var session: EditorTerminalSession
     @StateObject private var appearanceStore = EditorTerminalPreferencesStore()
     @AppStorage(EditorInterfacePreferences.interfaceKey)
     private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
@@ -100,29 +134,29 @@ struct CalciteEditorView: View {
 
     init(
       workspaceURL: URL,
+      windowSession: CalciteBackendWindowSession,
       tab: EditorTab,
       interface: EditorInterface,
-      profile: EditorCustomProfile
+      profile: EditorCustomProfile,
+      navigateSection: @escaping (MainSectionDirection) -> Void
     ) {
       self.tab = tab
       self.interface = interface
       self.profile = profile
+      self.navigateSection = navigateSection
       let command = EditorInterfacePreferences.launchCommand(
         interface: interface,
-        fileURL: tab.url
+        fileURL: tab.url,
+        workspaceURL: workspaceURL
       )
       self.launchCommand = command
-      _session = StateObject(
-        wrappedValue: EditorTerminalSession(
-          workspaceURL: workspaceURL,
-          initialCommand: command,
-          monitorsPythonEnvironment: false
-        )
+      _session = ObservedObject(
+        wrappedValue: windowSession.terminalEditorSession(interface: interface, fileURL: tab.url)
       )
     }
 
     var body: some View {
-      Group {
+      VStack(spacing: 0) {
         if launchCommand != nil {
           TerminalTextView(
             snapshot: session.renderedSnapshot,
@@ -130,19 +164,31 @@ struct CalciteEditorView: View {
             preferences: appearanceStore.preferences,
             appearanceRevision: appearanceStore.revision,
             send: session.send,
+            sendMouse: session.sendMouse,
             clear: session.clear,
             resize: session.resize,
             save: {
               session.send("\u{1b}:write\r")
-            }
+            },
+            navigateSection: { forward in
+              navigateSection(forward ? .right : .left)
+            },
+            hostLeader: profile.vim.normalizedLeader,
+            navigateSectionDirection: navigateSection,
+            allowsScrolling: false,
+            routesPointerEventsToTerminal: true
           )
         } else {
           unavailableView
         }
+        terminalEditorStatusBar
       }
       .background(profile.surface.background.color)
       .onAppear {
         appearanceStore.apply(theme: profile.terminal)
+        session.setPreservesEraseCellBackgrounds(
+          appearanceStore.preferences.preservesEraseCellBackgrounds
+        )
         if launchCommand != nil {
           session.reattachView()
         }
@@ -155,6 +201,42 @@ struct CalciteEditorView: View {
       .onChange(of: profile.terminal) { _, value in
         appearanceStore.apply(theme: value)
       }
+      .onChange(of: appearanceStore.preferences.preservesEraseCellBackgrounds) { _, enabled in
+        session.setPreservesEraseCellBackgrounds(enabled)
+      }
+    }
+
+    private var terminalEditorStatusBar: some View {
+      HStack(spacing: 10) {
+        Text(tab.languageID)
+        Spacer()
+        Menu {
+          ForEach(EditorInterface.allCases) { mode in
+            Button {
+              editorInterfaceRaw = mode.rawValue
+            } label: {
+              if mode == interface {
+                Label(mode.title, systemImage: "checkmark")
+              } else {
+                Text(mode.title)
+              }
+            }
+          }
+        } label: {
+          Text(interface.title.uppercased())
+            .font(.caption.monospaced().weight(.semibold))
+            .foregroundStyle(Color.accentColor)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Switch editor mode (Command-Control-V cycles modes)")
+        Text(tab.title)
+          .foregroundStyle(.secondary)
+      }
+      .font(.caption)
+      .padding(.horizontal, 10)
+      .frame(height: 24)
+      .background(.bar)
     }
 
     private var unavailableView: some View {

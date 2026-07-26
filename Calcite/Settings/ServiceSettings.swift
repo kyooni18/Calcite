@@ -113,6 +113,14 @@ struct EditorProfileSettingsView: View {
   private var externalTerminalCommand = ""
   @AppStorage(EditorInterfacePreferences.interfaceKey)
   private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
+  @AppStorage(EditorInterfacePreferences.neovimLaunchCommandKey)
+  private var neovimLaunchCommand = ""
+  @AppStorage(EditorInterfacePreferences.vimLaunchCommandKey)
+  private var vimLaunchCommand = ""
+  @AppStorage(EditorInterfacePreferences.terminalLeaderKey)
+  private var terminalEditorLeader = "\\"
+  @AppStorage(EditorInterfacePreferences.showsEditorTabBarKey)
+  private var showsEditorTabBar = true
 
   init(controller: EditorWorkspaceController) {
     self.controller = controller
@@ -320,13 +328,14 @@ struct EditorProfileSettingsView: View {
         TextField("Command; use {path} for the workspace", text: $externalTerminalCommand)
           .font(.system(.body, design: .monospaced))
       }
-      Picker("Editor Interface", selection: $editorInterfaceRaw) {
+      Picker("Editor Mode", selection: $editorInterfaceRaw) {
         ForEach(EditorInterface.allCases) { interface in
           Text(interface.title).tag(interface.rawValue)
         }
       }
+      Toggle("Show Editor Tab Bar", isOn: $showsEditorTabBar)
       Text(
-        "Terminal editors run the actual Vim or Neovim executable in a dedicated PTY. Files written by them are reloaded from disk when the built-in buffer has no unsaved changes."
+        "Default and Calcite Vim use the native editor. Vim and Neovim replace only its editing surface and keep Calcite's tabs, sections, and commands."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
@@ -620,33 +629,37 @@ struct EditorProfileSettingsView: View {
 
   private var vim: some View {
     Section("Vim Keybindings") {
-      Toggle("Enable Vim Mode", isOn: $profile.vim.enabled)
+      Picker("Editor Mode", selection: $editorInterfaceRaw) {
+        ForEach(EditorInterface.allCases) { interface in
+          Text(interface.title).tag(interface.rawValue)
+        }
+      }
       Toggle("Start in Insert Mode", isOn: $profile.vim.startInInsertMode)
-        .disabled(!profile.vim.enabled)
+        .disabled(editorMode != .calciteVim)
       Toggle("Relative Line Numbers", isOn: $profile.vim.relativeLineNumbers)
-        .disabled(!profile.vim.enabled)
+        .disabled(editorMode != .calciteVim)
       Picker("Normal Cursor Shape", selection: $profile.vim.normalCursorStyle) {
         ForEach(EditorVimCursorStyle.allCases) { style in
           Text(style.title).tag(style)
         }
       }
-      .disabled(!profile.vim.enabled)
+      .disabled(editorMode != .calciteVim)
       Picker("Insert Cursor Shape", selection: $profile.vim.insertCursorStyle) {
         ForEach(EditorVimCursorStyle.allCases) { style in
           Text(style.title).tag(style)
         }
       }
-      .disabled(!profile.vim.enabled)
+      .disabled(editorMode != .calciteVim)
       Picker("Replace Cursor Shape", selection: $profile.vim.replaceCursorStyle) {
         ForEach(EditorVimCursorStyle.allCases) { style in
           Text(style.title).tag(style)
         }
       }
-      .disabled(!profile.vim.enabled)
+      .disabled(editorMode != .calciteVim)
       HStack {
-        Text("Leader Key")
+        Text("Calcite / Host Leader")
         Spacer()
-        TextField("Space", text: leaderKey)
+        TextField("\\", text: leaderKey)
           .textFieldStyle(.roundedBorder)
           .frame(width: 90)
           .accessibilityIdentifier("calcite.vim.leader-key")
@@ -654,9 +667,35 @@ struct EditorProfileSettingsView: View {
       Text("Current leader: \(leaderKeyDescription)")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Text("Type one printable key. Clearing the field restores Space.")
+      Text("Type one non-space printable key. In Vim/Neovim mode, this host leader plus h/j/k/l switches sections. Clearing the field restores \\.")
         .font(.caption)
         .foregroundStyle(.secondary)
+      HStack {
+        Text("Vim/Neovim Leader")
+        Spacer()
+        TextField("\\", text: terminalEditorLeaderKey)
+          .textFieldStyle(.roundedBorder)
+          .frame(width: 90)
+          .accessibilityIdentifier("calcite.terminal-vim.leader-key")
+      }
+      Text("This leader is passed only to the real Vim or Neovim process.")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      TextField(
+        "Neovim launch shell command (empty uses default)",
+        text: $neovimLaunchCommand
+      )
+      .font(.system(.body, design: .monospaced))
+      TextField(
+        "Vim launch shell command (empty uses default)",
+        text: $vimLaunchCommand
+      )
+      .font(.system(.body, design: .monospaced))
+      Text(
+        "A custom command may be an alias or function: Calcite appends the leader setup and file path. Use {executable}, {file}, {workspace}, {leader}, or {leaderCommand} to place those arguments yourself; values are shell-quoted."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
       ForEach($profile.vim.mappings) { $mapping in
         HStack {
           TextField("Keys", text: $mapping.sequence)
@@ -683,22 +722,33 @@ struct EditorProfileSettingsView: View {
   private var leaderKey: Binding<String> {
     Binding(
       get: {
-        let leader = profile.vim.normalizedLeader
-        return leader == " " ? "" : leader
+        profile.vim.normalizedLeader
       },
       set: { input in
         var updatedProfile = profile
-        updatedProfile.vim.leader = input.first.map(String.init) ?? " "
+        updatedProfile.vim.leader = input.first.flatMap { $0.isWhitespace ? nil : String($0) } ?? "\\"
         profile = updatedProfile
       }
     )
   }
 
   private var leaderKeyDescription: String {
-    switch profile.vim.normalizedLeader {
-    case " ": return "Space"
-    default: return profile.vim.normalizedLeader
-    }
+    profile.vim.normalizedLeader
+  }
+
+  private var editorMode: EditorInterface {
+    EditorInterface(rawValue: editorInterfaceRaw) ?? .builtIn
+  }
+
+  private var terminalEditorLeaderKey: Binding<String> {
+    Binding(
+      get: {
+        EditorInterfacePreferences.normalizedTerminalLeader()
+      },
+      set: { input in
+        terminalEditorLeader = input.first.flatMap { $0.isWhitespace ? nil : String($0) } ?? "\\"
+      }
+    )
   }
 
   private var snippets: some View {
