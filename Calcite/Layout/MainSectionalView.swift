@@ -659,12 +659,7 @@ private struct MainSectionLeafView: View {
     } label: {
       Image(systemName: isVisible ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
         .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(isVisible ? Color.accentColor : Color.secondary)
         .frame(width: 24, height: 24)
-        .background {
-          RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(isVisible ? Color.accentColor.opacity(0.14) : .clear)
-        }
     }
     .buttonStyle(.plain)
     .help(isVisible ? "Collapse section" : "Restore section")

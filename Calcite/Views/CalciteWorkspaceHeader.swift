@@ -55,7 +55,7 @@ struct CalciteWorkspaceHeader: View {
             windowSession.closeCommandPalette()
           }
         }
-      ),
+      ), backend: backend,
       searchFocus: searchFocus,
       profile: backend.controller.profile,
       activeTabIsMarkdown: activeTabIsMarkdown,
@@ -101,6 +101,7 @@ private struct CalciteWorkspaceHeaderContent: View {
   @Binding var showsNowPlaying: Bool
   @Binding var searchQuery: String
   @Binding var showsSearchResults: Bool
+    @State var backend: CalciteBackend
   let searchFocus: FocusState<Bool>.Binding
   let profile: EditorCustomProfile
   let activeTabIsMarkdown: Bool
@@ -134,8 +135,12 @@ private struct CalciteWorkspaceHeaderContent: View {
         EditorLanguageServerStatusIndicator(
           languageID: activeLanguageID,
           workspacePhase: workspacePhase,
-          report: serviceReport
+          report: serviceReport,
+          backend: backend
         )
+          
+        
+          
         Spacer(minLength: 0)
         CalciteTopSearchField(
           profile: profile,

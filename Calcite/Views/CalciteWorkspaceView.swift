@@ -223,11 +223,6 @@ struct CalciteWorkspaceView: View {
         }
       }
       .animation(.easeOut(duration: 0.14), value: windowSession.palette.isPresented)
-      .overlay(alignment: .bottomTrailing) {
-        CalciteStatusOverlay(backend: backend)
-          .padding(10)
-          .zIndex(90)
-      }
       .popover(
         item: binding(
           get: { backend.controller.symbolInformation },

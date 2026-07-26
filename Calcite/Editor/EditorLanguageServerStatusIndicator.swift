@@ -5,6 +5,7 @@ struct EditorLanguageServerStatusIndicator: View {
   let languageID: String?
   let workspacePhase: EditorWorkspacePhase
   let report: EditorServiceAvailabilityReport
+    let backend: CalciteBackend
 
   @State private var showsDetails = false
 
@@ -46,7 +47,7 @@ struct EditorLanguageServerStatusIndicator: View {
         Circle().fill(statusColor).frame(width: 8, height: 8)
         Text(detailTitle).font(.headline)
         Spacer()
-        Text(statusLabel).font(.caption).foregroundStyle(.secondary)
+        CalciteStatusOverlay(backend: backend)
       }
       Divider()
       switch state {

@@ -473,6 +473,26 @@
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// The terminal renderer is the sole writer of this text view. In an
+    /// embedded Vim or Neovim session, keyboard input belongs to the child
+    /// process; AppKit must never turn an unhandled key, input-method commit,
+    /// or edit command into a native document edit.
+    override func shouldChangeText(
+      in affectedCharRange: NSRange,
+      replacementString: String?
+    ) -> Bool {
+      false
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+      // Input methods can call this directly, without a keyDown fallback.
+    }
+
+    override func doCommand(by selector: Selector) {
+      // The coordinator explicitly implements terminal commands such as copy,
+      // paste, and save. Do not let NSTextView handle editing selectors.
+    }
+
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
       if window?.firstResponder === self {
