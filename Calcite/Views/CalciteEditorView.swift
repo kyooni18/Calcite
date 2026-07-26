@@ -1,4 +1,5 @@
 import SwiftUI
+import EditorVim
 
 /// Backend-driven editor entry point for one concrete window editor session.
 /// Commands and selection remain targeted when a document is displayed in multiple sections.
@@ -30,7 +31,10 @@ struct CalciteEditorView: View {
           navigateSection: { direction in
             activate()
             windowSession.commandNavigateSection(direction: direction)
-          }
+          },
+          navigateTab: windowSession.commandNavigateTab(forward:),
+          selectTab: windowSession.commandSelectTab(number:),
+          handleHostCommand: { backend.handleVimHostRequest(.custom($0)) }
         )
       } else {
         builtInEditor
@@ -68,7 +72,16 @@ struct CalciteEditorView: View {
 
   private var builtInEditor: some View {
     var profile = backend.controller.profile
-    profile.vim.enabled = editorInterface.usesCalciteVim
+    if editorInterface.usesCalciteVim {
+      // Space is Calcite Vim's fixed leader. Profiles are persisted across
+      // launches, so setting only the default would leave older profiles on
+      // their previous leader and make Space appear unresponsive.
+      profile.vim.enabled = true
+      profile.vim.leader = " "
+    } else {
+      profile.vim.enabled = false
+    }
+    profile.vim.ensureNavigationMappings()
     return CalciteEditorSurface(
       tab: tab,
       liveMarkdownStyling: windowSession.usesLiveMarkdownEditor,
@@ -112,6 +125,7 @@ struct CalciteEditorView: View {
     }
 
     return EditorTabCommandEvent(
+      id: event.id,
       targetTabID: event.documentID,
       command: event.command
     )
@@ -125,6 +139,9 @@ struct CalciteEditorView: View {
     let interface: EditorInterface
     let profile: EditorCustomProfile
     let navigateSection: (MainSectionDirection) -> Void
+    let navigateTab: (Bool) -> Void
+    let selectTab: (Int) -> Void
+    let handleHostCommand: (String) -> Void
     @ObservedObject private var session: EditorTerminalSession
     @StateObject private var appearanceStore = EditorTerminalPreferencesStore()
     @AppStorage(EditorInterfacePreferences.interfaceKey)
@@ -138,12 +155,18 @@ struct CalciteEditorView: View {
       tab: EditorTab,
       interface: EditorInterface,
       profile: EditorCustomProfile,
-      navigateSection: @escaping (MainSectionDirection) -> Void
+      navigateSection: @escaping (MainSectionDirection) -> Void,
+      navigateTab: @escaping (Bool) -> Void,
+      selectTab: @escaping (Int) -> Void,
+      handleHostCommand: @escaping (String) -> Void
     ) {
       self.tab = tab
       self.interface = interface
       self.profile = profile
       self.navigateSection = navigateSection
+      self.navigateTab = navigateTab
+      self.selectTab = selectTab
+      self.handleHostCommand = handleHostCommand
       let command = EditorInterfacePreferences.launchCommand(
         interface: interface,
         fileURL: tab.url,
@@ -174,6 +197,9 @@ struct CalciteEditorView: View {
               navigateSection(forward ? .right : .left)
             },
             navigateSectionDirection: navigateSection,
+            navigateTab: navigateTab,
+            selectTab: selectTab,
+            handleHostCommand: handleHostCommand,
             allowsScrolling: false,
             routesPointerEventsToTerminal: true
           )

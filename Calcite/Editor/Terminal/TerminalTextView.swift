@@ -13,7 +13,13 @@
     let resize: (Int, Int) -> Void
     var save: (() -> Void)? = nil
     var navigateSection: ((Bool) -> Void)? = nil
+    /// A terminal-only secondary leader. It never uses Space, so ordinary
+    /// terminal and Vim/Neovim text input is not delayed.
+    var hostLeader: String? = "\\"
     var navigateSectionDirection: ((MainSectionDirection) -> Void)? = nil
+    var navigateTab: ((Bool) -> Void)? = nil
+    var selectTab: ((Int) -> Void)? = nil
+    var handleHostCommand: ((String) -> Void)? = nil
     var allowsScrolling = true
     /// Vim/Neovim use the terminal mouse protocol; consuming these events here
     /// prevents NSTextView from creating a native text selection.
@@ -97,6 +103,7 @@
       private var appliedAppearanceRevision: UInt64?
       private var pendingSize: (columns: Int, rows: Int)?
       private var resizePublicationTask: Task<Void, Never>?
+      private var pendingHostLeader: String?
       init(parent: TerminalTextView) { self.parent = parent }
 
       func focusInput() {
@@ -221,10 +228,24 @@
           }
         }
 
-        if let direction = hostSectionDirection(for: event, flags: flags),
-          let navigateSectionDirection = parent.navigateSectionDirection
+        if let leader = pendingHostLeader {
+          pendingHostLeader = nil
+          if handleTerminalLeaderMapping(event, flags: flags) {
+            return true
+          }
+          // The second key was not a Calcite terminal mapping. Preserve the
+          // original sequence for the terminal process.
+          parent.send(leader)
+        }
+
+        if let leader = parent.hostLeader,
+          !leader.isEmpty,
+          !flags.contains(.command),
+          !flags.contains(.control),
+          !flags.contains(.option),
+          event.characters == leader
         {
-          navigateSectionDirection(direction)
+          pendingHostLeader = leader
           return true
         }
 
@@ -332,23 +353,43 @@
         )
       }
 
-      private func hostSectionDirection(
-        for event: NSEvent,
+      private func handleTerminalLeaderMapping(
+        _ event: NSEvent,
         flags: NSEvent.ModifierFlags
-      ) -> MainSectionDirection? {
-        guard flags.contains([.command, .option]),
-          !flags.contains(.control),
-          !flags.contains(.shift)
+      ) -> Bool {
+        guard !flags.contains(.command), !flags.contains(.control), !flags.contains(.option),
+          let key = event.charactersIgnoringModifiers?.lowercased()
         else {
-          return nil
+          return false
         }
-        switch event.charactersIgnoringModifiers?.lowercased() {
-        case "h": return .left
-        case "j": return .down
-        case "k": return .up
-        case "l": return .right
-        default: return nil
+        switch key {
+        case "h": parent.navigateSectionDirection?(.left)
+        case "j": parent.navigateSectionDirection?(.down)
+        case "k": parent.navigateSectionDirection?(.up)
+        case "l": parent.navigateSectionDirection?(.right)
+        case ",": parent.navigateTab?(false)
+        case ".": parent.navigateTab?(true)
+        case "1"..."9":
+          guard let number = Int(key) else {
+            return false
+          }
+          parent.selectTab?(number)
+        case "w":
+          guard let save = parent.save else { return false }
+          save()
+        case "b": handleTerminalHostCommand("build")
+        case "r": handleTerminalHostCommand("run")
+        case "t": handleTerminalHostCommand("terminal")
+        case "e": handleTerminalHostCommand("sidebar")
+        case "f": handleTerminalHostCommand("format")
+        case "s": handleTerminalHostCommand("find")
+        default: return false
         }
+        return true
+      }
+
+      private func handleTerminalHostCommand(_ command: String) {
+        parent.handleHostCommand?(command)
       }
 
       private func renderSnapshot(

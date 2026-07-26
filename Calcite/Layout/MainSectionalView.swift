@@ -1,4 +1,5 @@
 import AppKit
+import EditorVim
 import SwiftUI
 
 /// Backend-driven workbench whose sections contain independently persisted content tabs.
@@ -36,7 +37,8 @@ struct MainSectionalView: View {
         navigateTab: { windowSession.navigateTab(forward: $0) },
         selectTab: { windowSession.selectTab(number: $0) },
         navigateSection: { windowSession.navigateSection(forward: $0) },
-        navigateSectionDirection: { windowSession.commandNavigateSection(direction: $0) }
+        navigateSectionDirection: { windowSession.commandNavigateSection(direction: $0) },
+        handleHostRequest: backend.handleVimHostRequest
       )
     }
     .onAppear {
@@ -78,13 +80,15 @@ private struct MainSectionKeyboardNavigationMonitor: NSViewRepresentable {
   let selectTab: (Int) -> Void
   let navigateSection: (Bool) -> Void
   let navigateSectionDirection: (MainSectionDirection) -> Void
+  let handleHostRequest: (VimHostRequest) -> Void
 
   func makeNSView(context: Context) -> MainSectionKeyboardNavigationView {
     MainSectionKeyboardNavigationView(
       navigateTab: navigateTab,
       selectTab: selectTab,
       navigateSection: navigateSection,
-      navigateSectionDirection: navigateSectionDirection
+      navigateSectionDirection: navigateSectionDirection,
+      handleHostRequest: handleHostRequest
     )
   }
 
@@ -96,6 +100,7 @@ private struct MainSectionKeyboardNavigationMonitor: NSViewRepresentable {
     nsView.selectTab = selectTab
     nsView.navigateSection = navigateSection
     nsView.navigateSectionDirection = navigateSectionDirection
+    nsView.handleHostRequest = handleHostRequest
   }
 }
 
@@ -105,18 +110,22 @@ private final class MainSectionKeyboardNavigationView: NSView {
   var selectTab: (Int) -> Void
   var navigateSection: (Bool) -> Void
   var navigateSectionDirection: (MainSectionDirection) -> Void
+  var handleHostRequest: (VimHostRequest) -> Void
   private var keyMonitor: Any?
+  private var isAwaitingLeader = false
 
   init(
     navigateTab: @escaping (Bool) -> Void,
     selectTab: @escaping (Int) -> Void,
     navigateSection: @escaping (Bool) -> Void,
-    navigateSectionDirection: @escaping (MainSectionDirection) -> Void
+    navigateSectionDirection: @escaping (MainSectionDirection) -> Void,
+    handleHostRequest: @escaping (VimHostRequest) -> Void
   ) {
     self.navigateTab = navigateTab
     self.selectTab = selectTab
     self.navigateSection = navigateSection
     self.navigateSectionDirection = navigateSectionDirection
+    self.handleHostRequest = handleHostRequest
     super.init(frame: .zero)
   }
 
@@ -134,9 +143,29 @@ private final class MainSectionKeyboardNavigationView: NSView {
     guard keyMonitor == nil else { return }
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self, event.window === self.window else { return event }
+      // Native editors already process their own Vim keymaps, and the terminal
+      // has its separate backslash leader. Everywhere else in the workbench,
+      // Space acts as Calcite's global leader.
+      if event.window?.firstResponder is NSTextView || event.window?.firstResponder is NSTextField {
+        self.isAwaitingLeader = false
+        return event
+      }
       let modifiers = event.modifierFlags.intersection([
         .command, .option, .control, .shift,
       ])
+      if self.isAwaitingLeader {
+        self.isAwaitingLeader = false
+        if modifiers.isEmpty, let key = event.charactersIgnoringModifiers?.lowercased(),
+          self.handleLeaderMapping(key)
+        {
+          return nil
+        }
+        return event
+      }
+      if modifiers.isEmpty, event.characters == " " {
+        self.isAwaitingLeader = true
+        return nil
+      }
       if event.keyCode == 48, modifiers == [.control] {
         self.navigateTab(true)
         return nil
@@ -169,6 +198,29 @@ private final class MainSectionKeyboardNavigationView: NSView {
       }
       return event
     }
+  }
+
+  private func handleLeaderMapping(_ key: String) -> Bool {
+    switch key {
+    case "h": navigateSectionDirection(.left)
+    case "j": navigateSectionDirection(.down)
+    case "k": navigateSectionDirection(.up)
+    case "l": navigateSectionDirection(.right)
+    case ",": navigateTab(false)
+    case ".": navigateTab(true)
+    case "1"..."9":
+      guard let number = Int(key) else { return false }
+      selectTab(number)
+    case "w": handleHostRequest(.write)
+    case "b": handleHostRequest(.custom("build"))
+    case "r": handleHostRequest(.custom("run"))
+    case "t": handleHostRequest(.custom("terminal"))
+    case "e": handleHostRequest(.custom("sidebar"))
+    case "f": handleHostRequest(.format)
+    case "s": handleHostRequest(.custom("find"))
+    default: return false
+    }
+    return true
   }
 
   override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -361,18 +413,26 @@ private final class MainSectionSplitAutosaveLocatorView: NSView {
 private struct MainSectionKeyboardFocusInstaller: NSViewRepresentable {
   let kind: MainSectionKind
   let isActive: Bool
+  let focusToken: String
 
   func makeNSView(context: Context) -> MainSectionKeyboardFocusLocatorView {
-    MainSectionKeyboardFocusLocatorView(kind: kind, isActive: isActive)
+    MainSectionKeyboardFocusLocatorView(
+      kind: kind,
+      isActive: isActive,
+      focusToken: focusToken
+    )
   }
 
   func updateNSView(
     _ nsView: MainSectionKeyboardFocusLocatorView,
     context: Context
   ) {
-    let shouldFocus = isActive && (!nsView.isActive || nsView.kind != kind)
+    let shouldFocus = isActive && (
+      !nsView.isActive || nsView.kind != kind || nsView.focusToken != focusToken
+    )
     nsView.kind = kind
     nsView.isActive = isActive
+    nsView.focusToken = focusToken
     if shouldFocus { nsView.scheduleFocusIfNeeded() }
   }
 }
@@ -381,11 +441,13 @@ private struct MainSectionKeyboardFocusInstaller: NSViewRepresentable {
 private final class MainSectionKeyboardFocusLocatorView: NSView {
   var kind: MainSectionKind
   var isActive: Bool
+  var focusToken: String
   private var focusGeneration = UUID()
 
-  init(kind: MainSectionKind, isActive: Bool) {
+  init(kind: MainSectionKind, isActive: Bool, focusToken: String) {
     self.kind = kind
     self.isActive = isActive
+    self.focusToken = focusToken
     super.init(frame: .zero)
   }
 
@@ -512,7 +574,8 @@ private struct MainSectionLeafView: View {
     .background {
       MainSectionKeyboardFocusInstaller(
         kind: selectedKind,
-        isActive: layout.activeSectionID == sectionID
+        isActive: layout.activeSectionID == sectionID,
+        focusToken: "\(selectedTab?.id.uuidString ?? "empty")|\(backend.activeDocumentID?.uuidString ?? "none")"
       )
     }
     .background(sectionBackground)

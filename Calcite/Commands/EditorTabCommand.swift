@@ -9,9 +9,15 @@ nonisolated enum EditorTabCommand: Equatable, Sendable {
 }
 
 nonisolated struct EditorTabCommandEvent: Equatable, Sendable {
-  let id = UUID()
+  let id: UUID
   let targetTabID: UUID
   let command: EditorTabCommand
+
+  init(id: UUID = UUID(), targetTabID: UUID, command: EditorTabCommand) {
+    self.id = id
+    self.targetTabID = targetTabID
+    self.command = command
+  }
 }
 
 nonisolated enum EditorLayoutCommand: Equatable, Sendable {

@@ -404,7 +404,9 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
       key: .replaceCursorStyle,
       legacyDefault: .underline
     )
-    mappings = try container.decode([EditorVimMappingProfile].self, forKey: .mappings)
+    mappings = Self.mergingNavigationMappings(
+      into: try container.decode([EditorVimMappingProfile].self, forKey: .mappings)
+    )
   }
 
   private static func decodeCursorStyle(
@@ -419,19 +421,52 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   }
 
   /// A native key event produces one character token. Older saved profiles may
-  /// contain an empty, whitespace, or multi-character leader, so normalize at
-  /// the boundary before handing it to the Vim engine. Space cannot be a host
-  /// leader: terminal-backed Vim/Neovim has to hold that event while it waits
-  /// to see whether a Calcite host mapping follows it, delaying normal typing.
+  /// contain an empty or multi-character leader, so normalize at the boundary
+  /// before handing it to the Vim engine. This applies only to Calcite's native
+  /// Vim mode; terminal Vim/Neovim use direct Command-Option host shortcuts.
   var normalizedLeader: String {
-    guard let leader = leader.first, !leader.isWhitespace else { return "\\" }
-    return String(leader)
+    leader.first.map(String.init) ?? " "
+  }
+
+  /// Profiles are persisted per appearance slot. These reserved navigation
+  /// mappings must be restored when loading older profiles: previous builds
+  /// assigned `<leader>h` to Replace, which otherwise survives indefinitely.
+  private static func mergingNavigationMappings(
+    into existing: [EditorVimMappingProfile]
+  ) -> [EditorVimMappingProfile] {
+    let required = [
+      ("<leader>h", "<host:section-left>"),
+      ("<leader>j", "<host:section-down>"),
+      ("<leader>k", "<host:section-up>"),
+      ("<leader>l", "<host:section-right>"),
+      ("<leader>,", ":tabprevious"),
+      ("<leader>.", ":tabnext"),
+    ] + (1...9).map { ("<leader>\($0)", "<host:tab-\($0)>") }
+
+    // `n`/`p` were the previous tab bindings. Remove them during migration so
+    // persisted profiles follow the new comma/period navigation convention.
+    var merged = existing.filter {
+      let sequence = $0.sequence.lowercased()
+      return sequence != "<leader>n" && sequence != "<leader>p"
+    }
+    for (sequence, command) in required {
+      if let index = merged.firstIndex(where: { $0.sequence.caseInsensitiveCompare(sequence) == .orderedSame }) {
+        merged[index].command = command
+      } else {
+        merged.append(.init(sequence: sequence, command: command))
+      }
+    }
+    return merged
+  }
+
+  mutating func ensureNavigationMappings() {
+    mappings = Self.mergingNavigationMappings(into: mappings)
   }
 
   static let standard = EditorVimProfile(
     enabled: false,
     startInInsertMode: false,
-    leader: "\\",
+    leader: " ",
     relativeLineNumbers: false,
     mappings: [
       .init(sequence: "<leader>w", command: ":w"),
@@ -445,6 +480,8 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
       .init(sequence: "<leader>j", command: "<host:section-down>"),
       .init(sequence: "<leader>k", command: "<host:section-up>"),
       .init(sequence: "<leader>l", command: "<host:section-right>"),
+      .init(sequence: "<leader>,", command: ":tabprevious"),
+      .init(sequence: "<leader>.", command: ":tabnext"),
       .init(sequence: "<leader>1", command: "<host:tab-1>"),
       .init(sequence: "<leader>2", command: "<host:tab-2>"),
       .init(sequence: "<leader>3", command: "<host:tab-3>"),

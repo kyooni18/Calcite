@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -71,6 +72,7 @@ struct EditorFindReplaceBar: View {
     }
     .padding(8)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .background(FindReplaceEscapeHandler(onEscape: close))
     .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
     .onAppear {
       queryIsFocused = true
@@ -159,5 +161,71 @@ struct EditorFindReplaceBar: View {
       searchRange = NSRange(location: next, length: source.length - next)
     }
     return results
+  }
+}
+
+/// `TextField` receives Escape through AppKit's responder chain, bypassing SwiftUI's
+/// `onKeyPress`. Listen at the owning window so Escape closes the panel even while either
+/// native text field has focus.
+private struct FindReplaceEscapeHandler: NSViewRepresentable {
+  let onEscape: () -> Void
+
+  func makeCoordinator() -> Coordinator { Coordinator(onEscape: onEscape) }
+
+  func makeNSView(context: Context) -> EscapeHandlerView {
+    EscapeHandlerView(coordinator: context.coordinator)
+  }
+
+  func updateNSView(_ view: EscapeHandlerView, context: Context) {
+    context.coordinator.onEscape = onEscape
+    context.coordinator.attach(to: view.window)
+  }
+
+  final class Coordinator {
+    var onEscape: () -> Void
+    private weak var window: NSWindow?
+    private var monitor: Any?
+
+    init(onEscape: @escaping () -> Void) {
+      self.onEscape = onEscape
+    }
+
+    func attach(to window: NSWindow?) {
+      guard self.window !== window, let window else { return }
+      detach()
+      self.window = window
+      monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        guard let self, event.window === self.window, event.keyCode == 53 else { return event }
+        self.onEscape()
+        return nil
+      }
+    }
+
+    func detach() {
+      if let monitor { NSEvent.removeMonitor(monitor) }
+      monitor = nil
+      window = nil
+    }
+  }
+
+  final class EscapeHandlerView: NSView {
+    weak var coordinator: Coordinator?
+
+    init(coordinator: Coordinator) {
+      self.coordinator = coordinator
+      super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      coordinator?.attach(to: window)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+      if newWindow == nil { coordinator?.detach() }
+      super.viewWillMove(toWindow: newWindow)
+    }
   }
 }

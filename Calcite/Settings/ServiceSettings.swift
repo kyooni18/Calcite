@@ -659,18 +659,17 @@ struct EditorProfileSettingsView: View {
       HStack {
         Text("Calcite Vim Leader")
         Spacer()
-        TextField("\\", text: leaderKey)
-          .textFieldStyle(.roundedBorder)
-          .frame(width: 90)
+        Text("Space")
+          .frame(width: 90, alignment: .leading)
           .accessibilityIdentifier("calcite.vim.leader-key")
       }
       Text("Current leader: \(leaderKeyDescription)")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Text("Type one non-space printable key. Clearing the field restores \\.")
+      Text("Calcite uses Space as its leader throughout the IDE; text fields and terminals keep their normal input behavior.")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Text("Vim/Neovim section navigation uses Command-Option-H/J/K/L, so text input is never held while Calcite waits for a leader key.")
+      Text("Terminal Vim/Neovim uses \\ as a secondary Calcite leader: it supports the same build, run, sidebar, section, and tab mappings as Calcite Vim. Space text input is never held while Calcite waits for a leader key.")
         .font(.caption)
         .foregroundStyle(.secondary)
       HStack {
@@ -713,30 +712,15 @@ struct EditorProfileSettingsView: View {
         profile.vim.mappings.append(.init(sequence: "<leader>", command: ""))
       }
       Text(
-        "Commands may be Vim notation, Ex commands such as :w, or host actions such as <host:find>, <host:replace>, <host:build>, <host:run>, <host:test>, and <host:terminal>. Default mappings: <leader>s opens Find; <leader>h/j/k/l navigate sections."
+        "Commands may be Vim notation, Ex commands such as :w, or host actions such as <host:find>, <host:replace>, <host:build>, <host:run>, <host:test>, and <host:terminal>. Default mappings: <leader>s opens Find; <leader>h/j/k/l navigate sections; <leader>,/. and <leader>1–9 navigate tabs."
       )
       .font(.caption)
       .foregroundStyle(.secondary)
     }
   }
 
-  /// Vim's leader is a single input token. Keep the persisted value nonempty so
-  /// an unfinished edit can never turn ordinary commands into leader mappings.
-  private var leaderKey: Binding<String> {
-    Binding(
-      get: {
-        profile.vim.normalizedLeader
-      },
-      set: { input in
-        var updatedProfile = profile
-        updatedProfile.vim.leader = input.first.flatMap { $0.isWhitespace ? nil : String($0) } ?? "\\"
-        profile = updatedProfile
-      }
-    )
-  }
-
   private var leaderKeyDescription: String {
-    profile.vim.normalizedLeader
+    "Space"
   }
 
   private var editorMode: EditorInterface {

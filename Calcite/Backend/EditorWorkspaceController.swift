@@ -797,9 +797,12 @@ final class EditorWorkspaceController: ObservableObject {
     case .custom(let command) where command.lowercased() == "section-down":
       onVimCommand?(.directionalSection(.down))
     case .nextTab:
-      selectAdjacentTab(delta: 1)
+      // In the sectional workspace, a Vim tab is the currently visible
+      // section's tab. Let the window session choose the next visible item so
+      // `gt`, `:tabnext`, and leader mappings also include section-owned tabs.
+      onVimCommand?(.nextTab)
     case .previousTab:
-      selectAdjacentTab(delta: -1)
+      onVimCommand?(.previousTab)
     case .switchBuffer(let number):
       let index = max(0, number - 1)
       guard tabs.indices.contains(index) else {

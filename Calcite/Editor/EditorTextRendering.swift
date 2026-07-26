@@ -218,7 +218,22 @@ final class CodeEditorTextView: NSTextView {
       }
     }
 
-    let lineHeight = max(layoutRect.height, font?.boundingRectForFont.height ?? 14)
+    let fallbackLineHeight = font?.boundingRectForFont.height ?? 14
+    let lineHeight: CGFloat
+    if location == sourceLength, sourceLength > 0, string.hasSuffix("\n") {
+      // `extraLineFragmentRect` provides the correct origin for the final
+      // empty line, but its height can expand to the remaining text-container
+      // space. Use the preceding rendered line's height for Vim's cursor so
+      // it remains one editor row tall.
+      let finalNewlineGlyph = layoutManager.glyphIndexForCharacter(at: sourceLength - 1)
+      let precedingLineRect = layoutManager.lineFragmentRect(
+        forGlyphAt: finalNewlineGlyph,
+        effectiveRange: nil
+      )
+      lineHeight = max(precedingLineRect.height, fallbackLineHeight)
+    } else {
+      lineHeight = max(layoutRect.height, fallbackLineHeight)
+    }
     var cursorRect = NSRect(
       x: layoutRect.minX + textContainerOrigin.x,
       y: layoutRect.minY + textContainerOrigin.y,
@@ -634,7 +649,25 @@ final class CodeEditorTextView: NSTextView {
 
   override func keyDown(with event: NSEvent) {
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-    if flags.contains(.command), !flags.contains(.shift), !flags.contains(.option) {
+    if flags.contains(.command), !flags.contains(.option) {
+      // `⌘+` is physically the equals key with Shift held. Matching the
+      // character alone lets SwiftUI's command shortcut treat it like `⌘−`
+      // on some keyboard layouts, so decide from the physical key first.
+      switch event.keyCode {
+      case 27: // -
+        if !flags.contains(.shift), zoomHandler?(-0.1, self) == true { return }
+      case 24: // = / +
+        if zoomHandler?(0.1, self) == true { return }
+      default:
+        break
+      }
+
+      guard !flags.contains(.shift) else {
+        super.keyDown(with: event)
+        refreshCustomInsertionPoint()
+        return
+      }
+
       switch event.charactersIgnoringModifiers {
       case "f", "F":
         showFindHandler?(false)
@@ -642,10 +675,6 @@ final class CodeEditorTextView: NSTextView {
       case "h", "H":
         showFindHandler?(true)
         return
-      case "-", "_":
-        if zoomHandler?(-0.1, self) == true { return }
-      case "+", "=":
-        if zoomHandler?(0.1, self) == true { return }
       default:
         break
       }

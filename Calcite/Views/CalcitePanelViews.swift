@@ -1,4 +1,5 @@
 import SwiftUI
+import EditorVim
 
 @MainActor
 struct CalciteProblemsView: View {
@@ -42,7 +43,10 @@ struct CalciteTerminalView: View {
     CalciteTerminalSurface(
       session: backend.terminal,
       themeProfile: backend.controller.profile.terminal,
-      navigateSection: windowSession.commandNavigateSection(direction:)
+      navigateSection: windowSession.commandNavigateSection(direction:),
+      navigateTab: windowSession.commandNavigateTab(forward:),
+      selectTab: windowSession.commandSelectTab(number:),
+      handleHostCommand: { backend.handleVimHostRequest(.custom($0)) }
     )
   }
 }

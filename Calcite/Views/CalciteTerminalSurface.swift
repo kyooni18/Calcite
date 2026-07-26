@@ -6,6 +6,9 @@
     @ObservedObject var session: EditorTerminalSession
     let themeProfile: EditorTerminalProfile?
     let navigateSection: (MainSectionDirection) -> Void
+    let navigateTab: (Bool) -> Void
+    let selectTab: (Int) -> Void
+    let handleHostCommand: (String) -> Void
     @StateObject private var appearanceStore = EditorTerminalPreferencesStore()
     @State private var showsSettings = false
 
@@ -27,7 +30,10 @@
           send: session.send,
           clear: session.clear,
           resize: session.resize,
-          navigateSectionDirection: navigateSection
+          navigateSectionDirection: navigateSection,
+          navigateTab: navigateTab,
+          selectTab: selectTab,
+          handleHostCommand: handleHostCommand
         )
       }
       .onAppear {

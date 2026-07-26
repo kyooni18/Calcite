@@ -145,7 +145,7 @@ struct CalciteApplicationCommands: Commands {
       Button("Zoom In") {
         editorHandler?.perform(.zoomIn)
       }
-      .keyboardShortcut("+", modifiers: .command)
+      .keyboardShortcut("=", modifiers: [.command, .shift])
       .disabled(editorHandler == nil || availability?.hasDocument != true)
 
       Button("Zoom Out") {
