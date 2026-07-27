@@ -1,4 +1,5 @@
 import AppKit
+@_spi(Calcite) import EditorVim
 import EditorServices
 import SwiftUI
 import UniformTypeIdentifiers
@@ -630,6 +631,9 @@ struct CodeTextEditor: NSViewRepresentable {
       textContainer: textContainer
     )
     textView.keyEventHandler = context.coordinator.handleKeyEvent
+    textView.textInputHandler = { [weak coordinator = context.coordinator] value, range, view in
+      coordinator?.handleTextInput(value, replacementRange: range, in: view) ?? false
+    }
     textView.languageID = languageID
     textView.zoomHandler = context.coordinator.handleZoom
     textView.goToDefinitionHandler = onGoToDefinition
@@ -690,6 +694,9 @@ struct CodeTextEditor: NSViewRepresentable {
     guard let textView = scrollView.documentView as? NSTextView else { return }
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.languageID = languageID
+      codeTextView.textInputHandler = { [weak coordinator = context.coordinator] value, range, view in
+        coordinator?.handleTextInput(value, replacementRange: range, in: view) ?? false
+      }
       codeTextView.goToDefinitionHandler = onGoToDefinition
       codeTextView.findReferencesHandler = onFindReferences
       codeTextView.showQuickHelpHandler = onShowQuickHelp
@@ -851,6 +858,7 @@ struct CodeTextEditor: NSViewRepresentable {
     fileprivate var expectedLocalTextRevision: UInt64?
     private var synchronizedVimTextRevision: UInt64?
     private var vimController: VimKeymapController?
+    private var vimMappingTimeoutTask: Task<Void, Never>?
     private var vimConfigurationSignature = ""
     private var lastPublishedVimMode: VimMode?
     private var lastPublishedVimPrompt: String?
@@ -986,6 +994,8 @@ struct CodeTextEditor: NSViewRepresentable {
     func configureVim(for textView: NSTextView) {
       let profile = parent.profile.vim
       guard profile.enabled else {
+        vimMappingTimeoutTask?.cancel()
+        vimMappingTimeoutTask = nil
         vimController = nil
         synchronizedVimTextRevision = nil
         vimConfigurationSignature = ""
@@ -1037,22 +1047,30 @@ struct CodeTextEditor: NSViewRepresentable {
       let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       if flags.contains(.command) { return false }
       configureVim(for: textView)
-      guard let controller = vimController,
-        let token = vimToken(for: event, mode: controller.engine.state.mode)
-      else { return false }
+      guard let controller = vimController else { return false }
+      let mode = controller.engine.state.mode
+      if shouldUseNativeTextInput(for: event, mode: mode) { return false }
+      guard let token = vimToken(for: event, mode: mode) else { return false }
 
       synchronizeVimControllerIfNeeded(controller, with: textView)
+      updateVimViewport(controller, in: textView)
       do {
         let result = try controller.handle(token: token)
         guard result.consumed else { return false }
         if let execution = result.execution {
-          applyVimExecution(execution, to: textView)
+          let edits = controller.engine.consumeCompletedEdits()
+          applyVimExecution(execution, edits: edits, to: textView)
         } else {
           let mode = controller.engine.state.mode
           updateVimCursorStyle(for: mode, in: textView)
           publishVimMode(mode)
         }
         publishVimPrompt(controller.prompt)
+        updateVimMappingTimeout(
+          awaitingMoreInput: result.awaitingMoreInput,
+          controller: controller,
+          textView: textView
+        )
         restoreEditorFocus(after: textView)
         return true
       } catch VimError.unsupportedNotation {
@@ -1060,11 +1078,120 @@ struct CodeTextEditor: NSViewRepresentable {
         return true
       } catch {
         NSSound.beep()
+        vimMappingTimeoutTask?.cancel()
+        vimMappingTimeoutTask = nil
         controller.resetPendingInput()
         controller.cancelPrompt()
         publishVimPrompt(nil)
         return true
       }
+    }
+
+    func handleTextInput(
+      _ value: Any,
+      replacementRange: NSRange,
+      in textView: NSTextView
+    ) -> Bool {
+      guard parent.profile.vim.enabled, !isApplyingExternalUpdate else { return false }
+      configureVim(for: textView)
+      guard let controller = vimController else { return false }
+      let mode = controller.engine.state.mode
+      guard mode == .insert || mode == .replace else { return false }
+
+      let committedText: String
+      if let string = value as? String {
+        committedText = string
+      } else if let attributed = value as? NSAttributedString {
+        committedText = attributed.string
+      } else {
+        return false
+      }
+      guard !committedText.isEmpty else { return false }
+
+      let sourceLength = (textView.string as NSString).length
+      let effectiveRange: NSRange
+      if replacementRange.location == NSNotFound {
+        effectiveRange = textView.selectedRange()
+      } else {
+        let location = min(max(0, replacementRange.location), sourceLength)
+        let length = min(max(0, replacementRange.length), sourceLength - location)
+        effectiveRange = NSRange(location: location, length: length)
+      }
+
+      synchronizeVimControllerIfNeeded(controller, with: textView)
+      controller.engine.synchronize(text: textView.string, cursor: effectiveRange.location)
+      do {
+        var execution: VimExecutionResult?
+        var edits: [(range: Range<Int>, replacement: String)] = []
+        if effectiveRange.length > 0 {
+          let removed = (textView.string as NSString).substring(with: effectiveRange)
+          let characterCount = max(1, removed.count)
+          execution = try controller.engine.execute(
+            .deleteCharacter,
+            count: characterCount,
+            register: .blackHole
+          )
+          edits.append(contentsOf: controller.engine.consumeCompletedEdits())
+        }
+        let inserted = try controller.engine.execute(.insert(committedText))
+        edits.append(contentsOf: controller.engine.consumeCompletedEdits())
+        execution = execution.map { Self.mergedVimExecution($0, inserted) } ?? inserted
+        if let execution { applyVimExecution(execution, edits: edits, to: textView) }
+        publishVimPrompt(controller.prompt)
+        return true
+      } catch {
+        NSSound.beep()
+        return true
+      }
+    }
+
+    private func shouldUseNativeTextInput(for event: NSEvent, mode: VimMode) -> Bool {
+      guard mode == .insert || mode == .replace else { return false }
+      let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+      guard !flags.contains(.control), !flags.contains(.command) else { return false }
+      switch event.keyCode {
+      case 36, 48, 51, 53, 115, 117, 119, 123, 124, 125, 126, 116, 121:
+        return false
+      default:
+        return event.characters?.isEmpty == false
+      }
+    }
+
+    private func updateVimMappingTimeout(
+      awaitingMoreInput: Bool,
+      controller: VimKeymapController,
+      textView: NSTextView
+    ) {
+      vimMappingTimeoutTask?.cancel()
+      vimMappingTimeoutTask = nil
+      guard awaitingMoreInput else { return }
+
+      vimMappingTimeoutTask = Task { @MainActor [weak self, weak textView] in
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        guard !Task.isCancelled, let self, let textView, textView.superview != nil else { return }
+        do {
+          let result = try controller.handle(token: "<timeout>")
+          if let execution = result.execution {
+            let edits = controller.engine.consumeCompletedEdits()
+            self.applyVimExecution(execution, edits: edits, to: textView)
+          }
+          self.publishVimPrompt(controller.prompt)
+        } catch {
+          NSSound.beep()
+        }
+        self.vimMappingTimeoutTask = nil
+      }
+    }
+
+    private static func mergedVimExecution(
+      _ first: VimExecutionResult,
+      _ second: VimExecutionResult
+    ) -> VimExecutionResult {
+      VimExecutionResult(
+        state: second.state,
+        hostRequests: first.hostRequests + second.hostRequests,
+        didChangeText: first.didChangeText || second.didChangeText
+      )
     }
 
     func handleZoom(_ delta: CGFloat, _: NSTextView) -> Bool {
@@ -1232,7 +1359,7 @@ struct CodeTextEditor: NSViewRepresentable {
         codeTextView.vimCursorStyle = parent.profile.vim.insertCursorStyle.overrideStyle
       case .replace:
         codeTextView.vimCursorStyle = parent.profile.vim.replaceCursorStyle.overrideStyle
-      case .normal, .visualCharacter, .visualLine, .visualBlock, .commandLine, .search:
+      case .normal, .visualCharacter, .visualLine, .commandLine, .search:
         codeTextView.vimCursorStyle = parent.profile.vim.normalCursorStyle.overrideStyle
       }
     }
@@ -1315,6 +1442,27 @@ struct CodeTextEditor: NSViewRepresentable {
       return event.characters ?? characters
     }
 
+    private func updateVimViewport(
+      _ controller: VimKeymapController,
+      in textView: NSTextView
+    ) {
+      guard let layoutManager = textView.layoutManager,
+        let textContainer = textView.textContainer
+      else { return }
+      let glyphRange = layoutManager.glyphRange(
+        forBoundingRect: textView.visibleRect,
+        in: textContainer
+      )
+      let characterRange = layoutManager.characterRange(
+        forGlyphRange: glyphRange,
+        actualGlyphRange: nil
+      )
+      let length = (textView.string as NSString).length
+      let lower = min(max(0, characterRange.location), length)
+      let upper = min(max(lower, NSMaxRange(characterRange)), length)
+      controller.engine.updateViewport(visibleUTF16Range: lower..<upper)
+    }
+
     private func synchronizeVimControllerIfNeeded(
       _ controller: VimKeymapController,
       with textView: NSTextView
@@ -1330,36 +1478,63 @@ struct CodeTextEditor: NSViewRepresentable {
       synchronizedVimTextRevision = parent.textRevision
     }
 
-    private func applyVimExecution(_ execution: VimExecutionResult, to textView: NSTextView) {
+    private func applyVimExecution(
+      _ execution: VimExecutionResult,
+      edits incrementalEdits: [(range: Range<Int>, replacement: String)] = [],
+      to textView: NSTextView
+    ) {
       let state = execution.state
       updateVimCursorStyle(for: state.mode, in: textView)
       let selections = vimSelections(from: state)
       let primarySelection = vimPrimarySelection(from: selections, state: state)
       let selectionValues = selections.map { NSValue(range: $0) }
       if state.text != textView.string {
-        let edit = Self.singleEdit(from: textView.string, to: state.text)
+        var edits = incrementalEdits
+        if !Self.edits(edits, transform: textView.string, into: state.text) {
+          let fallback = Self.singleEdit(from: textView.string, to: state.text)
+          edits = [(
+            fallback.range.location..<NSMaxRange(fallback.range),
+            fallback.replacement
+          )]
+        }
+
         isApplyingExternalUpdate = true
-        textView.textStorage?.replaceCharacters(in: edit.range, with: edit.replacement)
+        textView.textStorage?.beginEditing()
+        var intermediate = textView.string
+        var presentationRange: NSRange?
+        var finalRevision = synchronizedVimTextRevision
+        for edit in edits {
+          let range = NSRange(location: edit.range.lowerBound, length: edit.range.count)
+          textView.textStorage?.replaceCharacters(in: range, with: edit.replacement)
+          intermediate = (intermediate as NSString).replacingCharacters(
+            in: range,
+            with: edit.replacement
+          )
+          finalRevision = publishEdit(
+            range: range,
+            replacement: edit.replacement,
+            resultingText: intermediate,
+            selection: primarySelection
+          )
+          let affected = affectedPresentationRange(
+            in: intermediate,
+            editedRange: range,
+            replacement: edit.replacement
+          )
+          presentationRange = presentationRange.map { NSUnionRange($0, affected) } ?? affected
+          reloadEditorGeometry(
+            for: textView,
+            editedRange: range,
+            replacement: edit.replacement
+          )
+        }
+        textView.textStorage?.endEditing()
         textView.setSelectedRanges(selectionValues, affinity: .downstream, stillSelecting: false)
         textView.scrollRangeToVisible(primarySelection)
         isApplyingExternalUpdate = false
         (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
-        synchronizedVimTextRevision = publishEdit(
-          range: edit.range,
-          replacement: edit.replacement,
-          resultingText: state.text,
-          selection: primarySelection
-        )
-        pendingPresentationRange = affectedPresentationRange(
-          in: state.text,
-          editedRange: edit.range,
-          replacement: edit.replacement
-        )
-        reloadEditorGeometry(
-          for: textView,
-          editedRange: edit.range,
-          replacement: edit.replacement
-        )
+        synchronizedVimTextRevision = finalRevision
+        pendingPresentationRange = presentationRange
         scheduleCaretPublication(for: textView)
       } else {
         let currentRanges = textView.selectedRanges.map(\.rangeValue)
@@ -1378,14 +1553,33 @@ struct CodeTextEditor: NSViewRepresentable {
       for request in execution.hostRequests { parent.onVimHostRequest(request) }
     }
 
+    private static func edits(
+      _ edits: [(range: Range<Int>, replacement: String)],
+      transform source: String,
+      into expected: String
+    ) -> Bool {
+      guard !edits.isEmpty else { return source == expected }
+      var value = source
+      for edit in edits {
+        let ns = value as NSString
+        guard edit.range.lowerBound >= 0,
+          edit.range.upperBound >= edit.range.lowerBound,
+          edit.range.upperBound <= ns.length
+        else { return false }
+        value = ns.replacingCharacters(
+          in: NSRange(location: edit.range.lowerBound, length: edit.range.count),
+          with: edit.replacement
+        )
+      }
+      return value == expected
+    }
+
     private func vimSelections(from state: VimState) -> [NSRange] {
       let length = (state.text as NSString).length
-      if let visual = state.selection, !visual.ranges.isEmpty {
-        return visual.ranges.map { range in
-          let lower = min(max(range.lowerBound, 0), length)
-          let upper = min(max(range.upperBound, lower), length)
-          return NSRange(location: lower, length: upper - lower)
-        }
+      if let visual = state.selection {
+        let lower = min(max(visual.lowerBound, 0), length)
+        let upper = min(max(visual.upperBound, lower), length)
+        return [NSRange(location: lower, length: upper - lower)]
       }
       return [NSRange(location: min(max(state.cursor, 0), length), length: 0)]
     }
