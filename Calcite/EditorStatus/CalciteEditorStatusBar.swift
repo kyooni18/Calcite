@@ -100,14 +100,7 @@ enum CalciteEditorStatusCoordinator {
       return .vimInsert(
         VimInsertEditorStatus(
           label:
-            if block?.isBlockAppend == true
-          {
-            "V-BLOCK APPEND"
-          } else if block != nil {
-            "V-BLOCK INSERT"
-          } else {
-            "INSERT"
-          },
+            block?.isBlockAppend == true ? "V-BLOCK APPEND" : ( block != nil ? "V-BLOCK INSERT" : "INSERT" ),
           inputSource: friendlyInputSource(tab.vimInputSourceIdentifier),
           isComposing: interaction.isComposingText,
           completionIndex: tab.completions.isEmpty ? nil : tab.selectedCompletionIndex + 1,

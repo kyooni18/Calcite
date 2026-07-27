@@ -1,4 +1,5 @@
 @_spi(Calcite) import EditorVim
+import Foundation
 
 @MainActor
 enum CalciteVimMessagePresenter {
