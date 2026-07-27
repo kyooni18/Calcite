@@ -274,20 +274,7 @@ public final class VimKeymapController: @unchecked Sendable {
   private func handleUnlocked(event: VimInputEvent) throws -> VimKeyHandlingResult {
     switch event {
     case .mappingTimeout:
-      let timedOutNotation = storedPendingNotation
-      let wasMappingPrefix =
-        !pendingTokens.isEmpty
-        && activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
-          .match(pendingTokens).isPrefix
-      let result = try flushPendingInput()
-      if wasMappingPrefix, !timedOutNotation.isEmpty {
-        storedMessage = VimMessage(
-          text: "Mapping timed out: \(timedOutNotation)",
-          severity: .warning,
-          lifetime: .timed(milliseconds: 2200)
-        )
-      }
-      return result
+      return try flushPendingInput()
     case .compositionStarted:
       compositionIsActive = true
       compositionText = ""
@@ -866,7 +853,13 @@ public final class VimKeymapController: @unchecked Sendable {
   }
 
   private func refreshPendingNotation() {
-    storedPendingNotation = (commandTokens + pendingTokens).map(\.notation).joined()
+    let notation = (commandTokens + pendingTokens).map(\.notation).joined()
+    let leader = engine.leader
+    guard !leader.isEmpty, notation.hasPrefix(leader) else {
+      storedPendingNotation = notation
+      return
+    }
+    storedPendingNotation = "<leader>" + String(notation.dropFirst(leader.count))
   }
 
   private func resetPendingInputUnlocked() {

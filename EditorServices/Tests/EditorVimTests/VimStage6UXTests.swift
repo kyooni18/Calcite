@@ -80,17 +80,18 @@ final class VimStage6UXTests: XCTestCase {
     XCTAssertEqual(message.code, "E20")
   }
 
-  func testMappingTimeoutIsReported() throws {
+  func testMappingPrefixIsDisplayedImmediatelyAndClearsOnTimeout() throws {
     let controller = VimKeymapController(
-      engine: VimEngine(text: "abc"),
-      mappings: [VimKeyMapping(sequence: "jk", command: "<Esc>")]
+      engine: VimEngine(text: "abc", leader: " "),
+      mappings: [VimKeyMapping(sequence: "<leader>k", command: "<Esc>")]
     )
-    _ = try controller.handle(token: "j")
+    _ = try controller.handle(token: " ")
     XCTAssertTrue(controller.interactionSnapshot.pendingCommand.isMappingPrefix)
+    XCTAssertEqual(controller.interactionSnapshot.pendingCommand.notation, "<leader>")
     _ = try controller.handle(event: .mappingTimeout)
 
-    let message = try XCTUnwrap(controller.interactionSnapshot.message)
-    XCTAssertTrue(message.text.contains("j"))
+    XCTAssertFalse(controller.interactionSnapshot.pendingCommand.isMappingPrefix)
+    XCTAssertNil(controller.interactionSnapshot.message)
   }
   func testInsertModeNonRecursiveMappingUsesCommittedText() throws {
     let engine = VimEngine(text: "", cursor: 0)

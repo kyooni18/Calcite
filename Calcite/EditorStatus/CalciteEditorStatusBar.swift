@@ -334,13 +334,27 @@ struct CalciteEditorStatusBar: View {
 
   private func messageView(_ message: EditorStatusMessagePresentation) -> some View {
     HStack(spacing: 5) {
-      Image(
-        systemName: message.severity == .error
-          ? "xmark.circle.fill" : "exclamationmark.triangle.fill")
+      Image(systemName: messageSymbol(for: message.severity))
       Text([message.code, message.text].compactMap { $0 }.joined(separator: ": "))
         .lineLimit(1)
     }
-    .foregroundStyle(message.severity == .error ? Color.red : Color.orange)
+    .foregroundStyle(messageColor(for: message.severity))
+  }
+
+  private func messageSymbol(for severity: VimMessageSeverity) -> String {
+    switch severity {
+    case .information: "info.circle.fill"
+    case .warning: "exclamationmark.triangle.fill"
+    case .error: "xmark.circle.fill"
+    }
+  }
+
+  private func messageColor(for severity: VimMessageSeverity) -> Color {
+    switch severity {
+    case .information: .accentColor
+    case .warning: .orange
+    case .error: .red
+    }
   }
 }
 
