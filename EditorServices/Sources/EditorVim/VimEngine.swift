@@ -157,10 +157,26 @@ public struct VimExecutionResult: Sendable {
   public var state: VimState
   public var hostRequests: [VimHostRequest]
   public var didChangeText: Bool
+  @_spi(Calcite) public var transaction: VimEditTransaction?
+
   public init(state: VimState, hostRequests: [VimHostRequest] = [], didChangeText: Bool = false) {
     self.state = state
     self.hostRequests = hostRequests
     self.didChangeText = didChangeText
+    self.transaction = nil
+  }
+
+  @_spi(Calcite)
+  public init(
+    state: VimState,
+    hostRequests: [VimHostRequest] = [],
+    didChangeText: Bool = false,
+    transaction: VimEditTransaction?
+  ) {
+    self.state = state
+    self.hostRequests = hostRequests
+    self.didChangeText = didChangeText
+    self.transaction = transaction
   }
 }
 
@@ -288,6 +304,7 @@ public final class VimEngine: @unchecked Sendable {
   var lastVisual: VimVisualSnapshot?
   var blockInsertSession: VimBlockInsertSession?
   var preferredColumn: Int?
+  weak var storedVisualGeometryProvider: (any VimVisualGeometryProviding)?
   var lastFind: (character: Character, forward: Bool, till: Bool)?
   var jumpBackStack: [Int] = []
   var jumpForwardStack: [Int] = []
@@ -452,7 +469,7 @@ public final class VimEngine: @unchecked Sendable {
   @discardableResult
   public func execute(_ invocation: VimInvocation) throws -> VimExecutionResult {
     try lock.withLock {
-      try withExecutionBatch { try executeInvocationUnlocked(invocation) }
+      try executeTransactionBatch { try executeInvocationUnlocked(invocation) }
     }
   }
 
@@ -480,7 +497,7 @@ public final class VimEngine: @unchecked Sendable {
     -> VimExecutionResult
   {
     try lock.withLock {
-      try withExecutionBatch {
+      try executeTransactionBatch {
         try executeActionUnlocked(action, count: count, register: register)
       }
     }

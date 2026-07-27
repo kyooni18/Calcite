@@ -87,6 +87,13 @@ extension VimEngine {
   func displayColumn(from lineStart: Int, to offset: Int) -> Int {
     let lower = clamp(lineStart)
     let upper = clamp(offset)
+    if let visual = storedVisualGeometryProvider?.visualColumn(
+      atUTF16Offset: upper,
+      logicalLineStart: lower,
+      text: state.text
+    ) {
+      return max(0, visual)
+    }
     guard upper > lower else { return 0 }
 
     var column = 0
@@ -112,6 +119,15 @@ extension VimEngine {
   ) -> Int {
     let start = clamp(lineStart)
     let end = clamp(contentEnd)
+    if let visual = storedVisualGeometryProvider?.utf16Offset(
+      inLogicalLineStartingAt: start,
+      atVisualColumn: max(0, desiredColumn),
+      contentEnd: end,
+      text: state.text,
+      roundForward: false
+    ) {
+      return normalizedVimUTF16Offset(visual, in: state.text)
+    }
     guard start < end else { return start }
 
     var column = 0

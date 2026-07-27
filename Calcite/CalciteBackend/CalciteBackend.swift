@@ -1,5 +1,6 @@
 import Combine
 import EditorServices
+@_spi(Calcite) import EditorVim
 import Foundation
 import SwiftUI
 
@@ -497,6 +498,10 @@ final class CalciteBackend: ObservableObject, Identifiable {
   }
 
   // MARK: - Existing Vim host integration
+
+  func handleVimHostInvocation(_ invocation: VimHostInvocation) -> VimHostResponse {
+    controller.handleVimHostInvocation(invocation)
+  }
 
   func handleVimHostRequest(_ request: VimHostRequest) {
     controller.handleVimHostRequest(request)

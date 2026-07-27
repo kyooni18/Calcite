@@ -169,6 +169,25 @@ public actor EditorDocumentPipeline {
     }
   }
 
+  /// Applies a non-overlapping edit batch atomically against one base snapshot.
+  /// Analysis is scheduled once after the complete batch has been accepted.
+  @discardableResult
+  public func applyEdits(_ edits: [TextEdit]) async throws -> [AppliedTextEdit] {
+    try ensureOpen(operation: .edit)
+    guard !edits.isEmpty else { return [] }
+    do {
+      let applied = try await session.apply(edits)
+      for change in applied {
+        updateSnapshot(change.newSnapshot, remapping: change)
+      }
+      scheduleAnalysis()
+      return applied
+    } catch {
+      publishFailure(.edit, error)
+      throw error
+    }
+  }
+
   @discardableResult
   public func replaceText(with text: String) async throws -> AppliedTextEdit {
     try ensureOpen(operation: .edit)

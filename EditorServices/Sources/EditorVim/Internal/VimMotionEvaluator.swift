@@ -104,10 +104,22 @@ extension VimEngine {
         direction = 1
         repetitions = viewportHalfPageLineCount * effectiveCount
       }
-      let desired =
+      var desired =
         preferredColumn
         ?? displayColumn(from: lineStart(at: destination), to: destination)
       for _ in 0..<repetitions {
+        if let visual = storedVisualGeometryProvider?.moveVertically(
+          fromUTF16Offset: destination,
+          direction: direction,
+          preferredColumn: desired,
+          text: state.text
+        ) {
+          let next = normalizedVimUTF16Offset(visual.utf16Offset, in: state.text)
+          guard next != destination else { break }
+          destination = next
+          desired = max(0, visual.preferredColumn)
+          continue
+        }
         let currentStart = lineStart(at: destination)
         let targetStart =
           direction < 0 ? previousLineStart(currentStart) : nextLineStart(currentStart)

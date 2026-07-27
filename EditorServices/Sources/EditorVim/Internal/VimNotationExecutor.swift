@@ -4,7 +4,7 @@ extension VimEngine {
   @discardableResult
   public func executeNotation(_ notation: String) throws -> VimExecutionResult {
     try lock.withLock {
-      try withExecutionBatch { try executeNotationUnlocked(notation) }
+      try executeTransactionBatch { try executeNotationUnlocked(notation) }
     }
   }
 
@@ -23,7 +23,7 @@ extension VimEngine {
     parser: inout VimCommandParser
   ) throws -> VimExecutionResult {
     try lock.withLock {
-      try withExecutionBatch {
+      try executeTransactionBatch {
         try executeNotationTokensUnlocked(
           [token],
           parser: &parser,

@@ -140,6 +140,23 @@ public final class VimKeymapController: @unchecked Sendable {
     }
   }
 
+  @_spi(Calcite)
+  @discardableResult
+  public func reconcileExternalText(
+    _ text: String,
+    cursor: Int? = nil
+  ) -> VimExternalReconciliationResult {
+    lock.withLock {
+      resetPendingInputUnlocked()
+      cancelPromptUnlocked()
+      let result = engine.reconcileExternalText(text, cursor: cursor)
+      if case .cancelledConflict(let message) = result {
+        storedMessage = message
+      }
+      return result
+    }
+  }
+
   public func setMappings(_ values: [VimKeyMapping]) {
     setMappings(
       values.map {
@@ -230,7 +247,7 @@ public final class VimKeymapController: @unchecked Sendable {
     try lock.withLock {
       try engine.lock.withLock {
         expireMessageForNextInputUnlocked()
-        let result = try engine.withExecutionBatch {
+        let result = try engine.executeKeyHandlingTransaction {
           try handleUnlocked(token: VimInputToken(notationToken: token))
         }
         collectEngineMessageUnlocked()
@@ -245,7 +262,7 @@ public final class VimKeymapController: @unchecked Sendable {
     try lock.withLock {
       try engine.lock.withLock {
         expireMessageForNextInputUnlocked()
-        let result = try engine.withExecutionBatch {
+        let result = try engine.executeKeyHandlingTransaction {
           try handleUnlocked(event: event)
         }
         collectEngineMessageUnlocked()
@@ -1019,7 +1036,8 @@ public final class VimKeymapController: @unchecked Sendable {
     VimExecutionResult(
       state: second.state,
       hostRequests: first.hostRequests + second.hostRequests,
-      didChangeText: first.didChangeText || second.didChangeText
+      didChangeText: first.didChangeText || second.didChangeText,
+      transaction: VimEditTransaction.merging(first.transaction, second.transaction)
     )
   }
 

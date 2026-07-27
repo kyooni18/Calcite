@@ -899,9 +899,16 @@ private struct ThemeEditorPreview: View {
         selectedRange: selection,
         hasCompletions: false,
         vimHistory: VimHistorySnapshot(),
+        documentURL: nil,
+        editorSessionID: nil,
         onWillEdit: {},
         onEdit: { _, _, resultingText, selectionAfter in
           text = resultingText
+          selection = selectionAfter
+          revision &+= 1
+        },
+        onVimEdit: { transaction, selectionAfter in
+          text = transaction.afterState.text
           selection = selectionAfter
           revision &+= 1
         },
@@ -914,7 +921,13 @@ private struct ThemeEditorPreview: View {
         onRequestCompletions: {},
         onMoveToNextSnippetStop: { false },
         onMoveToPreviousSnippetStop: { false },
-        onVimHostRequest: { _ in },
+        onVimHostInvocation: { invocation in
+          .rejected(
+            .unsupportedCapability(
+              VimHostCapabilities.capability(for: invocation.request)
+            )
+          )
+        },
         onGoToDefinition: {},
         onFindReferences: {},
         onShowQuickHelp: {},

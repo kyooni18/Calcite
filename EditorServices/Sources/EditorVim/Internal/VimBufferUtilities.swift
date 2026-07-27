@@ -152,6 +152,14 @@ extension VimEngine {
   }
 
   func displayWidthOfCharacter(at offset: Int, column: Int) -> Int {
+    let start = lineStart(at: offset)
+    if let visual = storedVisualGeometryProvider?.visualWidth(
+      atUTF16Offset: offset,
+      logicalLineStart: start,
+      text: state.text
+    ) {
+      return max(1, visual)
+    }
     guard offset < lineContentEnd(at: offset), let character = character(at: offset) else {
       return 1
     }
@@ -168,6 +176,15 @@ extension VimEngine {
   ) -> Int {
     let start = clamp(lineStart)
     let end = clamp(contentEnd)
+    if let visual = storedVisualGeometryProvider?.utf16Offset(
+      inLogicalLineStartingAt: start,
+      atVisualColumn: max(0, desiredColumn),
+      contentEnd: end,
+      text: state.text,
+      roundForward: false
+    ) {
+      return normalizedVimUTF16Offset(visual, in: state.text)
+    }
     guard start < end else { return start }
     var column = 0
     var current = start
@@ -194,6 +211,15 @@ extension VimEngine {
   ) -> Int {
     let start = clamp(lineStart)
     let end = clamp(contentEnd)
+    if let visual = storedVisualGeometryProvider?.utf16Offset(
+      inLogicalLineStartingAt: start,
+      atVisualColumn: max(0, desiredColumn),
+      contentEnd: end,
+      text: state.text,
+      roundForward: true
+    ) {
+      return normalizedVimUTF16Offset(visual, in: state.text, bias: .forward)
+    }
     guard start < end else { return start }
     var column = 0
     var current = start

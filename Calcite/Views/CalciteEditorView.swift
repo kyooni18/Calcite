@@ -1,5 +1,5 @@
+@_spi(Calcite) import EditorVim
 import SwiftUI
-import EditorVim
 
 /// Backend-driven editor entry point for one concrete window editor session.
 /// Commands and selection remain targeted when a document is displayed in multiple sections.
@@ -89,9 +89,9 @@ struct CalciteEditorView: View {
       wrapsMarkdownLines: windowSession.markdownWrapsLines,
       profile: profile,
       editorMode: editorInterface,
-      onVimHostRequest: { request in
+      onVimHostInvocation: { invocation in
         activate()
-        backend.handleVimHostRequest(request)
+        return backend.handleVimHostInvocation(invocation)
       },
       onGoToDefinition: {
         activate()

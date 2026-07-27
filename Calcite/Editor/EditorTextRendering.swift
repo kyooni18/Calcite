@@ -227,15 +227,14 @@ final class CodeEditorTextView: NSTextView {
     let lineHeight: CGFloat
     if location == sourceLength, sourceLength > 0, string.hasSuffix("\n") {
       // `extraLineFragmentRect` provides the correct origin for the final
-      // empty line, but its height can expand to the remaining text-container
-      // space. Use the preceding rendered line's height for Vim's cursor so
-      // it remains one editor row tall.
-      let finalNewlineGlyph = layoutManager.glyphIndexForCharacter(at: sourceLength - 1)
-      let precedingLineRect = layoutManager.lineFragmentRect(
-        forGlyphAt: finalNewlineGlyph,
-        effectiveRange: nil
+      // empty line, but a trailing newline glyph can own both that line and
+      // the preceding one. Its line-fragment height is then two editor rows,
+      // which makes a block Vim cursor appear doubled. Derive the normal row
+      // height from the editor's uniform font and paragraph spacing instead.
+      lineHeight = max(
+        fallbackLineHeight,
+        fallbackLineHeight + (defaultParagraphStyle?.lineSpacing ?? 0)
       )
-      lineHeight = max(precedingLineRect.height, fallbackLineHeight)
     } else {
       lineHeight = max(layoutRect.height, fallbackLineHeight)
     }
@@ -732,9 +731,9 @@ final class CodeEditorTextView: NSTextView {
       // character alone lets SwiftUI's command shortcut treat it like `⌘−`
       // on some keyboard layouts, so decide from the physical key first.
       switch event.keyCode {
-      case 27: // -
+      case 27:  // -
         if !flags.contains(.shift), zoomHandler?(-0.1, self) == true { return }
-      case 24: // = / +
+      case 24:  // = / +
         if zoomHandler?(0.1, self) == true { return }
       default:
         break
@@ -940,7 +939,11 @@ final class CodeEditorTextView: NSTextView {
     menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
     menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "")
     menu.addItem(.separator())
-    menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "")
+    menu.addItem(
+      withTitle: "Select All",
+      action: #selector(NSText.selectAll(_:)),
+      keyEquivalent: ""
+    )
 
     let separator = NSMenuItem.separator()
     separator.tag = 91_004

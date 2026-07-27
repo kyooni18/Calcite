@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import EditorServices
+@_spi(Calcite) import EditorVim
 import Foundation
 import SwiftUI
 
@@ -760,6 +761,56 @@ final class EditorWorkspaceController: ObservableObject {
     var configuration = servicesConfiguration
     configuration.environment = environment
     applyServicesConfiguration(configuration)
+  }
+
+  private var vimHostCapabilities: VimHostCapabilities { .all }
+
+  func handleVimHostInvocation(_ invocation: VimHostInvocation) -> VimHostResponse {
+    guard vimHostCapabilities.supports(invocation.request) else {
+      return .rejected(
+        .unsupportedCapability(
+          VimHostCapabilities.capability(for: invocation.request)
+        )
+      )
+    }
+
+    if Self.requiresOriginatingDocument(invocation.request) {
+      guard let originID = invocation.context.editorSessionID,
+        let originTab = tabs.first(where: { $0.id == originID }),
+        invocation.context.documentURL == nil
+          || originTab.url.standardizedFileURL
+            == invocation.context.documentURL?.standardizedFileURL
+      else {
+        return .rejected(.staleContext)
+      }
+      if let revision = invocation.context.revision,
+        revision.value != originTab.textRevision
+      {
+        return .rejected(.staleContext)
+      }
+      // Route the request to the editor that produced it rather than whichever
+      // tab became active while the invocation was crossing the host boundary.
+      selectedTabID = originID
+    }
+
+    let previousError = fileOperationError
+    handleVimHostRequest(invocation.request)
+    if let message = fileOperationError, message != previousError {
+      return .rejected(.failed(code: "HOST_ACTION_FAILED", message: message))
+    }
+    return .accepted
+  }
+
+  private static func requiresOriginatingDocument(_ request: VimHostRequest) -> Bool {
+    switch request {
+    case .write, .writeAndQuit, .quit, .closeTab, .split, .scroll,
+      .definition, .declaration, .references, .hover, .rename, .codeAction,
+      .format, .completion:
+      return true
+    case .openFile, .switchBuffer, .closeWindow, .nextTab, .previousTab,
+      .newTab, .shell, .custom:
+      return false
+    }
   }
 
   func handleVimHostRequest(_ request: VimHostRequest) {

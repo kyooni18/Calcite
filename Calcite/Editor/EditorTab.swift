@@ -16,6 +16,11 @@ final class EditorTabChromeState: ObservableObject {
   }
 }
 
+private struct EditorBatchEdit: Sendable {
+  var range: NSRange
+  var replacement: String
+}
+
 private enum EditorCompletionRequestIntent {
   case automatic
   case triggered(String)
@@ -365,6 +370,162 @@ final class EditorTab: ObservableObject, Identifiable {
     } else {
       dismissCompletions()
     }
+  }
+
+  func submitVimTransaction(
+    _ transaction: VimEditTransaction,
+    selectionAfter: NSRange,
+    suggestionDelay: Double
+  ) {
+    let expectedRevision = transaction.baseRevision?.value
+    guard expectedRevision == nil || expectedRevision == textRevision else {
+      errorMessage = "Vim edit was rejected because the document revision changed."
+      return
+    }
+    guard transaction.beforeState.text == text else {
+      errorMessage = "Vim edit was rejected because its base text is stale."
+      return
+    }
+
+    let baseSnapshot = TextSnapshot(text: text)
+    let edits = transaction.baseEdits.map {
+      EditorBatchEdit(
+        range: NSRange(location: $0.lowerBound, length: $0.upperBound - $0.lowerBound),
+        replacement: $0.replacement
+      )
+    }
+    guard !edits.isEmpty, Self.applying(edits, to: text) == transaction.afterState.text else {
+      errorMessage = "Vim edit transaction is invalid."
+      return
+    }
+
+    var workingText = text
+    var workingSnapshot = baseSnapshot
+    for edit in edits.sorted(by: Self.batchEditOrder) {
+      let nextText = (workingText as NSString).replacingCharacters(
+        in: edit.range,
+        with: edit.replacement
+      )
+      let nextSnapshot = TextSnapshot(text: nextText)
+      syntaxHighlights = EditorHighlightRangeMapper.remap(
+        syntaxHighlights,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      semanticHighlights = EditorHighlightRangeMapper.remap(
+        semanticHighlights,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      buildDiagnostics = EditorHighlightRangeMapper.remap(
+        buildDiagnostics,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      remapBreakpoints(
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      updateSnippetStops(
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count
+      )
+      workingText = nextText
+      workingSnapshot = nextSnapshot
+    }
+
+    serviceDiagnostics = []
+    replaceText(with: transaction.afterState.text)
+    selectedRange = selectionAfter
+    updateDirtyState(for: transaction.afterState.text)
+    onContentStateChange?()
+    completions = []
+    selectedCompletionIndex = 0
+    diagnosticUpdateGeneration &+= 1
+    publishDiagnostics()
+    pendingEditCount += 1
+
+    let textEdits: [TextEdit]
+    do {
+      textEdits = try edits.map { edit in
+        let upper = edit.range.location + edit.range.length
+        return TextEdit(
+          range: EditorTextRange(
+            start: try baseSnapshot.position(atUTF16Offset: edit.range.location),
+            end: try baseSnapshot.position(atUTF16Offset: upper)
+          ),
+          replacement: edit.replacement
+        )
+      }
+    } catch {
+      pendingEditCount = max(0, pendingEditCount - 1)
+      errorMessage = error.localizedDescription
+      return
+    }
+
+    let previous = editTask
+    let epoch = editEpoch
+    let expectedText = transaction.afterState.text
+    editTask = Task { [weak self, pipeline] in
+      await previous?.value
+      guard let self else { return }
+      guard epoch == self.editEpoch else {
+        self.pendingEditCount = max(0, self.pendingEditCount - 1)
+        return
+      }
+      do {
+        let applied = try await pipeline.applyEdits(textEdits)
+        self.pendingEditCount = max(0, self.pendingEditCount - 1)
+        let authoritative = applied.last?.newSnapshot.text ?? expectedText
+        if self.pendingEditCount == 0, self.text != authoritative {
+          self.replaceText(with: authoritative)
+        }
+        self.errorMessage = nil
+      } catch {
+        self.pendingEditCount = max(0, self.pendingEditCount - 1)
+        self.editEpoch &+= 1
+        self.completionGeneration &+= 1
+        self.completionTask?.cancel()
+        await self.recoverFromBackendFailure(error)
+      }
+    }
+
+    if edits.count == 1,
+      let intent = completionIntent(after: edits[0].replacement, selection: selectionAfter)
+    {
+      requestCompletions(
+        atUTF16Offset: selectionAfter.location,
+        delay: suggestionDelay,
+        intent: intent
+      )
+    } else {
+      dismissCompletions()
+    }
+  }
+
+  private static func batchEditOrder(_ lhs: EditorBatchEdit, _ rhs: EditorBatchEdit) -> Bool {
+    if lhs.range.location != rhs.range.location { return lhs.range.location > rhs.range.location }
+    return NSMaxRange(lhs.range) > NSMaxRange(rhs.range)
+  }
+
+  private static func applying(_ edits: [EditorBatchEdit], to source: String) -> String? {
+    var value = source
+    for edit in edits.sorted(by: batchEditOrder) {
+      let ns = value as NSString
+      guard edit.range.location >= 0, edit.range.length >= 0,
+        NSMaxRange(edit.range) <= ns.length
+      else { return nil }
+      value = ns.replacingCharacters(in: edit.range, with: edit.replacement)
+    }
+    return value
   }
 
   private func requestCompletions(

@@ -1,6 +1,39 @@
 import Foundation
 
 extension VimEngine {
+  func executeTransactionBatch(
+    _ body: () throws -> VimExecutionResult
+  ) rethrows -> VimExecutionResult {
+    let isOutermost = executionBatchDepth == 0
+    let before = storedState
+    var result = try withExecutionBatch(body)
+    guard isOutermost else { return result }
+    result.transaction = VimEditTransaction.make(
+      before: before,
+      after: result.state,
+      deltas: completedExecutionEdits,
+      repeatRecord: lastRepeat
+    )
+    return result
+  }
+
+  func executeKeyHandlingTransaction(
+    _ body: () throws -> VimKeyHandlingResult
+  ) rethrows -> VimKeyHandlingResult {
+    let isOutermost = executionBatchDepth == 0
+    let before = storedState
+    var result = try withExecutionBatch(body)
+    guard isOutermost, var execution = result.execution else { return result }
+    execution.transaction = VimEditTransaction.make(
+      before: before,
+      after: execution.state,
+      deltas: completedExecutionEdits,
+      repeatRecord: lastRepeat
+    )
+    result.execution = execution
+    return result
+  }
+
   func withExecutionBatch<T>(_ body: () throws -> T) rethrows -> T {
     let isOutermost = executionBatchDepth == 0
     if isOutermost { currentExecutionEdits.removeAll(keepingCapacity: true) }
