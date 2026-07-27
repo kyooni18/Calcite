@@ -1268,7 +1268,7 @@ struct CodeTextEditor: NSViewRepresentable {
           edits.append(contentsOf: controller.engine.consumeCompletedEdits())
         }
         if let execution {
-          applyVimExecution(execution, edits: edits, to: textView)
+          applyVimExecution(execution, edits: edits, controller: controller, to: textView)
         } else {
           let currentMode = controller.engine.state.mode
           updateVimCursorStyle(for: currentMode, in: textView)
@@ -1338,7 +1338,7 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       if let execution = result.execution {
         let edits = controller.engine.consumeCompletedEdits()
-        applyVimExecution(execution, edits: edits, to: textView)
+        applyVimExecution(execution, edits: edits, controller: controller, to: textView)
       } else {
         let mode = controller.engine.state.mode
         updateVimCursorStyle(for: mode, in: textView)
@@ -1738,7 +1738,10 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       guard vimDocumentComposition == nil else { return }
       let currentRanges = textView.selectedRanges.map(\.rangeValue)
-      let expectedRanges = vimSelections(from: controller.engine.state)
+      let expectedRanges = CalciteVimSelectionPresenter.ranges(
+        for: controller.engine.state,
+        selectionSet: controller.engine.selectionSet
+      )
       let textChanged =
         synchronizedVimTextRevision != parent.textRevision
         || controller.engine.state.text != textView.string
@@ -1751,12 +1754,20 @@ struct CodeTextEditor: NSViewRepresentable {
     private func applyVimExecution(
       _ execution: VimExecutionResult,
       edits incrementalEdits: [(range: Range<Int>, replacement: String)] = [],
+      controller: VimKeymapController,
       to textView: NSTextView
     ) {
       let state = execution.state
       updateVimCursorStyle(for: state.mode, in: textView)
-      let selections = vimSelections(from: state)
-      let primarySelection = vimPrimarySelection(from: selections, state: state)
+      let selections = CalciteVimSelectionPresenter.ranges(
+        for: state,
+        selectionSet: controller.engine.selectionSet
+      )
+      let primarySelection = CalciteVimSelectionPresenter.primaryRange(
+        from: selections,
+        state: state,
+        selectionSet: controller.engine.selectionSet
+      )
       let selectionValues = selections.map { NSValue(range: $0) }
       if state.text != textView.string {
         var edits = incrementalEdits
@@ -1844,26 +1855,6 @@ struct CodeTextEditor: NSViewRepresentable {
         )
       }
       return value == expected
-    }
-
-    private func vimSelections(from state: VimState) -> [NSRange] {
-      let length = (state.text as NSString).length
-      if let visual = state.selection {
-        let lower = min(max(visual.lowerBound, 0), length)
-        let upper = min(max(visual.upperBound, lower), length)
-        return [NSRange(location: lower, length: upper - lower)]
-      }
-      return [NSRange(location: min(max(state.cursor, 0), length), length: 0)]
-    }
-
-    private func vimPrimarySelection(from selections: [NSRange], state: VimState) -> NSRange {
-      guard let first = selections.first else {
-        return NSRange(location: max(0, state.cursor), length: 0)
-      }
-      guard selections.count > 1 else { return first }
-      let lower = selections.map(\.location).min() ?? first.location
-      let upper = selections.map(NSMaxRange).max() ?? NSMaxRange(first)
-      return NSRange(location: lower, length: max(0, upper - lower))
     }
 
     private static func applying(

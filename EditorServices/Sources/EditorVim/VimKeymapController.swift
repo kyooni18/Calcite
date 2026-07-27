@@ -970,6 +970,7 @@ public final class VimKeymapController: @unchecked Sendable {
       isTemporaryNormal: engine.temporaryInsertReturnMode != nil,
       isComposingText: compositionIsActive,
       history: VimHistorySnapshot(commands: commandHistory, searches: searchHistory),
+      visualSelection: engine.visualSelectionSnapshotUnlocked(),
       message: storedMessage
     )
   }

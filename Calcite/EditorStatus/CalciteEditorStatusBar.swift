@@ -32,6 +32,7 @@ struct VimInsertEditorStatus: Equatable {
   var completionCount: Int
   var snippetIndex: Int?
   var snippetCount: Int
+  var blockLineCount: Int?
 }
 
 struct VimReplaceEditorStatus: Equatable {
@@ -44,6 +45,8 @@ struct VimVisualEditorStatus: Equatable {
   var label: String
   var characterCount: Int
   var lineCount: Int
+  var width: Int?
+  var virtualColumnRange: Range<Int>?
 }
 
 struct EditorCommandLineStatus: Equatable {
@@ -91,15 +94,27 @@ enum CalciteEditorStatusCoordinator {
         )
       )
     case .insert:
+      let block =
+        interaction.visualSelection?.shape == .block
+        ? interaction.visualSelection : nil
       return .vimInsert(
         VimInsertEditorStatus(
-          label: "INSERT",
+          label:
+            if block?.isBlockAppend == true
+          {
+            "V-BLOCK APPEND"
+          } else if block != nil {
+            "V-BLOCK INSERT"
+          } else {
+            "INSERT"
+          },
           inputSource: friendlyInputSource(tab.vimInputSourceIdentifier),
           isComposing: interaction.isComposingText,
           completionIndex: tab.completions.isEmpty ? nil : tab.selectedCompletionIndex + 1,
           completionCount: tab.completions.count,
           snippetIndex: tab.snippetProgress?.current,
-          snippetCount: tab.snippetProgress?.total ?? 0
+          snippetCount: tab.snippetProgress?.total ?? 0,
+          blockLineCount: block?.height
         )
       )
     case .replace:
@@ -111,12 +126,31 @@ enum CalciteEditorStatusCoordinator {
         )
       )
     case .visualCharacter, .visualLine:
+      if let visual = interaction.visualSelection {
+        let label: String
+        switch visual.shape {
+        case .character: label = "VISUAL"
+        case .line: label = "V-LINE"
+        case .block: label = "V-BLOCK"
+        }
+        return .vimVisual(
+          VimVisualEditorStatus(
+            label: label,
+            characterCount: visual.characterCount,
+            lineCount: visual.lineCount,
+            width: visual.width,
+            virtualColumnRange: visual.virtualColumnRange
+          )
+        )
+      }
       let selection = selectionMetrics(tab: tab)
       return .vimVisual(
         VimVisualEditorStatus(
           label: interaction.mode == .visualLine ? "V-LINE" : "VISUAL",
           characterCount: selection.characters,
-          lineCount: selection.lines
+          lineCount: selection.lines,
+          width: nil,
+          virtualColumnRange: nil
         )
       )
     case .commandLine, .search:
@@ -224,6 +258,9 @@ struct CalciteEditorStatusBar: View {
       HStack(spacing: 8) {
         modeBadge(status.label, color: .green)
         if let inputSource = status.inputSource { Text(inputSource).foregroundStyle(.secondary) }
+        if let blockLineCount = status.blockLineCount {
+          Text("\(blockLineCount) lines").foregroundStyle(.secondary)
+        }
         if status.isComposing {
           Label("composing", systemImage: "character.cursor.ibeam")
         } else if let snippetIndex = status.snippetIndex {
@@ -245,6 +282,12 @@ struct CalciteEditorStatusBar: View {
         modeBadge(status.label, color: .accentColor)
         if status.label == "V-LINE" {
           Text("\(status.lineCount) lines")
+        } else if status.label == "V-BLOCK", let width = status.width {
+          Text("\(status.lineCount) × \(width)")
+          if let columns = status.virtualColumnRange {
+            Text("Col \(columns.lowerBound + 1)–\(columns.upperBound)")
+              .foregroundStyle(.secondary)
+          }
         } else {
           Text("\(status.characterCount) chars")
           Text("\(status.lineCount) lines").foregroundStyle(.secondary)

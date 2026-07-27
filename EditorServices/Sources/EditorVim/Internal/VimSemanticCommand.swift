@@ -5,9 +5,16 @@ import Foundation
 /// Public `VimAction` values remain the surface API, while repeat and macro
 /// playback use this representation so mutable register contents do not alter
 /// already-recorded paste operations.
+enum VimBlockSemanticCommand: Sendable {
+  case select(width: Int, height: Int)
+  case beginInsert(append: Bool)
+  case replace(Character)
+}
+
 enum VimSemanticCommand: Sendable {
   case action(VimAction, count: Int, register: VimRegister)
   case paste(VimRegisterValue, after: Bool, count: Int)
+  case block(VimBlockSemanticCommand)
 
   var publicActions: [VimAction] {
     switch self {
@@ -15,6 +22,8 @@ enum VimSemanticCommand: Sendable {
       return Array(repeating: action, count: max(1, count))
     case .paste(_, let after, let count):
       return Array(repeating: after ? .pasteAfter : .pasteBefore, count: max(1, count))
+    case .block:
+      return []
     }
   }
 }
@@ -55,6 +64,10 @@ extension VimEngine {
         state: state,
         didChangeText: before.text != state.text
       )
+    case .block(let block):
+      let before = state
+      executeBlockSemantic(block)
+      return VimExecutionResult(state: state, didChangeText: before.text != state.text)
     }
   }
 }

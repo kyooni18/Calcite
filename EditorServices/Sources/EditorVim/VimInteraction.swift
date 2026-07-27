@@ -135,6 +135,7 @@ public struct VimInteractionSnapshot: Hashable, Sendable {
   public var isTemporaryNormal: Bool
   public var isComposingText: Bool
   public var history: VimHistorySnapshot
+  public var visualSelection: VimVisualSelectionSnapshot?
   public var message: VimMessage?
 
   public init(
@@ -145,6 +146,7 @@ public struct VimInteractionSnapshot: Hashable, Sendable {
     isTemporaryNormal: Bool = false,
     isComposingText: Bool = false,
     history: VimHistorySnapshot = VimHistorySnapshot(),
+    visualSelection: VimVisualSelectionSnapshot? = nil,
     message: VimMessage? = nil
   ) {
     self.mode = mode
@@ -154,6 +156,7 @@ public struct VimInteractionSnapshot: Hashable, Sendable {
     self.isTemporaryNormal = isTemporaryNormal
     self.isComposingText = isComposingText
     self.history = history
+    self.visualSelection = visualSelection
     self.message = message
   }
 }

@@ -144,10 +144,19 @@ extension VimEngine {
         guard let character = token.first, token.count == 1 else {
           throw VimError.unsupportedNotation(token)
         }
-        merge(
-          try execute(
-            .replaceCharacter(character), count: max(1, parser.count),
-            register: parser.selectedRegister))
+        if state.mode == .visualCharacter, visualSelectionShape == .block {
+          if recording != nil, macroDepth == 0, !isReplayingChange {
+            recordingActions.append(.block(.replace(character)))
+          }
+          let before = state
+          replaceVisualBlock(with: character)
+          merge(VimExecutionResult(state: state, didChangeText: before.text != state.text))
+        } else {
+          merge(
+            try execute(
+              .replaceCharacter(character), count: max(1, parser.count),
+              register: parser.selectedRegister))
+        }
         parser.pendingReplace = false
         parser.count = 0
         parser.selectedRegister = .unnamed
@@ -196,14 +205,37 @@ extension VimEngine {
       }
 
       if state.mode == .visualCharacter || state.mode == .visualLine {
+        if visualSelectionShape == .block {
+          if token == "v" {
+            visualSelectionShape = .character
+            state.mode = .visualCharacter
+            updateVisualSelection()
+            continue
+          }
+          if token == "V" {
+            visualSelectionShape = .line
+            state.mode = .visualLine
+            updateVisualSelection()
+            continue
+          }
+          if token.lowercased() == "<c-v>" {
+            enterVisualBlock()
+            continue
+          }
+        }
         if token == "o" || token == "O" {
           swapVisualEndpoints()
           continue
         }
         if token == "p" || token == "P" {
           let source = registerValue(for: parser.selectedRegister)
-          pasteOverVisual(
-            source, count: max(1, parser.count), sourceRegister: parser.selectedRegister)
+          if visualSelectionShape == .block {
+            pasteOverVisualBlock(
+              source, count: max(1, parser.count), sourceRegister: parser.selectedRegister)
+          } else {
+            pasteOverVisual(
+              source, count: max(1, parser.count), sourceRegister: parser.selectedRegister)
+          }
           parser.count = 0
           parser.selectedRegister = .unnamed
           changed = true
@@ -212,7 +244,7 @@ extension VimEngine {
         let visualOperator: VimOperator?
         switch token {
         case "d", "x", "D", "X": visualOperator = .delete
-        case "c", "C", "S": visualOperator = .change
+        case "c", "C", "S", "s": visualOperator = .change
         case "y": visualOperator = .yank
         case ">": visualOperator = .indent
         case "<": visualOperator = .outdent
@@ -227,14 +259,23 @@ extension VimEngine {
           continue
         }
         if token == "I" || token == "A" {
-          guard let range = visualRange() else { continue }
-          rememberVisualSelection()
-          let insertion = token == "I" ? range.lowerBound : range.upperBound
-          state.cursor = min(insertion, state.text.utf16.count)
-          state.mode = .normal
-          state.selection = nil
-          visualAnchor = nil
-          merge(try execute(token == "I" ? .enterInsert : .enterInsertAfterCursor))
+          if visualSelectionShape == .block {
+            if recording != nil, macroDepth == 0, !isReplayingChange {
+              recordingActions.append(.block(.beginInsert(append: token == "A")))
+            }
+            beginVisualBlockInsert(append: token == "A")
+            merge(VimExecutionResult(state: state))
+          } else {
+            guard let range = visualRange() else { continue }
+            rememberVisualSelection()
+            let insertion = token == "I" ? range.lowerBound : range.upperBound
+            state.cursor = min(insertion, state.text.utf16.count)
+            state.mode = .normal
+            state.selection = nil
+            visualAnchor = nil
+            visualSelectionShape = .character
+            merge(try execute(token == "I" ? .enterInsert : .enterInsertAfterCursor))
+          }
           continue
         }
       }
@@ -447,6 +488,12 @@ extension VimEngine {
       case "R": action = .enterReplace
       case "v": action = .enterVisualCharacter
       case "V": action = .enterVisualLine
+      case "<c-v>", "<C-V>", "<C-v>":
+        if recording != nil, macroDepth == 0, !isReplayingChange {
+          recordingActions.append(.block(.select(width: 1, height: 1)))
+        }
+        enterVisualBlock()
+        action = nil
       case "x": action = .deleteCharacter
       case "D": action = .operatorMotion(.delete, .lineEnd)
       case "C": action = .operatorMotion(.change, .lineEnd)

@@ -171,9 +171,30 @@ public enum VimError: Error, Equatable, Sendable {
   case macroRecursionLimit
 }
 
+enum VimRegisterShape: Hashable, Sendable {
+  case characterwise
+  case linewise
+  case blockwise(width: Int)
+}
+
 struct VimRegisterValue: Sendable {
   var text: String
-  var linewise: Bool
+  var shape: VimRegisterShape
+
+  init(text: String, linewise: Bool) {
+    self.text = text
+    self.shape = linewise ? .linewise : .characterwise
+  }
+
+  init(text: String, shape: VimRegisterShape) {
+    self.text = text
+    self.shape = shape
+  }
+
+  var linewise: Bool {
+    if case .linewise = shape { return true }
+    return false
+  }
 }
 
 struct VimChangeSession: Sendable {
@@ -198,6 +219,7 @@ struct VimVisualSnapshot: Sendable {
   var anchor: Int
   var caret: Int
   var mode: VimMode
+  var shape: VimSelectionShape
 }
 
 struct VimOperatorRange {
@@ -262,7 +284,9 @@ public final class VimEngine: @unchecked Sendable {
   var searchSmartCase = true
   var searchWrap = true
   var visualAnchor: Int?
+  var visualSelectionShape: VimSelectionShape = .character
   var lastVisual: VimVisualSnapshot?
+  var blockInsertSession: VimBlockInsertSession?
   var preferredColumn: Int?
   var lastFind: (character: Character, forward: Bool, till: Bool)?
   var jumpBackStack: [Int] = []
@@ -309,6 +333,8 @@ public final class VimEngine: @unchecked Sendable {
             rememberVisualSelection()
             state.mode = .normal
             visualAnchor = nil
+            visualSelectionShape = .character
+            blockInsertSession = nil
           }
           state.selection = nil
           preferredColumn = nil
@@ -339,6 +365,8 @@ public final class VimEngine: @unchecked Sendable {
       state.selection = nil
       state.mode = .normal
       visualAnchor = nil
+      visualSelectionShape = .character
+      blockInsertSession = nil
       preferredColumn = nil
       normalizeCursorForMode()
 

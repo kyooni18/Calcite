@@ -67,6 +67,9 @@ extension VimEngine {
 
   func escapeToNormalMode() {
     let previousMode = state.mode
+    if previousMode == .insert, blockInsertSession != nil {
+      replicateVisualBlockInsertionIfNeeded()
+    }
     if previousMode == .visualCharacter || previousMode == .visualLine {
       rememberVisualSelection()
     }
@@ -93,6 +96,8 @@ extension VimEngine {
     state.mode = .normal
     state.selection = nil
     visualAnchor = nil
+    visualSelectionShape = .character
+    blockInsertSession = nil
     preferredColumn = nil
     replaceRestorations.removeAll(keepingCapacity: true)
 
@@ -158,6 +163,8 @@ extension VimEngine {
     state.mode = .normal
     state.selection = nil
     visualAnchor = nil
+    visualSelectionShape = .character
+    blockInsertSession = nil
     preferredColumn = nil
     normalizeCursorForMode()
     return true
@@ -350,10 +357,16 @@ extension VimEngine {
     let (target, append) = normalizedRegister(requested)
     let resolved: VimRegisterValue
     if append, let previous = registers[target] {
-      resolved = VimRegisterValue(
-        text: previous.text + value.text,
-        linewise: previous.linewise || value.linewise
-      )
+      let shape: VimRegisterShape
+      switch (previous.shape, value.shape) {
+      case (.blockwise(let lhs), .blockwise(let rhs)):
+        shape = .blockwise(width: max(lhs, rhs))
+      case (.linewise, _), (_, .linewise):
+        shape = .linewise
+      default:
+        shape = .characterwise
+      }
+      resolved = VimRegisterValue(text: previous.text + value.text, shape: shape)
     } else {
       resolved = value
     }
@@ -410,14 +423,18 @@ extension VimEngine {
     state.mode = .normal
     state.selection = nil
     visualAnchor = nil
+    visualSelectionShape = .character
     normalizeCursorForMode()
   }
 
   func paste(_ value: VimRegisterValue, after: Bool, count: Int) {
     guard !value.text.isEmpty else { return }
-    if value.linewise {
+    switch value.shape {
+    case .linewise:
       pasteLinewise(value.text, after: after, count: count)
-    } else {
+    case .blockwise:
+      pasteBlockwise(value, after: after, count: count)
+    case .characterwise:
       pasteCharacterwise(value.text, after: after, count: count)
     }
     state.mode = .normal
