@@ -137,17 +137,6 @@ Ranking considers the typed prefix, syntax context, expected type, current scope
 
 Completion results may contain snippets, a primary edit, and additional edits. Apply the returned edits instead of inserting only the visible label.
 
-## Vim engine
-
-`EditorVim` is separated into two layers:
-
-- `Sources/EditorVim/VimEngine`: document state, UTF-16-safe text operations, motions, operators, registers, macros, searches, Ex commands, and undo/change transactions
-- `Sources/EditorVim/Integration`: one-key-at-a-time mapping and prompt handling plus document-session integration
-
-The engine supports normal, insert, replace, characterwise visual, linewise visual, and blockwise visual modes. It includes counted motions and operators, word and pair text objects, named/numbered/small-delete/clipboard registers, dot-repeat, grouped insert undo, macros, marks, searches, substitutions and ranges, linewise and blockwise paste, case transforms, number increment/decrement, tab/window host requests, command/search history, mode-specific mappings, and Unicode-safe cursor boundaries.
-
-Host-owned operations such as saving, splitting sections, language-server navigation, diagnostics, formatting, completion, builds, and terminal commands are emitted as `VimHostRequest` values so the engine remains independent of AppKit and editor presentation.
-
 ## Modules
 
 - `EditorCore`: text, document, theme, and shared protocols
@@ -156,7 +145,7 @@ Host-owned operations such as saving, splitting sections, language-server naviga
 - `EditorLSP`: language-server transport and document service
 - `EditorTreeSitter`: syntax services and grammar registry
 - `EditorDAP`: debug adapter transport and sessions
-- `EditorVim`: Vim-compatible editing engine and native-editor integration
+- `EditorVim`: Vim state and commands
 - `EditorServices`: unified backend, completion, build, environment, and project integration
 
 ## Verification
@@ -164,7 +153,11 @@ Host-owned operations such as saving, splitting sections, language-server naviga
 ```sh
 cd EditorServices
 swift test
+swift-format lint --recursive --strict Sources/EditorVim Tests/EditorVimTests Package.swift
+./Scripts/check-vim-api.sh
 ```
+
+The Vim suite includes committed differential fixtures generated from system Vim. Regenerate them with `Scripts/generate-vim-differential-fixtures.py` when intentionally changing compatibility behavior. See [`VIM_ENGINE_IMPROVEMENTS.md`](VIM_ENGINE_IMPROVEMENTS.md) for the current architecture and validation details.
 
 The repository keeps focused project tests. Historical status reports and overlapping integration suites are intentionally omitted.
 
