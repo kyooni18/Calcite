@@ -1,5 +1,6 @@
 import AppKit
 import EditorServices
+@_spi(Calcite) import EditorVim
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -90,7 +91,8 @@ struct ServiceSettingsView: View {
     switch page {
     case .services: return "language server completion syntax diagnostics formatter"
     case .editor:
-      return "theme font color typing vim neovim terminal editor keybindings snippets search replace"
+      return
+        "theme font color typing vim neovim terminal editor keybindings snippets search replace"
     case .build: return "build run test check task command"
     case .debug: return "debug executable arguments working directory"
     }
@@ -657,6 +659,18 @@ struct EditorProfileSettingsView: View {
           .font(.caption)
           .foregroundStyle(.secondary)
       }
+      Stepper(
+        "Mapping Timeout: \(profile.vim.mappingTimeoutMilliseconds) ms",
+        value: $profile.vim.mappingTimeoutMilliseconds,
+        in: 0...5_000,
+        step: 50
+      )
+      .disabled(editorMode != .calciteVim)
+      Text(
+        "Set this to 0 for immediate resolution; longer values make ambiguous mappings easier to enter."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
       Picker("Normal Cursor Shape", selection: $profile.vim.normalCursorStyle) {
         ForEach(EditorVimCursorStyle.allCases) { style in
           Text(style.title).tag(style)
@@ -685,12 +699,16 @@ struct EditorProfileSettingsView: View {
       Text("Current leader: \(leaderKeyDescription)")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Text("Calcite uses Space as its leader throughout the IDE; text fields and terminals keep their normal input behavior.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Text("Terminal Vim/Neovim uses \\ as a secondary Calcite leader: it supports the same build, run, sidebar, section, and tab mappings as Calcite Vim. Space text input is never held while Calcite waits for a leader key.")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      Text(
+        "Calcite uses Space as its leader throughout the IDE; text fields and terminals keep their normal input behavior."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      Text(
+        "Terminal Vim/Neovim uses \\ as a secondary Calcite leader: it supports the same build, run, sidebar, section, and tab mappings as Calcite Vim. Space text input is never held while Calcite waits for a leader key."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
       HStack {
         Text("Vim/Neovim Leader")
         Spacer()
@@ -718,14 +736,65 @@ struct EditorProfileSettingsView: View {
       .font(.caption)
       .foregroundStyle(.secondary)
       ForEach($profile.vim.mappings) { $mapping in
-        HStack {
-          TextField("Keys", text: $mapping.sequence)
-          TextField("Command", text: $mapping.command)
-          Button("Remove", systemImage: "minus.circle", role: .destructive) {
-            profile.vim.mappings.removeAll { $0.id == mapping.id }
+        VStack(alignment: .leading, spacing: 7) {
+          HStack {
+            TextField("Keys", text: $mapping.sequence)
+              .font(.system(.body, design: .monospaced))
+            TextField("Command", text: $mapping.command)
+              .font(.system(.body, design: .monospaced))
+            Button("Remove", systemImage: "minus.circle", role: .destructive) {
+              profile.vim.mappings.removeAll { $0.id == mapping.id }
+            }
+            .labelStyle(.iconOnly)
           }
-          .labelStyle(.iconOnly)
+          HStack(spacing: 12) {
+            Menu {
+              ForEach(EditorVimMappingMode.allCases) { mode in
+                Button {
+                  if mapping.modes.contains(mode) {
+                    if mapping.modes.count > 1 { mapping.modes.remove(mode) }
+                  } else {
+                    mapping.modes.insert(mode)
+                  }
+                } label: {
+                  Label(
+                    mode.title,
+                    systemImage: mapping.modes.contains(mode) ? "checkmark" : "circle"
+                  )
+                }
+              }
+            } label: {
+              Text(
+                mapping.modes.sorted { $0.rawValue < $1.rawValue }.map(\.title)
+                  .joined(separator: ", ")
+              )
+              .lineLimit(1)
+            }
+            .frame(maxWidth: 180, alignment: .leading)
+
+            Toggle("Recursive", isOn: $mapping.recursive)
+              .toggleStyle(.checkbox)
+            Toggle("No wait", isOn: $mapping.nowait)
+              .toggleStyle(.checkbox)
+            Picker("Input", selection: $mapping.inputDomain) {
+              ForEach(EditorVimMappingInputDomain.allCases) { domain in
+                Text(domain.title).tag(domain)
+              }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 130)
+          }
+          .font(.caption)
+          if hasMappingConflict(mapping) {
+            Label(
+              "Another mapping uses the same keys in an overlapping mode.",
+              systemImage: "exclamationmark.triangle"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+          }
         }
+        .padding(.vertical, 3)
       }
       Button("Add Key Mapping", systemImage: "plus") {
         profile.vim.mappings.append(.init(sequence: "<leader>", command: ""))
@@ -735,6 +804,14 @@ struct EditorProfileSettingsView: View {
       )
       .font(.caption)
       .foregroundStyle(.secondary)
+    }
+  }
+
+  private func hasMappingConflict(_ mapping: EditorVimMappingProfile) -> Bool {
+    profile.vim.mappings.contains { other in
+      other.id != mapping.id && other.sequence == mapping.sequence
+        && other.inputDomain == mapping.inputDomain
+        && !other.modes.isDisjoint(with: mapping.modes)
     }
   }
 
@@ -821,6 +898,7 @@ private struct ThemeEditorPreview: View {
         breakpoints: [],
         selectedRange: selection,
         hasCompletions: false,
+        vimHistory: VimHistorySnapshot(),
         onWillEdit: {},
         onEdit: { _, _, resultingText, selectionAfter in
           text = resultingText
@@ -845,6 +923,8 @@ private struct ThemeEditorPreview: View {
         onZoomChange: { _ in },
         onVimModeChange: { _ in },
         onVimPromptChange: { _ in },
+        onVimInteractionChange: { _ in },
+        onVimInputSourceChange: { _ in },
         onCaretRectChange: { _ in }
       )
     }

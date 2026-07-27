@@ -354,15 +354,81 @@ struct EditorSnippetProfile: Codable, Equatable, Sendable {
   )
 }
 
+enum EditorVimMappingMode: String, Codable, CaseIterable, Hashable, Sendable, Identifiable {
+  case normal
+  case insert
+  case replace
+  case visual
+  case operatorPending
+  case commandLine
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .normal: "Normal"
+    case .insert: "Insert"
+    case .replace: "Replace"
+    case .visual: "Visual"
+    case .operatorPending: "Operator"
+    case .commandLine: "Command"
+    }
+  }
+}
+
+enum EditorVimMappingInputDomain: String, Codable, CaseIterable, Hashable, Sendable, Identifiable {
+  case command
+  case logicalText
+
+  var id: String { rawValue }
+  var title: String { self == .command ? "Command keys" : "Committed text" }
+}
+
 struct EditorVimMappingProfile: Codable, Equatable, Hashable, Identifiable, Sendable {
   var id: UUID
   var sequence: String
   var command: String
+  var modes: Set<EditorVimMappingMode>
+  var recursive: Bool
+  var nowait: Bool
+  var inputDomain: EditorVimMappingInputDomain
 
-  init(id: UUID = UUID(), sequence: String, command: String) {
+  init(
+    id: UUID = UUID(),
+    sequence: String,
+    command: String,
+    modes: Set<EditorVimMappingMode> = [.normal, .visual, .operatorPending],
+    recursive: Bool = true,
+    nowait: Bool = false,
+    inputDomain: EditorVimMappingInputDomain = .command
+  ) {
     self.id = id
     self.sequence = sequence
     self.command = command
+    self.modes = modes
+    self.recursive = recursive
+    self.nowait = nowait
+    self.inputDomain = inputDomain
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, sequence, command, modes, recursive, nowait, inputDomain
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+    sequence = try container.decode(String.self, forKey: .sequence)
+    command = try container.decode(String.self, forKey: .command)
+    modes =
+      try container.decodeIfPresent(Set<EditorVimMappingMode>.self, forKey: .modes)
+      ?? [.normal, .visual, .operatorPending]
+    if modes.isEmpty { modes = [.normal] }
+    recursive = try container.decodeIfPresent(Bool.self, forKey: .recursive) ?? true
+    nowait = try container.decodeIfPresent(Bool.self, forKey: .nowait) ?? false
+    inputDomain =
+      try container.decodeIfPresent(EditorVimMappingInputDomain.self, forKey: .inputDomain)
+      ?? .command
   }
 }
 
@@ -373,6 +439,7 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   var relativeLineNumbers: Bool
   var keyboardPolicy: EditorVimKeyboardPolicy
   var languageMap: String
+  var mappingTimeoutMilliseconds: Int
   var normalCursorStyle: EditorVimCursorStyle
   var insertCursorStyle: EditorVimCursorStyle
   var replaceCursorStyle: EditorVimCursorStyle
@@ -385,6 +452,7 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     relativeLineNumbers: Bool,
     keyboardPolicy: EditorVimKeyboardPolicy = .automatic,
     languageMap: String = "",
+    mappingTimeoutMilliseconds: Int = 800,
     normalCursorStyle: EditorVimCursorStyle = .default,
     insertCursorStyle: EditorVimCursorStyle = .default,
     replaceCursorStyle: EditorVimCursorStyle = .default,
@@ -396,6 +464,7 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     self.relativeLineNumbers = relativeLineNumbers
     self.keyboardPolicy = keyboardPolicy
     self.languageMap = languageMap
+    self.mappingTimeoutMilliseconds = min(5_000, max(0, mappingTimeoutMilliseconds))
     self.normalCursorStyle = normalCursorStyle
     self.insertCursorStyle = insertCursorStyle
     self.replaceCursorStyle = replaceCursorStyle
@@ -404,7 +473,7 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case enabled, startInInsertMode, leader, relativeLineNumbers
-    case keyboardPolicy, languageMap
+    case keyboardPolicy, languageMap, mappingTimeoutMilliseconds
     case normalCursorStyle, insertCursorStyle, replaceCursorStyle, mappings
   }
 
@@ -418,6 +487,13 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
       try container.decodeIfPresent(EditorVimKeyboardPolicy.self, forKey: .keyboardPolicy)
       ?? .automatic
     languageMap = try container.decodeIfPresent(String.self, forKey: .languageMap) ?? ""
+    mappingTimeoutMilliseconds = min(
+      5_000,
+      max(
+        0,
+        try container.decodeIfPresent(Int.self, forKey: .mappingTimeoutMilliseconds) ?? 800
+      )
+    )
     normalCursorStyle = try Self.decodeCursorStyle(
       from: container,
       key: .normalCursorStyle,
@@ -463,14 +539,15 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   private static func mergingNavigationMappings(
     into existing: [EditorVimMappingProfile]
   ) -> [EditorVimMappingProfile] {
-    let required = [
-      ("<leader>h", "<host:section-left>"),
-      ("<leader>j", "<host:section-down>"),
-      ("<leader>k", "<host:section-up>"),
-      ("<leader>l", "<host:section-right>"),
-      ("<leader>,", ":tabprevious"),
-      ("<leader>.", ":tabnext"),
-    ] + (1...9).map { ("<leader>\($0)", "<host:tab-\($0)>") }
+    let required =
+      [
+        ("<leader>h", "<host:section-left>"),
+        ("<leader>j", "<host:section-down>"),
+        ("<leader>k", "<host:section-up>"),
+        ("<leader>l", "<host:section-right>"),
+        ("<leader>,", ":tabprevious"),
+        ("<leader>.", ":tabnext"),
+      ] + (1...9).map { ("<leader>\($0)", "<host:tab-\($0)>") }
 
     // `n`/`p` were the previous tab bindings. Remove them during migration so
     // persisted profiles follow the new comma/period navigation convention.
@@ -479,7 +556,9 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
       return sequence != "<leader>n" && sequence != "<leader>p"
     }
     for (sequence, command) in required {
-      if let index = merged.firstIndex(where: { $0.sequence.caseInsensitiveCompare(sequence) == .orderedSame }) {
+      if let index = merged.firstIndex(where: {
+        $0.sequence.caseInsensitiveCompare(sequence) == .orderedSame
+      }) {
         merged[index].command = command
       } else {
         merged.append(.init(sequence: sequence, command: command))

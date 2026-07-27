@@ -32,6 +32,12 @@ struct EditorLineIndex: Sendable {
     return max(1, low)
   }
 
+  func columnNumber(atUTF16Offset rawOffset: Int) -> Int {
+    let offset = min(max(rawOffset, 0), utf16Length)
+    let index = lineIndex(containing: offset)
+    return max(1, offset - lineStarts[index] + 1)
+  }
+
   mutating func replace(
     range rawRange: NSRange,
     replacement: String,

@@ -280,6 +280,7 @@ public final class VimEngine: @unchecked Sendable {
   var lastSubstitutePattern = ""
   var lastSubstituteReplacement = ""
   var lastSubstituteFlags = ""
+  var pendingMessage: VimMessage?
   var viewportTopLine = 1
   var viewportBottomLine = 20
   var viewportPageLineCount = 20
@@ -389,6 +390,15 @@ public final class VimEngine: @unchecked Sendable {
   }
 
   public var isRecordingMacro: Bool { lock.withLock { recording != nil } }
+
+  func publishMessage(_ message: VimMessage) {
+    pendingMessage = message
+  }
+
+  func consumeMessage() -> VimMessage? {
+    defer { pendingMessage = nil }
+    return pendingMessage
+  }
 
   public func mapLeader(_ sequence: String, to invocation: VimInvocation) {
     lock.withLock { leaderMappings[sequence] = invocation }

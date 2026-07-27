@@ -39,6 +39,7 @@ public final class VimKeymapController: @unchecked Sendable {
   private var storedPrompt: String?
   private var storedInputPolicy: VimCommandKeyboardPolicy = .automatic
   private var storedLanguageMap: [Character: Character] = [:]
+  private var storedMessage: VimMessage?
 
   public private(set) var pendingNotation: String {
     get { lock.withLock { storedPendingNotation } }
@@ -76,6 +77,28 @@ public final class VimKeymapController: @unchecked Sendable {
     lock.withLock { compositionIsActive }
   }
 
+  @_spi(Calcite)
+  public var interactionSnapshot: VimInteractionSnapshot {
+    lock.withLock {
+      engine.lock.withLock { interactionSnapshotUnlocked() }
+    }
+  }
+
+  @_spi(Calcite)
+  public var historySnapshot: VimHistorySnapshot {
+    lock.withLock { VimHistorySnapshot(commands: commandHistory, searches: searchHistory) }
+  }
+
+  @_spi(Calcite)
+  public func restoreHistory(_ snapshot: VimHistorySnapshot) {
+    lock.withLock {
+      commandHistory = Array(snapshot.commands.suffix(200))
+      searchHistory = Array(snapshot.searches.suffix(200))
+      historyIndex = nil
+      historySearchPrefix = nil
+    }
+  }
+
   private enum PromptKind {
     case command
     case search(forward: Bool)
@@ -87,12 +110,15 @@ public final class VimKeymapController: @unchecked Sendable {
   private var commandHistory: [String] = []
   private var searchHistory: [String] = []
   private var historyIndex: Int?
+  private var historySearchPrefix: String?
   private var compositionIsActive = false
   private var compositionText = ""
   private var compositionSelection = 0..<0
 
-  private let mappingTrie = VimMappingTrie()
+  private var mappingTries: [VimMappingKey: VimMappingTrie] = [:]
+  private var storedMappingConflicts: [VimMappingConflict] = []
   private var pendingTokens: [VimInputToken] = []
+  private var pendingInputDomain: VimMappingInputDomain?
   private var commandTokens: [VimInputToken] = []
   private var commandParser = VimCommandParser()
   private var mappingDepth = 0
@@ -115,16 +141,70 @@ public final class VimKeymapController: @unchecked Sendable {
   }
 
   public func setMappings(_ values: [VimKeyMapping]) {
-    lock.withLock {
-      let resolved = values.compactMap {
-        mapping -> (tokens: [VimInputToken], invocation: VimInvocation)? in
-        let sequence = expandedSequence(mapping.sequence)
-        guard !sequence.isEmpty, let invocation = invocation(for: mapping.command) else {
-          return nil
-        }
-        return (Self.tokens(in: sequence), invocation)
+    setMappings(
+      values.map {
+        VimKeyMappingV2(
+          sequence: $0.sequence,
+          command: $0.command,
+          modes: [.normal, .visual, .operatorPending],
+          recursive: true,
+          nowait: false,
+          inputDomain: .command
+        )
       }
-      mappingTrie.replace(with: resolved)
+    )
+  }
+
+  @_spi(Calcite)
+  public var mappingConflicts: [VimMappingConflict] {
+    lock.withLock { storedMappingConflicts }
+  }
+
+  @_spi(Calcite)
+  public func setMappings(_ values: [VimKeyMappingV2]) {
+    lock.withLock {
+      var grouped: [VimMappingKey: [(tokens: [VimInputToken], mapping: VimResolvedMapping)]] = [:]
+      var seen: [VimMappingKey: Set<[VimInputToken]>] = [:]
+      var conflicts: [VimMappingConflict] = []
+
+      for value in values {
+        let sequence = expandedSequence(value.sequence)
+        guard !sequence.isEmpty, let invocation = invocation(for: value.command) else { continue }
+        let tokens = Self.tokens(in: sequence)
+        guard !tokens.isEmpty else { continue }
+        let mapping = VimResolvedMapping(
+          invocation: invocation,
+          recursive: value.recursive,
+          nowait: value.nowait,
+          inputDomain: value.inputDomain
+        )
+        for mode in value.modes {
+          let key = VimMappingKey(mode: mode, inputDomain: value.inputDomain)
+          if seen[key, default: []].contains(tokens) {
+            conflicts.append(
+              VimMappingConflict(
+                sequence: value.sequence,
+                mode: mode,
+                inputDomain: value.inputDomain
+              )
+            )
+          }
+          seen[key, default: []].insert(tokens)
+          grouped[key, default: []].append((tokens: tokens, mapping: mapping))
+        }
+      }
+
+      var replacements: [VimMappingKey: VimMappingTrie] = [:]
+      for mode in VimMappingMode.allCases {
+        for inputDomain in VimMappingInputDomain.allCases {
+          let key = VimMappingKey(mode: mode, inputDomain: inputDomain)
+          let trie = VimMappingTrie()
+          trie.replace(with: grouped[key] ?? [])
+          replacements[key] = trie
+        }
+      }
+      mappingTries = replacements
+      storedMappingConflicts = conflicts
       resetPendingInputUnlocked()
     }
   }
@@ -149,9 +229,12 @@ public final class VimKeymapController: @unchecked Sendable {
   public func handle(token: String) throws -> VimKeyHandlingResult {
     try lock.withLock {
       try engine.lock.withLock {
-        try engine.withExecutionBatch {
+        expireMessageForNextInputUnlocked()
+        let result = try engine.withExecutionBatch {
           try handleUnlocked(token: VimInputToken(notationToken: token))
         }
+        collectEngineMessageUnlocked()
+        return result
       }
     }
   }
@@ -161,9 +244,12 @@ public final class VimKeymapController: @unchecked Sendable {
   public func handle(event: VimInputEvent) throws -> VimKeyHandlingResult {
     try lock.withLock {
       try engine.lock.withLock {
-        try engine.withExecutionBatch {
+        expireMessageForNextInputUnlocked()
+        let result = try engine.withExecutionBatch {
           try handleUnlocked(event: event)
         }
+        collectEngineMessageUnlocked()
+        return result
       }
     }
   }
@@ -171,7 +257,20 @@ public final class VimKeymapController: @unchecked Sendable {
   private func handleUnlocked(event: VimInputEvent) throws -> VimKeyHandlingResult {
     switch event {
     case .mappingTimeout:
-      return try flushPendingInput()
+      let timedOutNotation = storedPendingNotation
+      let wasMappingPrefix =
+        !pendingTokens.isEmpty
+        && activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
+          .match(pendingTokens).isPrefix
+      let result = try flushPendingInput()
+      if wasMappingPrefix, !timedOutNotation.isEmpty {
+        storedMessage = VimMessage(
+          text: "Mapping timed out: \(timedOutNotation)",
+          severity: .warning,
+          lifetime: .timed(milliseconds: 2200)
+        )
+      }
+      return result
     case .compositionStarted:
       compositionIsActive = true
       compositionText = ""
@@ -207,10 +306,26 @@ public final class VimKeymapController: @unchecked Sendable {
           awaitingMoreInput: promptKind != nil || commandParser.isIncomplete
         )
       }
+      if promptKind != nil, stroke.modifiers.contains(.option) {
+        switch stroke.physicalKey {
+        case .special(.left):
+          return try handleUnlocked(
+            token: VimInputToken(kind: .modified(.option, "Left")),
+            inputDomain: .command
+          )
+        case .special(.right):
+          return try handleUnlocked(
+            token: VimInputToken(kind: .modified(.option, "Right")),
+            inputDomain: .command
+          )
+        default:
+          break
+        }
+      }
       guard let token = token(for: stroke) else {
         return VimKeyHandlingResult(consumed: false)
       }
-      return try handleUnlocked(token: token)
+      return try handleUnlocked(token: token, inputDomain: .command)
     }
   }
 
@@ -222,25 +337,13 @@ public final class VimKeymapController: @unchecked Sendable {
       )
     }
 
-    if let kind = promptKind {
-      let characters = Array(text)
-      promptBuffer.insert(contentsOf: characters, at: promptCursor)
-      promptCursor += characters.count
-      updatePromptDisplay(kind)
-      return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
-    }
-
-    let mode = engine.state.mode
-    if mode == .insert || mode == .replace {
-      resetPendingInputUnlocked()
-      let execution = try engine.execute(.action(.insert(text)))
-      return VimKeyHandlingResult(consumed: true, execution: execution)
-    }
-
     var aggregate: VimExecutionResult?
     var awaiting = false
     for character in text {
-      let result = try handleUnlocked(token: VimInputToken(kind: .text(String(character))))
+      let result = try handleUnlocked(
+        token: VimInputToken(kind: .text(String(character))),
+        inputDomain: .logicalText
+      )
       if let execution = result.execution {
         aggregate = aggregate.map { Self.merged($0, execution) } ?? execution
       }
@@ -253,25 +356,21 @@ public final class VimKeymapController: @unchecked Sendable {
     )
   }
 
-  private func handleUnlocked(token: VimInputToken) throws -> VimKeyHandlingResult {
+  private func handleUnlocked(
+    token: VimInputToken,
+    inputDomain: VimMappingInputDomain = .command
+  ) throws -> VimKeyHandlingResult {
     let notation = token.notation
     guard !notation.isEmpty else { return VimKeyHandlingResult(consumed: false) }
 
-    if promptKind != nil { return try handlePromptToken(token) }
     if notation.lowercased() == "<timeout>" { return try flushPendingInput() }
+    if promptKind != nil {
+      return try enqueuePendingToken(token, inputDomain: inputDomain)
+    }
 
     let mode = engine.state.mode
     if mode == .insert || mode == .replace {
-      pendingTokens.removeAll(keepingCapacity: true)
-      commandTokens.removeAll(keepingCapacity: true)
-      commandParser.reset()
-      let execution = try engine.executeNotationToken(notation, parser: &commandParser)
-      refreshPendingNotation()
-      return VimKeyHandlingResult(
-        consumed: true,
-        awaitingMoreInput: commandParser.isIncomplete,
-        execution: execution
-      )
+      return try enqueuePendingToken(token, inputDomain: inputDomain)
     }
 
     if case .special(.escape) = token.kind {
@@ -295,15 +394,45 @@ public final class VimKeymapController: @unchecked Sendable {
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
 
+    return try enqueuePendingToken(token, inputDomain: inputDomain)
+  }
+
+  private func enqueuePendingToken(
+    _ token: VimInputToken,
+    inputDomain: VimMappingInputDomain
+  ) throws -> VimKeyHandlingResult {
+    if let pendingInputDomain, pendingInputDomain != inputDomain, !pendingTokens.isEmpty {
+      let flushed = try flushPendingInput()
+      let next = try enqueuePendingToken(token, inputDomain: inputDomain)
+      return VimKeyHandlingResult(
+        consumed: flushed.consumed || next.consumed,
+        awaitingMoreInput: next.awaitingMoreInput,
+        execution: Self.merging(flushed.execution, next.execution)
+      )
+    }
+
+    pendingInputDomain = inputDomain
     pendingTokens.append(token)
     refreshPendingNotation()
     return try resolvePendingInput()
   }
 
+  private func recursiveInputDomain(for token: VimInputToken) -> VimMappingInputDomain {
+    if case .special = token.kind { return .command }
+    if case .modified = token.kind { return .command }
+    if promptKind != nil { return .logicalText }
+    switch engine.state.mode {
+    case .insert, .replace: return .logicalText
+    case .normal, .visualCharacter, .visualLine, .commandLine, .search: return .command
+    }
+  }
+
   private func resolvePendingInput() throws -> VimKeyHandlingResult {
-    let match = mappingTrie.match(pendingTokens)
-    if let exact = match.exact, !match.isPrefix {
+    let trie = activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
+    let match = trie.match(pendingTokens)
+    if let exact = match.exact, !match.isPrefix || exact.nowait {
       pendingTokens.removeAll(keepingCapacity: true)
+      pendingInputDomain = nil
       refreshPendingNotation()
       return VimKeyHandlingResult(
         consumed: true,
@@ -314,14 +443,16 @@ public final class VimKeymapController: @unchecked Sendable {
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
 
-    if let fallback = mappingTrie.longestExactPrefix(in: pendingTokens) {
+    if let fallback = trie.longestExactPrefix(in: pendingTokens) {
       let remainder = Array(pendingTokens.dropFirst(fallback.length))
+      let remainderDomain = pendingInputDomain ?? .command
       pendingTokens.removeAll(keepingCapacity: true)
+      pendingInputDomain = nil
       refreshPendingNotation()
-      var execution = try executeMapped(fallback.invocation)
+      var execution = try executeMapped(fallback.mapping)
       var awaiting = false
       for token in remainder {
-        let next = try handleUnlocked(token: token)
+        let next = try handleUnlocked(token: token, inputDomain: remainderDomain)
         if let value = next.execution {
           execution = execution.map { Self.merged($0, value) } ?? value
         }
@@ -345,9 +476,11 @@ public final class VimKeymapController: @unchecked Sendable {
         awaitingMoreInput: commandParser.isIncomplete
       )
     }
-    let match = mappingTrie.match(pendingTokens)
+    let match = activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
+      .match(pendingTokens)
     if let exact = match.exact {
       pendingTokens.removeAll(keepingCapacity: true)
+      pendingInputDomain = nil
       refreshPendingNotation()
       return VimKeyHandlingResult(consumed: true, execution: try executeMapped(exact))
     }
@@ -366,7 +499,24 @@ public final class VimKeymapController: @unchecked Sendable {
 
     let tokens = pendingTokens
     pendingTokens.removeAll(keepingCapacity: true)
+    pendingInputDomain = nil
     var aggregate: VimExecutionResult?
+    if promptKind != nil {
+      var awaiting = false
+      for token in tokens {
+        let result = try handlePromptToken(token)
+        if let execution = result.execution {
+          aggregate = aggregate.map { Self.merged($0, execution) } ?? execution
+        }
+        awaiting = result.awaitingMoreInput
+      }
+      refreshPendingNotation()
+      return VimKeyHandlingResult(
+        consumed: true,
+        awaitingMoreInput: awaiting,
+        execution: aggregate
+      )
+    }
     do {
       for token in tokens {
         commandTokens.append(token)
@@ -391,23 +541,42 @@ public final class VimKeymapController: @unchecked Sendable {
     )
   }
 
-  private func executeMapped(_ invocation: VimInvocation) throws -> VimExecutionResult? {
+  private func executeMapped(_ mapping: VimResolvedMapping) throws -> VimExecutionResult? {
+    if !mapping.recursive {
+      if promptKind != nil {
+        switch mapping.invocation {
+        case .keys(let notation), .notation(let notation):
+          var aggregate: VimExecutionResult?
+          for token in Self.tokens(in: notation) {
+            let result = try handlePromptToken(token)
+            aggregate = Self.merging(aggregate, result.execution)
+          }
+          return aggregate
+        default:
+          break
+        }
+      }
+      return try engine.execute(mapping.invocation)
+    }
     guard mappingDepth < mappingRecursionLimit else { throw VimError.macroRecursionLimit }
     mappingDepth += 1
     defer { mappingDepth -= 1 }
 
-    switch invocation {
+    switch mapping.invocation {
     case .keys(let notation), .notation(let notation):
       var aggregate: VimExecutionResult?
       for token in Self.tokens(in: notation) {
-        let handled = try handleUnlocked(token: token)
+        let handled = try handleUnlocked(
+          token: token,
+          inputDomain: recursiveInputDomain(for: token)
+        )
         if let execution = handled.execution {
           aggregate = aggregate.map { Self.merged($0, execution) } ?? execution
         }
       }
       return aggregate
     default:
-      return try engine.execute(invocation)
+      return try engine.execute(mapping.invocation)
     }
   }
 
@@ -418,6 +587,7 @@ public final class VimKeymapController: @unchecked Sendable {
     promptBuffer = Array(initial)
     promptCursor = promptBuffer.count
     historyIndex = nil
+    historySearchPrefix = nil
     clearCompositionUnlocked()
     storedPrompt = prefix
   }
@@ -438,6 +608,10 @@ public final class VimKeymapController: @unchecked Sendable {
       promptCursor = max(0, promptCursor - 1)
     case "<right>":
       promptCursor = min(promptBuffer.count, promptCursor + 1)
+    case "<m-left>":
+      movePromptCursorToPreviousWord()
+    case "<m-right>":
+      movePromptCursorToNextWord()
     case "<home>", "<c-b>":
       promptCursor = 0
     case "<end>", "<c-e>":
@@ -446,14 +620,20 @@ public final class VimKeymapController: @unchecked Sendable {
       if promptCursor > 0 {
         promptCursor -= 1
         promptBuffer.remove(at: promptCursor)
+        resetHistoryTraversalAfterEdit()
       }
     case "<del>", "<delete>":
-      if promptCursor < promptBuffer.count { promptBuffer.remove(at: promptCursor) }
+      if promptCursor < promptBuffer.count {
+        promptBuffer.remove(at: promptCursor)
+        resetHistoryTraversalAfterEdit()
+      }
     case "<c-u>":
       promptBuffer.removeSubrange(0..<promptCursor)
       promptCursor = 0
+      resetHistoryTraversalAfterEdit()
     case "<c-w>":
       deletePromptWordBeforeCursor()
+      resetHistoryTraversalAfterEdit()
     case "<up>":
       recallHistory(kind: kind, delta: -1)
     case "<down>":
@@ -479,9 +659,28 @@ public final class VimKeymapController: @unchecked Sendable {
       let characters = Array(text)
       promptBuffer.insert(contentsOf: characters, at: promptCursor)
       promptCursor += characters.count
+      resetHistoryTraversalAfterEdit()
     }
     updatePromptDisplay(kind)
     return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
+  }
+
+  private func movePromptCursorToPreviousWord() {
+    while promptCursor > 0, promptBuffer[promptCursor - 1].isWhitespace {
+      promptCursor -= 1
+    }
+    while promptCursor > 0, !promptBuffer[promptCursor - 1].isWhitespace {
+      promptCursor -= 1
+    }
+  }
+
+  private func movePromptCursorToNextWord() {
+    while promptCursor < promptBuffer.count, !promptBuffer[promptCursor].isWhitespace {
+      promptCursor += 1
+    }
+    while promptCursor < promptBuffer.count, promptBuffer[promptCursor].isWhitespace {
+      promptCursor += 1
+    }
   }
 
   private func deletePromptWordBeforeCursor() {
@@ -499,8 +698,10 @@ public final class VimKeymapController: @unchecked Sendable {
     switch kind {
     case .command:
       if commandHistory.last != value { commandHistory.append(value) }
+      if commandHistory.count > 200 { commandHistory.removeFirst(commandHistory.count - 200) }
     case .search:
       if searchHistory.last != value { searchHistory.append(value) }
+      if searchHistory.count > 200 { searchHistory.removeFirst(searchHistory.count - 200) }
     }
   }
 
@@ -511,11 +712,33 @@ public final class VimKeymapController: @unchecked Sendable {
     case .search: history = searchHistory
     }
     guard !history.isEmpty else { return }
-    let current = historyIndex ?? history.count
-    let next = max(0, min(history.count, current + delta))
-    historyIndex = next
-    promptBuffer = next == history.count ? [] : Array(history[next])
+
+    if historySearchPrefix == nil { historySearchPrefix = String(promptBuffer) }
+    let prefix = historySearchPrefix ?? ""
+    let candidates = history.indices.filter { prefix.isEmpty || history[$0].hasPrefix(prefix) }
+    guard !candidates.isEmpty else { return }
+
+    if delta < 0 {
+      let current = historyIndex ?? history.count
+      guard let next = candidates.last(where: { $0 < current }) else { return }
+      historyIndex = next
+      promptBuffer = Array(history[next])
+    } else {
+      let current = historyIndex ?? -1
+      if let next = candidates.first(where: { $0 > current }) {
+        historyIndex = next
+        promptBuffer = Array(history[next])
+      } else {
+        historyIndex = nil
+        promptBuffer = Array(prefix)
+      }
+    }
     promptCursor = promptBuffer.count
+  }
+
+  private func resetHistoryTraversalAfterEdit() {
+    historyIndex = nil
+    historySearchPrefix = nil
   }
 
   private func updatePromptDisplay(_ kind: PromptKind) {
@@ -631,6 +854,7 @@ public final class VimKeymapController: @unchecked Sendable {
 
   private func resetPendingInputUnlocked() {
     pendingTokens.removeAll(keepingCapacity: true)
+    pendingInputDomain = nil
     commandTokens.removeAll(keepingCapacity: true)
     commandParser.reset()
     storedPendingNotation.removeAll(keepingCapacity: true)
@@ -641,8 +865,150 @@ public final class VimKeymapController: @unchecked Sendable {
     promptBuffer.removeAll(keepingCapacity: true)
     promptCursor = 0
     historyIndex = nil
+    historySearchPrefix = nil
     clearCompositionUnlocked()
     storedPrompt = nil
+  }
+
+  private func activeMappingModeUnlocked() -> VimMappingMode {
+    if promptKind != nil { return .commandLine }
+    switch engine.state.mode {
+    case .insert: return .insert
+    case .replace: return .replace
+    case .visualCharacter, .visualLine: return .visual
+    case .commandLine, .search: return .commandLine
+    case .normal:
+      return commandParser.pendingOperator == nil ? .normal : .operatorPending
+    }
+  }
+
+  private func activeMappingTrieUnlocked(
+    domain: VimMappingInputDomain
+  ) -> VimMappingTrie {
+    let key = VimMappingKey(mode: activeMappingModeUnlocked(), inputDomain: domain)
+    if let trie = mappingTries[key] { return trie }
+    let trie = VimMappingTrie()
+    mappingTries[key] = trie
+    return trie
+  }
+
+  private func interactionSnapshotUnlocked() -> VimInteractionSnapshot {
+    let expected = expectedInputUnlocked
+    let mappingMatch =
+      pendingTokens.isEmpty
+      ? nil
+      : activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
+        .match(pendingTokens)
+    let registerName = displayName(for: commandParser.selectedRegister)
+    let prefix: String?
+    if commandParser.pendingG || commandParser.pendingOperatorG {
+      prefix = "g"
+    } else if commandParser.pendingTextObjectInner == true {
+      prefix = "i"
+    } else if commandParser.pendingTextObjectInner == false {
+      prefix = "a"
+    } else if commandParser.pendingMacro || commandParser.pendingMacroStart {
+      prefix = "@"
+    } else if commandParser.pendingMark {
+      prefix = "m"
+    } else if let linewise = commandParser.pendingJump {
+      prefix = linewise ? "'" : "`"
+    } else {
+      prefix = nil
+    }
+
+    let pending = VimPendingCommandSnapshot(
+      notation: storedPendingNotation,
+      expectedInput: expected,
+      count: commandParser.count > 0 ? commandParser.count : nil,
+      registerName: registerName,
+      operatorName: commandParser.pendingOperator?.value.rawValue,
+      prefix: prefix,
+      isMappingPrefix: mappingMatch?.isPrefix == true
+    )
+
+    let commandLine: VimCommandLineSnapshot?
+    if let promptKind {
+      let kind: VimCommandLineKind
+      let historyCount: Int
+      switch promptKind {
+      case .command:
+        kind = .command
+        historyCount = commandHistory.count
+      case .search(let forward):
+        kind = forward ? .searchForward : .searchBackward
+        historyCount = searchHistory.count
+      }
+      let prefix: String
+      switch kind {
+      case .command: prefix = ":"
+      case .searchForward: prefix = "/"
+      case .searchBackward: prefix = "?"
+      }
+      commandLine = VimCommandLineSnapshot(
+        kind: kind,
+        prefix: prefix,
+        text: String(promptBuffer),
+        cursorOffset: promptCursor,
+        markedText: compositionIsActive ? compositionText : "",
+        markedSelection: compositionIsActive ? compositionSelection : 0..<0,
+        historyPosition: historyIndex,
+        historyCount: historyCount
+      )
+    } else {
+      commandLine = nil
+    }
+
+    return VimInteractionSnapshot(
+      mode: engine.state.mode,
+      pendingCommand: pending,
+      commandLine: commandLine,
+      macro: VimMacroSnapshot(
+        recordingRegister: engine.recording,
+        lastPlayedRegister: engine.lastPlayedMacro
+      ),
+      isTemporaryNormal: engine.temporaryInsertReturnMode != nil,
+      isComposingText: compositionIsActive,
+      history: VimHistorySnapshot(commands: commandHistory, searches: searchHistory),
+      message: storedMessage
+    )
+  }
+
+  private func displayName(for register: VimRegister) -> Character? {
+    switch register {
+    case .unnamed: return nil
+    case .named(let name): return name
+    case .numbered(let number): return Character(String(number))
+    case .smallDelete: return "-"
+    case .blackHole: return "_"
+    case .clipboard: return "+"
+    }
+  }
+
+  private func collectEngineMessageUnlocked() {
+    if let message = engine.consumeMessage() { storedMessage = message }
+  }
+
+  private func expireMessageForNextInputUnlocked() {
+    guard let message = storedMessage else { return }
+    switch message.lifetime {
+    case .persistent:
+      break
+    case .untilNextInput, .timed:
+      storedMessage = nil
+    }
+  }
+
+  private static func merging(
+    _ first: VimExecutionResult?,
+    _ second: VimExecutionResult?
+  ) -> VimExecutionResult? {
+    switch (first, second) {
+    case (.none, .none): return nil
+    case (.some(let first), .none): return first
+    case (.none, .some(let second)): return second
+    case (.some(let first), .some(let second)): return merged(first, second)
+    }
   }
 
   private static func merged(

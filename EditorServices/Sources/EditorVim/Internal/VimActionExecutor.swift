@@ -277,6 +277,15 @@ extension VimEngine {
         preferredColumn = nil
         normalizeCursorForMode()
         updateVisualSelection()
+      } else {
+        publishMessage(
+          VimMessage(
+            text: "Mark not set: \(name)",
+            code: "E20",
+            severity: .error,
+            lifetime: .timed(milliseconds: 2600)
+          )
+        )
       }
 
     case .startMacro(let name):
