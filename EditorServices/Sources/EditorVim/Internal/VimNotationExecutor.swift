@@ -3,9 +3,13 @@ import Foundation
 extension VimEngine {
   @discardableResult
   public func executeNotation(_ notation: String) throws -> VimExecutionResult {
+<<<<<<< HEAD
     try lock.withLock {
       try withExecutionBatch { try executeNotationUnlocked(notation) }
     }
+=======
+    try lock.withLock { try executeNotationUnlocked(notation) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 
   func executeNotationUnlocked(_ notation: String) throws -> VimExecutionResult {
@@ -23,6 +27,7 @@ extension VimEngine {
     parser: inout VimCommandParser
   ) throws -> VimExecutionResult {
     try lock.withLock {
+<<<<<<< HEAD
       try withExecutionBatch {
         try executeNotationTokensUnlocked(
           [token],
@@ -31,6 +36,14 @@ extension VimEngine {
           originalNotation: token
         )
       }
+=======
+      try executeNotationTokensUnlocked(
+        [token],
+        parser: &parser,
+        finalize: false,
+        originalNotation: token
+      )
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     }
   }
 
@@ -196,6 +209,7 @@ extension VimEngine {
       }
 
       if state.mode == .visualCharacter || state.mode == .visualLine {
+<<<<<<< HEAD
         if token == "o" || token == "O" {
           swapVisualEndpoints()
           continue
@@ -213,6 +227,12 @@ extension VimEngine {
         switch token {
         case "d", "x", "D", "X": visualOperator = .delete
         case "c", "C", "S": visualOperator = .change
+=======
+        let visualOperator: VimOperator?
+        switch token {
+        case "d", "x": visualOperator = .delete
+        case "c": visualOperator = .change
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         case "y": visualOperator = .yank
         case ">": visualOperator = .indent
         case "<": visualOperator = .outdent
@@ -226,6 +246,7 @@ extension VimEngine {
           parser.selectedRegister = .unnamed
           continue
         }
+<<<<<<< HEAD
         if token == "I" || token == "A" {
           guard let range = visualRange() else { continue }
           rememberVisualSelection()
@@ -237,6 +258,8 @@ extension VimEngine {
           merge(try execute(token == "I" ? .enterInsert : .enterInsertAfterCursor))
           continue
         }
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
 
       if token == "\"", parser.pendingOperator == nil {
@@ -383,6 +406,7 @@ extension VimEngine {
         moveToColumn(effectiveCount)
         action = nil
       case "G": action = effectiveCount == 1 ? .move(.documentEnd) : .move(.line(effectiveCount))
+<<<<<<< HEAD
       case "H":
         moveToViewport(.top, count: effectiveCount)
         action = nil
@@ -392,6 +416,8 @@ extension VimEngine {
       case "L":
         moveToViewport(.bottom, count: effectiveCount)
         action = nil
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       case "%": action = .move(.matchingPair)
       case "<c-b>": action = .move(.pageUp)
       case "<c-f>": action = .move(.pageDown)

@@ -152,6 +152,7 @@ struct VimChangeTransaction: Sendable {
 /// Compatibility name retained internally while history migrates to ordered,
 /// multi-edit transactions.
 typealias VimHistoryEntry = VimChangeTransaction
+<<<<<<< HEAD
 
 /// A branch-preserving undo history. Creating a change after undo adds a new
 /// child instead of discarding the previous redo path.
@@ -313,3 +314,5 @@ private struct ObjectIdentifierSequence: Sequence {
     }
   }
 }
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883

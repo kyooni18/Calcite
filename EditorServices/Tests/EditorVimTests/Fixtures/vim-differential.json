@@ -1,6 +1,10 @@
 [
   {
+<<<<<<< HEAD
     "name": "word-forward-variant-0",
+=======
+    "name": "word-forward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "w",
@@ -8,7 +12,11 @@
     "expectedCursor": 4
   },
   {
+<<<<<<< HEAD
     "name": "counted-word-forward-variant-0",
+=======
+    "name": "counted-word-forward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2w",
@@ -16,7 +24,11 @@
     "expectedCursor": 8
   },
   {
+<<<<<<< HEAD
     "name": "word-end-variant-0",
+=======
+    "name": "word-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "e",
@@ -24,7 +36,11 @@
     "expectedCursor": 2
   },
   {
+<<<<<<< HEAD
     "name": "counted-word-end-variant-0",
+=======
+    "name": "counted-word-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2e",
@@ -32,7 +48,11 @@
     "expectedCursor": 6
   },
   {
+<<<<<<< HEAD
     "name": "word-backward-variant-0",
+=======
+    "name": "word-backward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "b",
@@ -40,7 +60,11 @@
     "expectedCursor": 4
   },
   {
+<<<<<<< HEAD
     "name": "counted-word-backward-variant-0",
+=======
+    "name": "counted-word-backward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 14,
     "notation": "2b",
@@ -48,7 +72,11 @@
     "expectedCursor": 4
   },
   {
+<<<<<<< HEAD
     "name": "line-start-variant-0",
+=======
+    "name": "line-start",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "0",
@@ -56,7 +84,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "first-nonblank-variant-0",
+=======
+    "name": "first-nonblank",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 14,
     "notation": "^",
@@ -64,7 +96,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "line-end-variant-0",
+=======
+    "name": "line-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "$",
@@ -72,7 +108,11 @@
     "expectedCursor": 12
   },
   {
+<<<<<<< HEAD
     "name": "document-start-variant-0",
+=======
+    "name": "document-start",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 42,
     "notation": "gg",
@@ -80,7 +120,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "document-end-variant-0",
+=======
+    "name": "document-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "G",
@@ -88,7 +132,11 @@
     "expectedCursor": 49
   },
   {
+<<<<<<< HEAD
     "name": "line-by-count-variant-0",
+=======
+    "name": "line-by-count",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "3G",
@@ -96,7 +144,11 @@
     "expectedCursor": 32
   },
   {
+<<<<<<< HEAD
     "name": "line-down-variant-0",
+=======
+    "name": "line-down",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "j",
@@ -104,7 +156,11 @@
     "expectedCursor": 22
   },
   {
+<<<<<<< HEAD
     "name": "counted-line-down-variant-0",
+=======
+    "name": "counted-line-down",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "2j",
@@ -112,7 +168,11 @@
     "expectedCursor": 40
   },
   {
+<<<<<<< HEAD
     "name": "line-up-variant-0",
+=======
+    "name": "line-up",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 42,
     "notation": "k",
@@ -120,7 +180,11 @@
     "expectedCursor": 24
   },
   {
+<<<<<<< HEAD
     "name": "next-line-first-nonblank-variant-0",
+=======
+    "name": "next-line-first-nonblank",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "+",
@@ -128,7 +192,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "previous-line-first-nonblank-variant-0",
+=======
+    "name": "previous-line-first-nonblank",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 42,
     "notation": "-",
@@ -136,7 +204,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "current-line-first-nonblank-variant-0",
+=======
+    "name": "current-line-first-nonblank",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 18,
     "notation": "_",
@@ -144,7 +216,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "counted-underscore-variant-0",
+=======
+    "name": "counted-underscore",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2_",
@@ -152,7 +228,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "column-variant-0",
+=======
+    "name": "column",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "7|",
@@ -160,7 +240,11 @@
     "expectedCursor": 6
   },
   {
+<<<<<<< HEAD
     "name": "delete-character-variant-0",
+=======
+    "name": "delete-character",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "x",
@@ -168,7 +252,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-counted-characters-variant-0",
+=======
+    "name": "delete-counted-characters",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "3x",
@@ -176,7 +264,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-line-variant-0",
+=======
+    "name": "delete-line",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "dd",
@@ -184,7 +276,11 @@
     "expectedCursor": 4
   },
   {
+<<<<<<< HEAD
     "name": "delete-counted-lines-variant-0",
+=======
+    "name": "delete-counted-lines",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2dd",
@@ -192,7 +288,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-word-variant-0",
+=======
+    "name": "delete-word",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "dw",
@@ -200,7 +300,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-counted-words-variant-0",
+=======
+    "name": "delete-counted-words",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2dw",
@@ -208,7 +312,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-word-end-variant-0",
+=======
+    "name": "delete-word-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "de",
@@ -216,7 +324,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-backward-word-variant-0",
+=======
+    "name": "delete-backward-word",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "db",
@@ -224,7 +336,11 @@
     "expectedCursor": 4
   },
   {
+<<<<<<< HEAD
     "name": "delete-to-line-end-variant-0",
+=======
+    "name": "delete-to-line-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 4,
     "notation": "d$",
@@ -232,7 +348,11 @@
     "expectedCursor": 3
   },
   {
+<<<<<<< HEAD
     "name": "delete-to-line-start-variant-0",
+=======
+    "name": "delete-to-line-start",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 8,
     "notation": "d0",
@@ -240,7 +360,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-to-first-nonblank-variant-0",
+=======
+    "name": "delete-to-first-nonblank",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 18,
     "notation": "d^",
@@ -248,7 +372,11 @@
     "expectedCursor": 18
   },
   {
+<<<<<<< HEAD
     "name": "delete-to-document-end-variant-0",
+=======
+    "name": "delete-to-document-end",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 27,
     "notation": "dG",
@@ -256,7 +384,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "delete-to-document-start-variant-0",
+=======
+    "name": "delete-to-document-start",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 42,
     "notation": "dgg",
@@ -264,7 +396,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "yank-word-no-text-change-variant-0",
+=======
+    "name": "yank-word-no-text-change",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "yw",
@@ -272,7 +408,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "yank-line-no-text-change-variant-0",
+=======
+    "name": "yank-line-no-text-change",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "yy",
@@ -280,7 +420,11 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "indent-line-variant-0",
+=======
+    "name": "indent-line",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": ">>",
@@ -288,7 +432,11 @@
     "expectedCursor": 2
   },
   {
+<<<<<<< HEAD
     "name": "indent-counted-lines-variant-0",
+=======
+    "name": "indent-counted-lines",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2>>",
@@ -296,7 +444,11 @@
     "expectedCursor": 2
   },
   {
+<<<<<<< HEAD
     "name": "outdent-line-variant-0",
+=======
+    "name": "outdent-line",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 18,
     "notation": "<<",
@@ -304,7 +456,11 @@
     "expectedCursor": 16
   },
   {
+<<<<<<< HEAD
     "name": "join-lines-variant-0",
+=======
+    "name": "join-lines",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "J",
@@ -312,7 +468,11 @@
     "expectedCursor": 13
   },
   {
+<<<<<<< HEAD
     "name": "join-three-lines-variant-0",
+=======
+    "name": "join-three-lines",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "2J",
@@ -320,7 +480,11 @@
     "expectedCursor": 13
   },
   {
+<<<<<<< HEAD
     "name": "swap-case-variant-0",
+=======
+    "name": "swap-case",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "~",
@@ -328,7 +492,11 @@
     "expectedCursor": 1
   },
   {
+<<<<<<< HEAD
     "name": "swap-case-count-variant-0",
+=======
+    "name": "swap-case-count",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "3~",
@@ -336,7 +504,11 @@
     "expectedCursor": 3
   },
   {
+<<<<<<< HEAD
     "name": "find-forward-variant-0",
+=======
+    "name": "find-forward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 14,
     "notation": "f-",
@@ -344,7 +516,11 @@
     "expectedCursor": 22
   },
   {
+<<<<<<< HEAD
     "name": "till-forward-variant-0",
+=======
+    "name": "till-forward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 14,
     "notation": "t-",
@@ -352,7 +528,11 @@
     "expectedCursor": 21
   },
   {
+<<<<<<< HEAD
     "name": "find-backward-variant-0",
+=======
+    "name": "find-backward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 27,
     "notation": "F-",
@@ -360,7 +540,11 @@
     "expectedCursor": 22
   },
   {
+<<<<<<< HEAD
     "name": "till-backward-variant-0",
+=======
+    "name": "till-backward",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 27,
     "notation": "T-",
@@ -368,7 +552,11 @@
     "expectedCursor": 23
   },
   {
+<<<<<<< HEAD
     "name": "repeat-find-variant-0",
+=======
+    "name": "repeat-find",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "a-b-c-d\n",
     "initialCursor": 0,
     "notation": "f-;",
@@ -376,7 +564,11 @@
     "expectedCursor": 3
   },
   {
+<<<<<<< HEAD
     "name": "reverse-find-variant-0",
+=======
+    "name": "reverse-find",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "a-b-c-d\n",
     "initialCursor": 0,
     "notation": "f-;,",
@@ -384,7 +576,11 @@
     "expectedCursor": 1
   },
   {
+<<<<<<< HEAD
     "name": "visual-delete-variant-0",
+=======
+    "name": "visual-delete",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "vwx",
@@ -392,12 +588,17 @@
     "expectedCursor": 0
   },
   {
+<<<<<<< HEAD
     "name": "visual-line-delete-variant-0",
+=======
+    "name": "visual-line-delete",
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
     "initialCursor": 0,
     "notation": "Vjd",
     "expectedText": "seven eight nine\nlast line\n",
     "expectedCursor": 0
+<<<<<<< HEAD
   },
   {
     "name": "word-forward-variant-1",
@@ -3998,5 +4199,7 @@
     "notation": "Vjd",
     "expectedText": "bnenw nrpqc wrwn\nujbc urwn\n",
     "expectedCursor": 0
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 ]

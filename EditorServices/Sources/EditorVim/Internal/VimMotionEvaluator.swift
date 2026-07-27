@@ -93,6 +93,7 @@ extension VimEngine {
         repetitions = effectiveCount
       case .pageUp:
         direction = -1
+<<<<<<< HEAD
         repetitions = viewportPageLineCount * effectiveCount
       case .pageDown:
         direction = 1
@@ -103,6 +104,18 @@ extension VimEngine {
       default:
         direction = 1
         repetitions = viewportHalfPageLineCount * effectiveCount
+=======
+        repetitions = 20 * effectiveCount
+      case .pageDown:
+        direction = 1
+        repetitions = 20 * effectiveCount
+      case .halfPageUp:
+        direction = -1
+        repetitions = 10 * effectiveCount
+      default:
+        direction = 1
+        repetitions = 10 * effectiveCount
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
       let desired =
         preferredColumn

@@ -17,13 +17,22 @@ extension VimEngine {
       }
       activeChange = VimChangeSession(
         before: state,
+<<<<<<< HEAD
         commands: [semanticCommand(for: action, count: count, register: register)],
+=======
+        invocations: [VimRecordedInvocation(action: action, count: count, register: register)],
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         changedText: false,
         insertRepeatCount: repeatsInsertedText ? count : 1
       )
     } else {
+<<<<<<< HEAD
       activeChange?.commands.append(
         semanticCommand(for: action, count: count, register: register))
+=======
+      activeChange?.invocations.append(
+        VimRecordedInvocation(action: action, count: count, register: register))
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     }
   }
 
@@ -37,6 +46,7 @@ extension VimEngine {
     action: VimAction,
     count: Int,
     register: VimRegister,
+<<<<<<< HEAD
     semanticCommand resolvedCommand: VimSemanticCommand? = nil,
     _ body: () -> Void
   ) {
@@ -45,6 +55,14 @@ extension VimEngine {
       let oldText = state.text
       activeChange?.commands.append(
         semanticCommand(for: action, count: count, register: register))
+=======
+    _ body: () -> Void
+  ) {
+    if activeChange != nil {
+      let oldText = state.text
+      activeChange?.invocations.append(
+        VimRecordedInvocation(action: action, count: count, register: register))
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       body()
       if oldText != state.text { activeChange?.changedText = true }
       return
@@ -59,7 +77,11 @@ extension VimEngine {
     if !isReplayingChange {
       lastChange = action
       lastRepeat = VimRepeatRecord(
+<<<<<<< HEAD
         commands: [command],
+=======
+        invocations: [VimRecordedInvocation(action: action, count: count, register: register)],
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         finishesInInsertMode: state.mode == .insert || state.mode == .replace
       )
     }
@@ -102,10 +124,15 @@ extension VimEngine {
       if session.changedText || session.before.text != state.text {
         pushUndo(session.before, edits: edits)
         if !isReplayingChange {
+<<<<<<< HEAD
           if case .action(let action, _, _) = session.commands.first {
             lastChange = action
           }
           lastRepeat = VimRepeatRecord(commands: session.commands, finishesInInsertMode: true)
+=======
+          lastChange = session.invocations.first?.action
+          lastRepeat = VimRepeatRecord(invocations: session.invocations, finishesInInsertMode: true)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         }
       }
     } else if editCaptureDepth > 0 {
@@ -140,7 +167,12 @@ extension VimEngine {
     guard historySuppressionDepth == 0,
       let entry = VimHistoryEntry.make(before: value, after: state, edits: edits)
     else { return }
+<<<<<<< HEAD
     undoTree.append(entry)
+=======
+    undoStack.append(entry)
+    redoStack.removeAll(keepingCapacity: true)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     recordChangePosition(value.cursor)
   }
 
@@ -153,7 +185,10 @@ extension VimEngine {
     guard let updatedText else { return false }
 
     state = (forward ? entry.after : entry.before).applying(to: updatedText)
+<<<<<<< HEAD
     recordHistoryApplication(entry, forward: forward)
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     lineIndex.invalidate()
     state.mode = .normal
     state.selection = nil
@@ -181,8 +216,13 @@ extension VimEngine {
     }
 
     for _ in 0..<count {
+<<<<<<< HEAD
       for command in record.commands {
         _ = try replay(command)
+=======
+      for invocation in record.invocations {
+        _ = try execute(invocation.action, count: invocation.count, register: invocation.register)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
       if record.finishesInInsertMode, state.mode == .insert || state.mode == .replace {
         _ = try execute(.escape)
@@ -192,7 +232,12 @@ extension VimEngine {
     let edits = endEditCapture()
     captureEnded = true
     if let entry = VimHistoryEntry.make(before: before, after: state, edits: edits) {
+<<<<<<< HEAD
       undoTree.append(entry)
+=======
+      undoStack.append(entry)
+      redoStack.removeAll(keepingCapacity: true)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       recordChangePosition(before.cursor)
     }
     lastRepeat = record
@@ -214,7 +259,10 @@ extension VimEngine {
   }
 
   func recordEdit(_ edit: VimEditDelta) {
+<<<<<<< HEAD
     recordExecutionEdit(edit)
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     guard editCaptureDepth > 0 else { return }
     capturedEdits.append(edit)
   }
@@ -388,6 +436,7 @@ extension VimEngine {
     }
   }
 
+<<<<<<< HEAD
   func pasteOverVisual(
     _ value: VimRegisterValue,
     count: Int,
@@ -413,6 +462,8 @@ extension VimEngine {
     normalizeCursorForMode()
   }
 
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   func paste(_ value: VimRegisterValue, after: Bool, count: Int) {
     guard !value.text.isEmpty else { return }
     if value.linewise {

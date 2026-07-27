@@ -1122,7 +1122,10 @@ struct CodeTextEditor: NSViewRepresentable {
       controller.engine.synchronize(text: textView.string, cursor: effectiveRange.location)
       do {
         var execution: VimExecutionResult?
+<<<<<<< HEAD
         var edits: [(range: Range<Int>, replacement: String)] = []
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         if effectiveRange.length > 0 {
           let removed = (textView.string as NSString).substring(with: effectiveRange)
           let characterCount = max(1, removed.count)
@@ -1131,12 +1134,19 @@ struct CodeTextEditor: NSViewRepresentable {
             count: characterCount,
             register: .blackHole
           )
+<<<<<<< HEAD
           edits.append(contentsOf: controller.engine.consumeCompletedEdits())
         }
         let inserted = try controller.engine.execute(.insert(committedText))
         edits.append(contentsOf: controller.engine.consumeCompletedEdits())
         execution = execution.map { Self.mergedVimExecution($0, inserted) } ?? inserted
         if let execution { applyVimExecution(execution, edits: edits, to: textView) }
+=======
+        }
+        let inserted = try controller.engine.execute(.insert(committedText))
+        execution = execution.map { Self.mergedVimExecution($0, inserted) } ?? inserted
+        if let execution { applyVimExecution(execution, to: textView) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         publishVimPrompt(controller.prompt)
         return true
       } catch {
@@ -1171,10 +1181,14 @@ struct CodeTextEditor: NSViewRepresentable {
         guard !Task.isCancelled, let self, let textView, textView.superview != nil else { return }
         do {
           let result = try controller.handle(token: "<timeout>")
+<<<<<<< HEAD
           if let execution = result.execution {
             let edits = controller.engine.consumeCompletedEdits()
             self.applyVimExecution(execution, edits: edits, to: textView)
           }
+=======
+          if let execution = result.execution { self.applyVimExecution(execution, to: textView) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
           self.publishVimPrompt(controller.prompt)
         } catch {
           NSSound.beep()

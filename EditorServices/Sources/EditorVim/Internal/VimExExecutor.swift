@@ -2,6 +2,7 @@ import Foundation
 
 extension VimEngine {
   func executeEx(_ raw: String) throws -> [VimHostRequest] {
+<<<<<<< HEAD
     let commands = VimExParser.splitCommands(raw)
     guard commands.count > 1 else {
       return try executeSingleEx(commands.first ?? raw)
@@ -17,6 +18,8 @@ extension VimEngine {
   }
 
   private func executeSingleEx(_ raw: String) throws -> [VimHostRequest] {
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     let command = raw.trimmingCharacters(in: CharacterSet(charactersIn: ": "))
     if command.hasPrefix("!") { return [.shell(String(command.dropFirst()))] }
     if try executeSubstitute(command) { return [] }
@@ -31,6 +34,7 @@ extension VimEngine {
       return []
     }
 
+<<<<<<< HEAD
     if name == "&" {
       return try repeatSubstitute(range: parsed.range, useLastSearch: false)
     }
@@ -38,6 +42,8 @@ extension VimEngine {
       return try repeatSubstitute(range: parsed.range, useLastSearch: true)
     }
 
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     if VimExParser.matches(name, command: "write") {
       return parsed.bang ? [.custom("force-write")] : [.write]
     }
@@ -61,8 +67,12 @@ extension VimEngine {
     }
 
     if VimExParser.matches(name, command: "edit") {
+<<<<<<< HEAD
       return arguments.isEmpty
         ? [.custom("reload-file")] : [.openFile(unescapeExArgument(arguments))]
+=======
+      return arguments.isEmpty ? [.custom("reload-file")] : [.openFile(arguments)]
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     }
     if VimExParser.matches(name, command: "buffer") {
       if let number = Int(arguments) { return [.switchBuffer(number)] }
@@ -77,15 +87,22 @@ extension VimEngine {
     if VimExParser.matches(name, command: "tabclose", minimum: 4) { return [.closeTab] }
 
     if VimExParser.matches(name, command: "delete") {
+<<<<<<< HEAD
       let specification = try exRegisterSpecification(arguments)
       let range = exLineRange(extending: parsed.range, count: specification.count)
       performMutation(action: .command(command), count: 1, register: specification.register) {
         apply(.delete, range: range, register: specification.register, linewise: true)
+=======
+      let range = exLineRange(parsed.range)
+      performMutation(action: .command(command), count: 1, register: .unnamed) {
+        apply(.delete, range: range, register: .unnamed, linewise: true)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
       normalizeCursorForMode()
       return []
     }
     if VimExParser.matches(name, command: "yank") {
+<<<<<<< HEAD
       let specification = try exRegisterSpecification(arguments)
       let range = exLineRange(extending: parsed.range, count: specification.count)
       apply(.yank, range: range, register: specification.register, linewise: true)
@@ -104,11 +121,23 @@ extension VimEngine {
         semanticCommand: semantic
       ) {
         paste(value, after: !parsed.bang, count: specification.count)
+=======
+      apply(.yank, range: exLineRange(parsed.range), register: .unnamed, linewise: true)
+      return []
+    }
+    if VimExParser.matches(name, command: "put", minimum: 2) {
+      if let range = parsed.range {
+        state.cursor = lineOffset(exLineNumber(range))
+      }
+      performMutation(action: .command(command), count: 1, register: .unnamed) {
+        paste(registerValue(for: .unnamed), after: true, count: 1)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
       normalizeCursorForMode()
       return []
     }
     if name == "t" || VimExParser.matches(name, command: "copy", minimum: 2) {
+<<<<<<< HEAD
       copyExRange(parsed.range, destination: arguments, command: command)
       return []
     }
@@ -118,10 +147,77 @@ extension VimEngine {
     }
     if VimExParser.matches(name, command: "join") {
       joinExRange(parsed.range, arguments: arguments, command: command)
+=======
+      let sourceRange = exLineRange(parsed.range)
+      let destinationLine = exLineNumber(arguments)
+      let destinationOffset = lineOffset(destinationLine)
+      let insertion = lineEndIncludingNewline(at: destinationOffset)
+      var payload = substring(sourceRange)
+      if !payload.hasSuffix("\n"), !payload.hasSuffix("\r") { payload.append("\n") }
+      let prefix =
+        insertion == state.text.utf16.count && !lineHasTerminator(at: destinationOffset)
+        ? "\n" : ""
+      performMutation(action: .command(command), count: 1, register: .unnamed) {
+        replace(range: insertion..<insertion, with: prefix + payload)
+      }
+      state.cursor = firstNonBlank(at: insertion + prefix.utf16.count)
+      normalizeCursorForMode()
+      return []
+    }
+    if VimExParser.matches(name, command: "move", minimum: 1) {
+      let sourceRange = exLineRange(parsed.range)
+      let destinationLine = exLineNumber(arguments)
+      let destinationOffset = lineOffset(destinationLine)
+      let originalInsertion = lineEndIncludingNewline(at: destinationOffset)
+      guard originalInsertion < sourceRange.lowerBound || originalInsertion > sourceRange.upperBound
+      else { return [] }
+
+      var payload = substring(sourceRange)
+      if !payload.hasSuffix("\n"), !payload.hasSuffix("\r") { payload.append("\n") }
+      let insertionAfterRemoval =
+        originalInsertion > sourceRange.upperBound
+        ? originalInsertion - sourceRange.count
+        : originalInsertion
+      performMutation(action: .command(command), count: 1, register: .unnamed) {
+        replace(range: sourceRange, with: "")
+        let safeInsertion = min(insertionAfterRemoval, state.text.utf16.count)
+        let needsPrefix =
+          safeInsertion == state.text.utf16.count
+          && safeInsertion > 0
+          && !state.text.hasSuffix("\n")
+          && !state.text.hasSuffix("\r")
+        replace(
+          range: safeInsertion..<safeInsertion,
+          with: (needsPrefix ? "\n" : "") + payload
+        )
+      }
+      state.cursor = firstNonBlank(at: min(insertionAfterRemoval, state.text.utf16.count))
+      normalizeCursorForMode()
+      return []
+    }
+
+    if VimExParser.matches(name, command: "join") {
+      let range = exLineRange(parsed.range)
+      let startLine = lineStart(at: range.lowerBound)
+      var joins = 1
+      var cursor = lineEndIncludingNewline(at: startLine)
+      while cursor < range.upperBound {
+        joins += 1
+        let next = lineEndIncludingNewline(at: cursor)
+        guard next > cursor else { break }
+        cursor = next
+      }
+      state.cursor = startLine
+      performMutation(action: .command(command), count: joins, register: .unnamed) {
+        for _ in 1..<joins { joinLine() }
+      }
+      normalizeCursorForMode()
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       return []
     }
     if VimExParser.matches(name, command: "normal") {
       guard !arguments.isEmpty else { return [] }
+<<<<<<< HEAD
       try executeNormal(arguments, range: parsed.range)
       return []
     }
@@ -137,6 +233,9 @@ extension VimEngine {
     }
     if VimExParser.matches(name, command: "sort") {
       sortExRange(parsed.range, arguments: arguments, command: command)
+=======
+      _ = try executeNotation(arguments)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       return []
     }
     if VimExParser.matches(name, command: "set") {
@@ -152,6 +251,7 @@ extension VimEngine {
     return [.custom(command)]
   }
 
+<<<<<<< HEAD
   private func executeGroupedExHistory<T>(_ body: () throws -> T) throws -> T {
     let ownsHistory = historySuppressionDepth == 0
     let before = state
@@ -173,6 +273,8 @@ extension VimEngine {
     return value
   }
 
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   func applySetOptions(_ arguments: String) {
     for option in arguments.split(whereSeparator: \.isWhitespace).map(String.init) {
       switch option.lowercased() {
@@ -182,9 +284,12 @@ extension VimEngine {
       case "noscs", "nosmartcase": searchSmartCase = false
       case "ws", "wrapscan": searchWrap = true
       case "nows", "nowrapscan": searchWrap = false
+<<<<<<< HEAD
       case "invic", "invignorecase": searchIgnoreCase.toggle()
       case "invscs", "invsmartcase": searchSmartCase.toggle()
       case "invws", "invwrapscan": searchWrap.toggle()
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       default: break
       }
     }
@@ -216,6 +321,7 @@ extension VimEngine {
     return lower..<max(lower, upper)
   }
 
+<<<<<<< HEAD
   private func exLineRange(extending expression: String?, count: Int) -> Range<Int> {
     let base = exLineRange(expression)
     guard count > 1 else { return base }
@@ -225,6 +331,8 @@ extension VimEngine {
     return lineStart(at: lineOffset(first))..<lineEndIncludingNewline(at: lineOffset(last))
   }
 
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   func exLineNumber(_ rawAddress: String, currentLine: Int? = nil) -> Int {
     var address = rawAddress.trimmingCharacters(in: .whitespaces)
     let current = currentLine ?? currentLineNumber()
@@ -243,6 +351,7 @@ extension VimEngine {
         address.removeFirst()
         if let position = marks[name] {
           lineIndex.synchronize(with: state.text)
+<<<<<<< HEAD
           base = lineIndex.oneBasedLine(containing: position, textLength: state.text.utf16.count)
         }
       }
@@ -267,6 +376,14 @@ extension VimEngine {
       if let line = exSearchLine(pattern, forward: delimiter == "/", currentLine: current) {
         base = line
       }
+=======
+          base = lineIndex.oneBasedLine(
+            containing: position,
+            textLength: state.text.utf16.count
+          )
+        }
+      }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     } else {
       let digits = address.prefix(while: \.isNumber)
       if !digits.isEmpty {
@@ -295,7 +412,14 @@ extension VimEngine {
 
   func currentLineNumber() -> Int {
     lineIndex.synchronize(with: state.text)
+<<<<<<< HEAD
     return lineIndex.oneBasedLine(containing: state.cursor, textLength: state.text.utf16.count)
+=======
+    return lineIndex.oneBasedLine(
+      containing: state.cursor,
+      textLength: state.text.utf16.count
+    )
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 
   func totalLineCount() -> Int {
@@ -307,12 +431,21 @@ extension VimEngine {
     let parsed = VimExParser.parse(command)
     guard
       parsed.name == "s"
+<<<<<<< HEAD
         || VimExParser.matches(parsed.name, command: "substitute", minimum: 1)
+=======
+        || VimExParser.matches(
+          parsed.name,
+          command: "substitute",
+          minimum: 1
+        )
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     else { return false }
 
     guard let delimiter = parsed.arguments.first else {
       throw VimError.incompleteCommand(command)
     }
+<<<<<<< HEAD
     let components = splitSubstitute(parsed.arguments.dropFirst(), delimiter: delimiter)
     guard components.count >= 2 else { throw VimError.incompleteCommand(command) }
 
@@ -331,11 +464,33 @@ extension VimEngine {
         forceCaseInsensitive: forceCase
       )
     } catch {
+=======
+    let body = parsed.arguments.dropFirst()
+    let components = splitSubstitute(body, delimiter: delimiter)
+    guard components.count >= 2 else { throw VimError.incompleteCommand(command) }
+
+    let pattern = components[0].isEmpty ? (lastSearch?.0 ?? "") : components[0]
+    guard !pattern.isEmpty else { throw VimError.incompleteCommand(command) }
+    let rawReplacement =
+      components[1].isEmpty && components.count > 1
+      ? components[1]
+      : components[1]
+    let replacement = rawReplacement == "~" ? lastSubstituteReplacement : rawReplacement
+    let flags = components.count > 2 ? components[2] : ""
+    let caseInsensitive =
+      flags.contains("i")
+      || (!flags.contains("I") && searchIgnoreCase
+        && !(searchSmartCase
+          && pattern.unicodeScalars.contains { CharacterSet.uppercaseLetters.contains($0) }))
+    let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       throw VimError.unsupportedNotation(command)
     }
 
     let target = exLineRange(parsed.range)
     let targetText = substring(target)
+<<<<<<< HEAD
     let matches = substituteMatches(
       compiled.expression,
       in: targetText,
@@ -407,6 +562,76 @@ extension VimEngine {
     {
       result.append(match)
     }
+=======
+    let targetNS = targetText as NSString
+    let fullRange = NSRange(location: 0, length: targetNS.length)
+    let template = vimSubstituteTemplate(replacement)
+    let replaced: String
+
+    if flags.contains("g") {
+      replaced = regex.stringByReplacingMatches(
+        in: targetText,
+        range: fullRange,
+        withTemplate: template
+      )
+    } else {
+      var output = ""
+      var lineLocation = 0
+      while lineLocation < targetNS.length {
+        let line = targetNS.lineRange(for: NSRange(location: lineLocation, length: 0))
+        let lineText = targetNS.substring(with: line)
+        let lineNS = lineText as NSString
+        let lineRange = NSRange(location: 0, length: lineNS.length)
+        if let match = regex.firstMatch(in: lineText, range: lineRange) {
+          output += regex.stringByReplacingMatches(
+            in: lineText,
+            options: [],
+            range: match.range,
+            withTemplate: template
+          )
+        } else {
+          output += lineText
+        }
+        lineLocation = NSMaxRange(line)
+      }
+      if targetNS.length == 0 { output = targetText }
+      replaced = output
+    }
+
+    lastSearch = (pattern, true)
+    registers[.named("/")] = VimRegisterValue(text: pattern, linewise: false)
+    lastSubstituteReplacement = replacement
+    guard replaced != targetText else { return true }
+    performMutation(action: .command(command), count: 1, register: .unnamed) {
+      replace(range: target, with: replaced)
+    }
+    return true
+  }
+
+  func vimSubstituteTemplate(_ replacement: String) -> String {
+    var result = ""
+    var escaped = false
+    for character in replacement {
+      if escaped {
+        if let digit = character.wholeNumberValue {
+          result += "$\(digit)"
+        } else if character == "&" {
+          result.append("&")
+        } else {
+          result.append("\\")
+          result.append(character)
+        }
+        escaped = false
+      } else if character == "\\" {
+        escaped = true
+      } else if character == "&" {
+        result += "$0"
+      } else {
+        result.append(character)
+      }
+    }
+    if escaped { result.append("\\") }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     return result
   }
 
@@ -435,6 +660,7 @@ extension VimEngine {
 
   func search(_ query: String, forward: Bool) {
     guard !query.isEmpty else { return }
+<<<<<<< HEAD
     guard
       let compiled = try? VimRegexCompiler.compile(
         query,
@@ -448,6 +674,24 @@ extension VimEngine {
       in: state.text,
       range: NSRange(location: 0, length: length)
     )
+=======
+    let shouldIgnoreCase =
+      searchIgnoreCase
+      && !(searchSmartCase
+        && query.unicodeScalars.contains { CharacterSet.uppercaseLetters.contains($0) })
+    let options: NSRegularExpression.Options = shouldIgnoreCase ? [.caseInsensitive] : []
+    let regex =
+      (try? NSRegularExpression(pattern: query, options: options))
+      ?? (try? NSRegularExpression(
+        pattern: NSRegularExpression.escapedPattern(for: query),
+        options: options
+      ))
+    guard let regex else { return }
+
+    let length = state.text.utf16.count
+    let fullRange = NSRange(location: 0, length: length)
+    let matches = regex.matches(in: state.text, range: fullRange)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     guard !matches.isEmpty else { return }
 
     let destination: Int?
@@ -475,6 +719,7 @@ extension VimEngine {
     }
     return substring(range)
   }
+<<<<<<< HEAD
 
   private func exSearchLine(_ pattern: String, forward: Bool, currentLine: Int) -> Int? {
     guard
@@ -679,4 +924,6 @@ extension VimEngine {
     if escaped { result.append("\\") }
     return result
   }
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
 }

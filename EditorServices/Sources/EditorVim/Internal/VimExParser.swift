@@ -16,6 +16,7 @@ enum VimExParser {
     let range = consumeRangePrefix(from: &source)
 
     var name = ""
+<<<<<<< HEAD
     if source.first == "&" || source.first == "~" {
       name.append(source.removeFirst())
     } else {
@@ -23,6 +24,11 @@ enum VimExParser {
         name.append(first)
         source.removeFirst()
       }
+=======
+    while let first = source.first, first.isLetter {
+      name.append(first)
+      source.removeFirst()
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     }
 
     var bang = false
@@ -39,6 +45,7 @@ enum VimExParser {
     )
   }
 
+<<<<<<< HEAD
   static func splitCommands(_ raw: String) -> [String] {
     var result: [String] = []
     var current = ""
@@ -64,6 +71,8 @@ enum VimExParser {
     return result
   }
 
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   static func matches(_ abbreviation: String, command: String, minimum: Int = 1) -> Bool {
     abbreviation.count >= minimum
       && abbreviation.count <= command.count
@@ -106,6 +115,7 @@ enum VimExParser {
         return false
       }
       cursor = source.index(after: cursor)
+<<<<<<< HEAD
     case "/", "?":
       let delimiter = source[cursor]
       cursor = source.index(after: cursor)
@@ -121,6 +131,8 @@ enum VimExParser {
           break
         }
       }
+=======
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     default:
       if source[cursor].isNumber {
         while cursor < source.endIndex, source[cursor].isNumber {

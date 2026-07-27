@@ -176,9 +176,21 @@ struct VimRegisterValue: Sendable {
   var linewise: Bool
 }
 
+<<<<<<< HEAD
 struct VimChangeSession: Sendable {
   var before: VimState
   var commands: [VimSemanticCommand]
+=======
+struct VimRecordedInvocation: Sendable {
+  var action: VimAction
+  var count: Int
+  var register: VimRegister
+}
+
+struct VimChangeSession: Sendable {
+  var before: VimState
+  var invocations: [VimRecordedInvocation]
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   var changedText: Bool
   var insertRepeatCount: Int
 }
@@ -190,7 +202,11 @@ struct VimReplaceRestoration: Sendable {
 }
 
 struct VimRepeatRecord: Sendable {
+<<<<<<< HEAD
   var commands: [VimSemanticCommand]
+=======
+  var invocations: [VimRecordedInvocation]
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   var finishesInInsertMode: Bool
 }
 
@@ -241,6 +257,7 @@ public final class VimEngine: @unchecked Sendable {
   let lineIndex = VimLineIndex()
   var registers: [VimRegister: VimRegisterValue] = [:]
   var marks: [Character: Int] = [:]
+<<<<<<< HEAD
   var macros: [Character: [VimSemanticCommand]] = [:]
   var recording: Character?
   var recordingActions: [VimSemanticCommand] = []
@@ -254,6 +271,17 @@ public final class VimEngine: @unchecked Sendable {
   var executionBatchDepth = 0
   var currentExecutionEdits: [VimEditDelta] = []
   var completedExecutionEdits: [VimEditDelta] = []
+=======
+  var macros: [Character: [VimRecordedInvocation]] = [:]
+  var recording: Character?
+  var recordingActions: [VimRecordedInvocation] = []
+  var leaderMappings: [String: VimInvocation] = [:]
+  var localLeaderMappings: [String: VimInvocation] = [:]
+  var undoStack: [VimHistoryEntry] = []
+  var redoStack: [VimHistoryEntry] = []
+  var editCaptureDepth = 0
+  var capturedEdits: [VimEditDelta] = []
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   var lastChange: VimAction?
   var lastRepeat: VimRepeatRecord?
   var activeChange: VimChangeSession?
@@ -277,6 +305,7 @@ public final class VimEngine: @unchecked Sendable {
   var isReplayingChange = false
   var replaceRestorations: [VimReplaceRestoration] = []
   var lastInsertedText = ""
+<<<<<<< HEAD
   var lastSubstitutePattern = ""
   var lastSubstituteReplacement = ""
   var lastSubstituteFlags = ""
@@ -284,6 +313,9 @@ public final class VimEngine: @unchecked Sendable {
   var viewportBottomLine = 20
   var viewportPageLineCount = 20
   var viewportHalfPageLineCount = 10
+=======
+  var lastSubstituteReplacement = ""
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
 
   public init(
     text: String = "", cursor: Int = 0, leader: String = "\\", localLeader: String = "\\",
@@ -348,7 +380,12 @@ public final class VimEngine: @unchecked Sendable {
           edits: delta.map { [$0] } ?? []
         )
       {
+<<<<<<< HEAD
         undoTree.append(entry)
+=======
+        undoStack.append(entry)
+        redoStack.removeAll(keepingCapacity: true)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
     }
   }
@@ -370,7 +407,13 @@ public final class VimEngine: @unchecked Sendable {
 
   public func macro(_ name: Character) -> [VimAction] {
     lock.withLock {
+<<<<<<< HEAD
       (macros[normalizedMacroName(name)] ?? []).flatMap(\.publicActions)
+=======
+      (macros[normalizedMacroName(name)] ?? []).flatMap { invocation in
+        Array(repeating: invocation.action, count: max(1, invocation.count))
+      }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     }
   }
 
@@ -378,7 +421,11 @@ public final class VimEngine: @unchecked Sendable {
     lock.withLock {
       let normalized = normalizedMacroName(name)
       let values = actions.map {
+<<<<<<< HEAD
         VimSemanticCommand.action($0, count: 1, register: .unnamed)
+=======
+        VimRecordedInvocation(action: $0, count: 1, register: .unnamed)
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
       if name.isUppercase {
         macros[normalized, default: []].append(contentsOf: values)
@@ -413,9 +460,13 @@ public final class VimEngine: @unchecked Sendable {
 
   @discardableResult
   public func execute(_ invocation: VimInvocation) throws -> VimExecutionResult {
+<<<<<<< HEAD
     try lock.withLock {
       try withExecutionBatch { try executeInvocationUnlocked(invocation) }
     }
+=======
+    try lock.withLock { try executeInvocationUnlocked(invocation) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 
   private func executeInvocationUnlocked(_ invocation: VimInvocation) throws -> VimExecutionResult {
@@ -441,10 +492,14 @@ public final class VimEngine: @unchecked Sendable {
   public func execute(_ action: VimAction, count: Int = 1, register: VimRegister = .unnamed) throws
     -> VimExecutionResult
   {
+<<<<<<< HEAD
     try lock.withLock {
       try withExecutionBatch {
         try executeActionUnlocked(action, count: count, register: register)
       }
     }
+=======
+    try lock.withLock { try executeActionUnlocked(action, count: count, register: register) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 }

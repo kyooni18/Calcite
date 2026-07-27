@@ -108,6 +108,7 @@ public final class VimKeymapController: @unchecked Sendable {
 
   @discardableResult
   public func handle(token: String) throws -> VimKeyHandlingResult {
+<<<<<<< HEAD
     try lock.withLock {
       try engine.lock.withLock {
         try engine.withExecutionBatch {
@@ -115,6 +116,9 @@ public final class VimKeymapController: @unchecked Sendable {
         }
       }
     }
+=======
+    try lock.withLock { try handleUnlocked(token: token) }
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   }
 
   private func handleUnlocked(token: String) throws -> VimKeyHandlingResult {
@@ -147,7 +151,11 @@ public final class VimKeymapController: @unchecked Sendable {
     }
 
     if token == ":" {
+<<<<<<< HEAD
       beginPrompt(.command, prefix: engine.prepareVisualExRange() ?? ":")
+=======
+      beginPrompt(.command, prefix: ":")
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
     if token == "/" {
@@ -276,9 +284,14 @@ public final class VimKeymapController: @unchecked Sendable {
   private func beginPrompt(_ kind: PromptKind, prefix: String) {
     resetPendingInputUnlocked()
     promptKind = kind
+<<<<<<< HEAD
     let initial = prefix == ":'<,'>" ? "'<,'>" : ""
     promptBuffer = Array(initial)
     promptCursor = promptBuffer.count
+=======
+    promptBuffer = []
+    promptCursor = 0
+>>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     historyIndex = nil
     storedPrompt = prefix
   }
