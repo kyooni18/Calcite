@@ -20,11 +20,7 @@ final class VimDifferentialTests: XCTestCase {
     )!
     let fixtures = try JSONDecoder().decode([Fixture].self, from: Data(contentsOf: fixtureURL))
 
-<<<<<<< HEAD
     XCTAssertGreaterThanOrEqual(fixtures.count, 500)
-=======
-    XCTAssertGreaterThanOrEqual(fixtures.count, 40)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     for fixture in fixtures {
       let engine = VimEngine(text: fixture.initialText, cursor: fixture.initialCursor)
       do {

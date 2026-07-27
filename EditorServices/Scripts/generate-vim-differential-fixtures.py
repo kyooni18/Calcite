@@ -71,7 +71,6 @@ CASES = [
 ]
 
 
-<<<<<<< HEAD
 def shifted_ascii_text(value: str, shift: int) -> str:
     result: list[str] = []
     for character in value:
@@ -84,8 +83,6 @@ def shifted_ascii_text(value: str, shift: int) -> str:
     return "".join(result)
 
 
-=======
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
 def offset_to_line_col(text: str, offset: int) -> tuple[int, int]:
     before = text[:offset]
     line = before.count("\n") + 1
@@ -157,7 +154,6 @@ def main() -> None:
     vim = shutil.which(os.environ.get("VIM", "vim"))
     if not vim:
         raise SystemExit("vim is required to regenerate fixtures")
-<<<<<<< HEAD
     expanded_cases = []
     for variant in range(10):
         for name, initial, cursor, keys in CASES:
@@ -170,9 +166,6 @@ def main() -> None:
                 )
             )
     fixtures = [run_case(vim, *case) for case in expanded_cases]
-=======
-    fixtures = [run_case(vim, *case) for case in CASES]
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     OUTPUT.write_text(json.dumps(fixtures, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {len(fixtures)} fixtures to {OUTPUT}")
 

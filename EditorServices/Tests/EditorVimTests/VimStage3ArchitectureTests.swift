@@ -106,11 +106,7 @@ final class VimStage3ArchitectureTests: XCTestCase {
 
     let insertions = ["", "x", "\n", "\r", "\r\n", "u\nv", "끝", "🙂"]
 
-<<<<<<< HEAD
     for _ in 0..<10_000 {
-=======
-    for _ in 0..<500 {
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       let boundaries = utf16Boundaries(in: text)
       let lowerIndex = Int(generator.next() % UInt64(boundaries.count))
       let upperIndex = lowerIndex + Int(generator.next() % UInt64(boundaries.count - lowerIndex))

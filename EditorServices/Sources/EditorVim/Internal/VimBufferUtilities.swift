@@ -25,13 +25,9 @@ extension VimEngine {
     let anchor = visualAnchor ?? state.cursor
     visualAnchor = anchor
     if state.mode == .visualCharacter {
-<<<<<<< HEAD
       let lower = min(anchor, state.cursor)
       let upper = nextCharacterBoundary(from: max(anchor, state.cursor))
       state.selection = VimSelection(lower, max(lower, upper))
-=======
-      state.selection = VimSelection(anchor, state.cursor)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
     } else {
       let anchorStart = lineStart(at: anchor)
       let caretStart = lineStart(at: state.cursor)
@@ -41,7 +37,6 @@ extension VimEngine {
     }
   }
 
-<<<<<<< HEAD
   func swapVisualEndpoints() {
     guard state.mode == .visualCharacter || state.mode == .visualLine else { return }
     let previousCaret = state.cursor
@@ -57,8 +52,6 @@ extension VimEngine {
     return ":'<,'>"
   }
 
-=======
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
   func visualRange() -> Range<Int>? {
     guard state.mode == .visualCharacter || state.mode == .visualLine else { return nil }
     let anchor = clamp(visualAnchor ?? state.selection?.lowerBound ?? state.cursor)
@@ -613,7 +606,6 @@ extension VimEngine {
     return String.Index(index, within: state.text) ?? state.text.endIndex
   }
 }
-<<<<<<< HEAD
 
 extension VimEngine {
   enum VimViewportPosition {
@@ -641,5 +633,3 @@ extension VimEngine {
     updateVisualSelection()
   }
 }
-=======
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883

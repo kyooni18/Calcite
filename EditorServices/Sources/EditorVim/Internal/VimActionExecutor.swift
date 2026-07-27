@@ -12,11 +12,7 @@ extension VimEngine {
 
     if recording != nil, action != .stopMacro, macroDepth == 0, !isReplayingChange {
       recordingActions.append(
-<<<<<<< HEAD
         semanticCommand(for: action, count: count, register: register)
-=======
-        VimRecordedInvocation(action: action, count: count, register: register)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       )
     }
 
@@ -246,24 +242,14 @@ extension VimEngine {
 
     case .undo:
       cancelOpenChangeWithoutCommit()
-<<<<<<< HEAD
       if let entry = undoTree.transactionForUndo(), !applyHistory(entry, forward: false) {
         undoTree.append(entry)
-=======
-      if let entry = undoStack.popLast(), applyHistory(entry, forward: false) {
-        redoStack.append(entry)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
 
     case .redo:
       cancelOpenChangeWithoutCommit()
-<<<<<<< HEAD
       if let entry = undoTree.transactionForRedo() {
         _ = applyHistory(entry, forward: true)
-=======
-      if let entry = redoStack.popLast(), applyHistory(entry, forward: true) {
-        undoStack.append(entry)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
       }
 
     case .repeatLastChange:
@@ -316,11 +302,7 @@ extension VimEngine {
       defer { macroDepth -= 1 }
       for _ in 0..<count {
         for item in macros[name] ?? [] {
-<<<<<<< HEAD
           _ = try replay(item)
-=======
-          _ = try execute(item.action, count: item.count, register: item.register)
->>>>>>> 0130b0923308e9a17b7c12b9edcd0615c0d3c883
         }
       }
 
