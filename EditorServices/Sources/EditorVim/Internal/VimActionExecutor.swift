@@ -59,8 +59,10 @@ extension VimEngine {
         state.mode = .normal
         state.selection = nil
         visualAnchor = nil
+        visualSelectionShape = .character
       } else {
         visualAnchor = state.cursor
+        visualSelectionShape = .character
         state.mode = .visualCharacter
         state.selection = VimSelection(state.cursor, state.cursor)
       }
@@ -71,8 +73,10 @@ extension VimEngine {
         state.mode = .normal
         state.selection = nil
         visualAnchor = nil
+        visualSelectionShape = .character
       } else {
         visualAnchor = lineStart(at: state.cursor)
+        visualSelectionShape = .line
         state.mode = .visualLine
         updateVisualSelection()
       }
@@ -82,6 +86,7 @@ extension VimEngine {
         visualAnchor = clamp(lastVisual.anchor)
         state.cursor = clamp(lastVisual.caret)
         state.mode = lastVisual.mode
+        visualSelectionShape = lastVisual.shape
         updateVisualSelection()
       }
 
@@ -223,6 +228,11 @@ extension VimEngine {
       normalizeCursorForMode()
 
     case .operatorSelection(let op):
+      if visualSelectionShape == .block {
+        applyVisualBlockOperator(op, register: register)
+        normalizeCursorForMode()
+        break
+      }
       guard let visual = visualRange() else { break }
       let wasLinewise = state.mode == .visualLine
       rememberVisualSelection()
@@ -238,6 +248,7 @@ extension VimEngine {
       }
       state.selection = nil
       visualAnchor = nil
+      visualSelectionShape = .character
       normalizeCursorForMode()
 
     case .undo:
@@ -277,6 +288,15 @@ extension VimEngine {
         preferredColumn = nil
         normalizeCursorForMode()
         updateVisualSelection()
+      } else {
+        publishMessage(
+          VimMessage(
+            text: "Mark not set: \(name)",
+            code: "E20",
+            severity: .error,
+            lifetime: .timed(milliseconds: 2600)
+          )
+        )
       }
 
     case .startMacro(let name):

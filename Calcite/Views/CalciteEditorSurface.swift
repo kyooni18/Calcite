@@ -1,6 +1,6 @@
 import AppKit
-@_spi(Calcite) import EditorVim
 import EditorServices
+@_spi(Calcite) import EditorVim
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -29,7 +29,7 @@ struct CalciteEditorSurface: View {
     VStack(spacing: 0) {
       editorPane
 
-      EditorStatusBar(
+      CalciteEditorStatusBar(
         tab: tab,
         profile: profile,
         editorMode: editorMode,
@@ -80,6 +80,7 @@ struct CalciteEditorSurface: View {
         breakpoints: tab.breakpoints,
         selectedRange: tab.selectedRange,
         hasCompletions: !tab.completions.isEmpty,
+        vimHistory: tab.vimHistory,
         onWillEdit: tab.markModified,
         onEdit: { range, replacement, resultingText, selectionAfter in
           tab.submitEdit(
@@ -120,6 +121,8 @@ struct CalciteEditorSurface: View {
         },
         onVimModeChange: tab.updateVimMode,
         onVimPromptChange: tab.updateVimPrompt,
+        onVimInteractionChange: tab.updateVimInteraction,
+        onVimInputSourceChange: tab.updateVimInputSourceIdentifier,
         onCaretRectChange: { completionAnchor = $0 }
       )
 
@@ -500,65 +503,6 @@ private struct EditorDiagnosticOverlay: View {
   }
 }
 
-private struct EditorStatusBar: View {
-  @ObservedObject var tab: EditorTab
-  let profile: EditorCustomProfile
-  let editorMode: EditorInterface
-  let onSelectInputMode: (EditorInterface) -> Void
-
-  var body: some View {
-    HStack(spacing: 10) {
-      if let prompt = tab.vimPrompt {
-        Text(prompt.isEmpty ? " " : prompt)
-          .font(.system(.caption, design: .monospaced))
-          .frame(maxWidth: .infinity, alignment: .leading)
-      } else {
-        Text(tab.languageID)
-        if tab.isDirty { Text("Modified") }
-        Spacer()
-      }
-
-      Menu {
-        ForEach(EditorInterface.allCases) { mode in
-          Button {
-            onSelectInputMode(mode)
-          } label: {
-            if mode == editorMode {
-              Label(mode.title, systemImage: "checkmark")
-            } else {
-              Text(mode.title)
-            }
-          }
-        }
-      } label: {
-        Text(editorMode.title.uppercased())
-          .font(.caption.monospaced().weight(.semibold))
-          .foregroundStyle(profile.vim.enabled ? Color.accentColor : Color.secondary)
-      }
-      .menuStyle(.borderlessButton)
-      .fixedSize()
-      .help("Choose editor mode")
-
-      if profile.vim.enabled, tab.vimPrompt == nil {
-        Text(tab.vimMode.rawValue.uppercased())
-          .font(.caption.monospaced().weight(.semibold))
-          .foregroundStyle(tab.vimMode == .insert ? Color.green : Color.accentColor)
-      }
-      if tab.errorCount > 0 {
-        Label("\(tab.errorCount)", systemImage: "xmark.circle")
-      }
-      if tab.warningCount > 0 {
-        Label("\(tab.warningCount)", systemImage: "exclamationmark.triangle")
-      }
-      Text("Ln \(tab.currentLine)")
-    }
-    .font(.caption)
-    .padding(.horizontal, 10)
-    .frame(height: 24)
-    .background(.bar)
-  }
-}
-
 @MainActor
 struct CodeTextEditor: NSViewRepresentable {
   let text: String
@@ -576,6 +520,7 @@ struct CodeTextEditor: NSViewRepresentable {
   let breakpoints: Set<Int>
   let selectedRange: NSRange
   let hasCompletions: Bool
+  let vimHistory: VimHistorySnapshot
   let onWillEdit: () -> Void
   let onEdit: (NSRange, String, String, NSRange) -> Void
   let onSelectionChange: (NSRange) -> Void
@@ -596,6 +541,8 @@ struct CodeTextEditor: NSViewRepresentable {
   let onZoomChange: (CGFloat) -> Void
   let onVimModeChange: (VimMode) -> Void
   let onVimPromptChange: (String?) -> Void
+  let onVimInteractionChange: (VimInteractionSnapshot) -> Void
+  let onVimInputSourceChange: (String?) -> Void
   let onCaretRectChange: (CGRect) -> Void
 
   func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -896,12 +843,18 @@ struct CodeTextEditor: NSViewRepresentable {
     private var lastPublishedVimMode: VimMode?
     private var lastPublishedVimPrompt: String?
     private var hasPublishedVimPrompt = false
+    private var lastPublishedVimInteraction: VimInteractionSnapshot?
+    private var lastPublishedVimInputSource: String?
+    private var hasPublishedVimInputSource = false
     fileprivate var lastPublishedSelection: NSRange?
     private var representableUpdateDepth = 0
     private var deferredSelection: NSRange?
     private var deferredVimMode: VimMode?
     private var deferredVimPrompt: String?
     private var hasDeferredVimPrompt = false
+    private var deferredVimInteraction: VimInteractionSnapshot?
+    private var deferredVimInputSource: String?
+    private var hasDeferredVimInputSource = false
     private var publicationFlushScheduled = false
     private var presentationState: PresentationState?
     private var styledSelection: NSRange?
@@ -1038,23 +991,19 @@ struct CodeTextEditor: NSViewRepresentable {
         updateVimCursorStyle(for: .insert, in: textView, isEnabled: false)
         publishVimMode(.insert)
         publishVimPrompt(nil)
+        publishVimInteraction(VimInteractionSnapshot(mode: .insert))
+        publishVimInputSource(nil)
         return
       }
 
-      let mappings = profile.mappings.map {
-        VimKeyMapping(sequence: $0.sequence, command: $0.command)
-      }
-      let inputPolicy = vimInputPolicy(from: profile.keyboardPolicy)
-      let languageMap = parsedVimLanguageMap(profile.languageMap)
-      let signature =
-        ([
-          profile.normalizedLeader,
-          String(parent.profile.behavior.tabWidth),
-          profile.keyboardPolicy.rawValue,
-          profile.languageMap,
-        ]
-        + mappings.map { "\($0.sequence)=\($0.command)" })
-        .joined(separator: "|")
+      let mappings = CalciteVimConfigurationAdapter.mappings(from: profile.mappings)
+      let inputPolicy = CalciteVimConfigurationAdapter.inputPolicy(from: profile.keyboardPolicy)
+      let languageMap = CalciteVimConfigurationAdapter.languageMap(from: profile.languageMap)
+      let signature = CalciteVimConfigurationAdapter.signature(
+        profile: profile,
+        tabWidth: parent.profile.behavior.tabWidth,
+        mappings: mappings
+      )
       if vimController == nil {
         let engine = VimEngine(
           text: textView.string,
@@ -1063,7 +1012,9 @@ struct CodeTextEditor: NSViewRepresentable {
           localLeader: profile.normalizedLeader,
           tabWidth: parent.profile.behavior.tabWidth
         )
-        let controller = VimKeymapController(engine: engine, mappings: mappings)
+        let controller = VimKeymapController(engine: engine)
+        controller.restoreHistory(parent.vimHistory)
+        controller.setMappings(mappings)
         controller.inputPolicy = inputPolicy
         controller.setLanguageMap(languageMap)
         vimController = controller
@@ -1087,6 +1038,8 @@ struct CodeTextEditor: NSViewRepresentable {
         updateVimCursorStyle(for: mode, in: textView)
         publishVimMode(mode)
         publishVimPrompt(controller.prompt)
+        publishVimInteraction(controller.interactionSnapshot)
+        publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
       }
     }
 
@@ -1109,7 +1062,7 @@ struct CodeTextEditor: NSViewRepresentable {
       // and commit keys belong to the native input method until it finishes.
       if textView.hasMarkedText() { return false }
       if shouldUseNativeTextInput(for: event, controller: controller) { return false }
-      guard let stroke = vimKeyStroke(for: event) else { return false }
+      guard let stroke = CalciteVimInputAdapter.keyStroke(for: event) else { return false }
 
       synchronizeVimControllerIfNeeded(controller, with: textView)
       updateVimViewport(controller, in: textView)
@@ -1124,9 +1077,6 @@ struct CodeTextEditor: NSViewRepresentable {
         )
         restoreEditorFocus(after: textView)
         return true
-      } catch VimError.unsupportedNotation {
-        NSSound.beep()
-        return true
       } catch {
         NSSound.beep()
         vimMappingTimeoutTask?.cancel()
@@ -1134,6 +1084,7 @@ struct CodeTextEditor: NSViewRepresentable {
         controller.resetPendingInput()
         controller.cancelPrompt()
         publishVimPrompt(nil)
+        publishVimError(error, controller: controller, textView: textView)
         return true
       }
     }
@@ -1171,6 +1122,8 @@ struct CodeTextEditor: NSViewRepresentable {
           )
           vimVirtualCompositionText = composingText
           publishVimPrompt(controller.prompt)
+          publishVimInteraction(controller.interactionSnapshot)
+          publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
           return true
         }
 
@@ -1199,10 +1152,13 @@ struct CodeTextEditor: NSViewRepresentable {
             selectedRange: selection.location..<NSMaxRange(selection)
           )
         )
+        publishVimInteraction(controller.interactionSnapshot)
+        publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
         return false
       } catch {
         NSSound.beep()
         cancelVimComposition(in: textView, controller: controller)
+        publishVimError(error, controller: controller, textView: textView)
         return true
       }
     }
@@ -1312,13 +1268,15 @@ struct CodeTextEditor: NSViewRepresentable {
           edits.append(contentsOf: controller.engine.consumeCompletedEdits())
         }
         if let execution {
-          applyVimExecution(execution, edits: edits, to: textView)
+          applyVimExecution(execution, edits: edits, controller: controller, to: textView)
         } else {
           let currentMode = controller.engine.state.mode
           updateVimCursorStyle(for: currentMode, in: textView)
           publishVimMode(currentMode)
         }
         publishVimPrompt(controller.prompt)
+        publishVimInteraction(controller.interactionSnapshot)
+        publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
         updateVimMappingTimeout(
           awaitingMoreInput: inputResult.awaitingMoreInput,
           controller: controller,
@@ -1328,6 +1286,7 @@ struct CodeTextEditor: NSViewRepresentable {
       } catch {
         NSSound.beep()
         cancelVimComposition(in: textView, controller: controller)
+        publishVimError(error, controller: controller, textView: textView)
         return true
       }
     }
@@ -1368,6 +1327,8 @@ struct CodeTextEditor: NSViewRepresentable {
       updateVimCursorStyle(for: mode, in: textView)
       publishVimMode(mode)
       publishVimPrompt(controller.prompt)
+      publishVimInteraction(controller.interactionSnapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
     }
 
     private func applyVimHandlingResult(
@@ -1377,13 +1338,15 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       if let execution = result.execution {
         let edits = controller.engine.consumeCompletedEdits()
-        applyVimExecution(execution, edits: edits, to: textView)
+        applyVimExecution(execution, edits: edits, controller: controller, to: textView)
       } else {
         let mode = controller.engine.state.mode
         updateVimCursorStyle(for: mode, in: textView)
         publishVimMode(mode)
       }
       publishVimPrompt(controller.prompt)
+      publishVimInteraction(controller.interactionSnapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
     }
 
     private func shouldUseNativeTextInput(
@@ -1411,36 +1374,6 @@ struct CodeTextEditor: NSViewRepresentable {
       case .command, .registerName, .markName:
         return false
       }
-    }
-
-    private func vimInputPolicy(
-      from policy: EditorVimKeyboardPolicy
-    ) -> VimCommandKeyboardPolicy {
-      switch policy {
-      case .automatic: .automatic
-      case .logical: .logical
-      case .physicalUS: .physicalUS
-      case .languageMap: .languageMap
-      }
-    }
-
-    private func parsedVimLanguageMap(_ rawValue: String) -> [Character: Character] {
-      let components = rawValue.split { character in
-        character == "," || character == ";" || character.isWhitespace
-      }
-      var result: [Character: Character] = [:]
-      for component in components {
-        let value = String(component)
-        if let separator = value.firstIndex(where: { $0 == "=" || $0 == ":" }) {
-          let source = value[..<separator].first
-          let target = value[value.index(after: separator)...].first
-          if let source, let target { result[source] = target }
-        } else {
-          let characters = Array(value)
-          if characters.count == 2 { result[characters[0]] = characters[1] }
-        }
-      }
-      return result
     }
 
     private static func inputString(from value: Any) -> String? {
@@ -1482,13 +1415,16 @@ struct CodeTextEditor: NSViewRepresentable {
       guard awaitingMoreInput else { return }
 
       vimMappingTimeoutTask = Task { @MainActor [weak self, weak textView] in
-        try? await Task.sleep(nanoseconds: 800_000_000)
-        guard !Task.isCancelled, let self, let textView, textView.superview != nil else { return }
+        guard let self else { return }
+        let milliseconds = max(0, self.parent.profile.vim.mappingTimeoutMilliseconds)
+        try? await Task.sleep(for: .milliseconds(milliseconds))
+        guard !Task.isCancelled, let textView, textView.superview != nil else { return }
         do {
           let result = try controller.handle(event: .mappingTimeout)
           self.applyVimHandlingResult(result, controller: controller, to: textView)
         } catch {
           NSSound.beep()
+          self.publishVimError(error, controller: controller, textView: textView)
         }
         self.vimMappingTimeoutTask = nil
       }
@@ -1659,6 +1595,41 @@ struct CodeTextEditor: NSViewRepresentable {
       }
     }
 
+    private func publishVimInteraction(_ snapshot: VimInteractionSnapshot) {
+      guard lastPublishedVimInteraction != snapshot else { return }
+      lastPublishedVimInteraction = snapshot
+      if representableUpdateDepth > 0 {
+        deferredVimInteraction = snapshot
+        scheduleDeferredPublicationsIfNeeded()
+      } else {
+        parent.onVimInteractionChange(snapshot)
+      }
+    }
+
+    private func publishVimInputSource(_ identifier: String?) {
+      if hasPublishedVimInputSource, lastPublishedVimInputSource == identifier { return }
+      hasPublishedVimInputSource = true
+      lastPublishedVimInputSource = identifier
+      if representableUpdateDepth > 0 {
+        deferredVimInputSource = identifier
+        hasDeferredVimInputSource = true
+        scheduleDeferredPublicationsIfNeeded()
+      } else {
+        parent.onVimInputSourceChange(identifier)
+      }
+    }
+
+    private func publishVimError(
+      _ error: Error,
+      controller: VimKeymapController,
+      textView: NSTextView
+    ) {
+      var snapshot = controller.interactionSnapshot
+      snapshot.message = CalciteVimMessagePresenter.message(for: error)
+      publishVimInteraction(snapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
+    }
+
     private func updateVimCursorStyle(
       for mode: VimMode,
       in textView: NSTextView,
@@ -1705,6 +1676,7 @@ struct CodeTextEditor: NSViewRepresentable {
     private func scheduleDeferredPublicationsIfNeeded() {
       guard !publicationFlushScheduled,
         deferredSelection != nil || deferredVimMode != nil || hasDeferredVimPrompt
+          || deferredVimInteraction != nil || hasDeferredVimInputSource
       else { return }
       publicationFlushScheduled = true
       Task { @MainActor [weak self] in
@@ -1720,108 +1692,22 @@ struct CodeTextEditor: NSViewRepresentable {
         let mode = self.deferredVimMode
         let prompt = self.deferredVimPrompt
         let publishesPrompt = self.hasDeferredVimPrompt
+        let interaction = self.deferredVimInteraction
+        let inputSource = self.deferredVimInputSource
+        let publishesInputSource = self.hasDeferredVimInputSource
         self.deferredSelection = nil
         self.deferredVimMode = nil
         self.deferredVimPrompt = nil
         self.hasDeferredVimPrompt = false
+        self.deferredVimInteraction = nil
+        self.deferredVimInputSource = nil
+        self.hasDeferredVimInputSource = false
 
         if let selection { self.parent.onSelectionChange(selection) }
         if let mode { self.parent.onVimModeChange(mode) }
         if publishesPrompt { self.parent.onVimPromptChange(prompt) }
-      }
-    }
-
-    private func vimKeyStroke(for event: NSEvent) -> VimKeyStroke? {
-      let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-      var modifiers: VimKeyModifiers = []
-      if flags.contains(.shift) { modifiers.insert(.shift) }
-      if flags.contains(.control) { modifiers.insert(.control) }
-      if flags.contains(.option) { modifiers.insert(.option) }
-      if flags.contains(.command) { modifiers.insert(.command) }
-
-      let physicalKey = Self.vimPhysicalKey(for: event.keyCode)
-      let logicalText = event.characters
-      let ignoringModifiers = event.charactersIgnoringModifiers
-      if case .unknown = physicalKey,
-        logicalText?.isEmpty != false,
-        ignoringModifiers?.isEmpty != false
-      {
-        return nil
-      }
-      return VimKeyStroke(
-        physicalKey: physicalKey,
-        logicalText: logicalText,
-        textIgnoringModifiers: ignoringModifiers,
-        modifiers: modifiers,
-        isRepeat: event.isARepeat,
-        isFromInputMethod: false
-      )
-    }
-
-    private static func vimPhysicalKey(for keyCode: UInt16) -> VimPhysicalKey {
-      switch keyCode {
-      case 0: return .character(unshifted: "a", shifted: "A")
-      case 1: return .character(unshifted: "s", shifted: "S")
-      case 2: return .character(unshifted: "d", shifted: "D")
-      case 3: return .character(unshifted: "f", shifted: "F")
-      case 4: return .character(unshifted: "h", shifted: "H")
-      case 5: return .character(unshifted: "g", shifted: "G")
-      case 6: return .character(unshifted: "z", shifted: "Z")
-      case 7: return .character(unshifted: "x", shifted: "X")
-      case 8: return .character(unshifted: "c", shifted: "C")
-      case 9: return .character(unshifted: "v", shifted: "V")
-      case 11: return .character(unshifted: "b", shifted: "B")
-      case 12: return .character(unshifted: "q", shifted: "Q")
-      case 13: return .character(unshifted: "w", shifted: "W")
-      case 14: return .character(unshifted: "e", shifted: "E")
-      case 15: return .character(unshifted: "r", shifted: "R")
-      case 16: return .character(unshifted: "y", shifted: "Y")
-      case 17: return .character(unshifted: "t", shifted: "T")
-      case 18: return .character(unshifted: "1", shifted: "!")
-      case 19: return .character(unshifted: "2", shifted: "@")
-      case 20: return .character(unshifted: "3", shifted: "#")
-      case 21: return .character(unshifted: "4", shifted: "$")
-      case 22: return .character(unshifted: "6", shifted: "^")
-      case 23: return .character(unshifted: "5", shifted: "%")
-      case 24: return .character(unshifted: "=", shifted: "+")
-      case 25: return .character(unshifted: "9", shifted: "(")
-      case 26: return .character(unshifted: "7", shifted: "&")
-      case 27: return .character(unshifted: "-", shifted: "_")
-      case 28: return .character(unshifted: "8", shifted: "*")
-      case 29: return .character(unshifted: "0", shifted: ")")
-      case 30: return .character(unshifted: "]", shifted: "}")
-      case 31: return .character(unshifted: "o", shifted: "O")
-      case 32: return .character(unshifted: "u", shifted: "U")
-      case 33: return .character(unshifted: "[", shifted: "{")
-      case 34: return .character(unshifted: "i", shifted: "I")
-      case 35: return .character(unshifted: "p", shifted: "P")
-      case 36, 76: return .special(.returnKey)
-      case 37: return .character(unshifted: "l", shifted: "L")
-      case 38: return .character(unshifted: "j", shifted: "J")
-      case 39: return .character(unshifted: "'", shifted: "\"")
-      case 40: return .character(unshifted: "k", shifted: "K")
-      case 41: return .character(unshifted: ";", shifted: ":")
-      case 42: return .character(unshifted: "\\", shifted: "|")
-      case 43: return .character(unshifted: ",", shifted: "<")
-      case 44: return .character(unshifted: "/", shifted: "?")
-      case 45: return .character(unshifted: "n", shifted: "N")
-      case 46: return .character(unshifted: "m", shifted: "M")
-      case 47: return .character(unshifted: ".", shifted: ">")
-      case 48: return .special(.tab)
-      case 49: return .character(unshifted: " ")
-      case 50: return .character(unshifted: "`", shifted: "~")
-      case 51: return .special(.backspace)
-      case 53: return .special(.escape)
-      case 115: return .special(.home)
-      case 116: return .special(.pageUp)
-      case 117: return .special(.delete)
-      case 119: return .special(.end)
-      case 121: return .special(.pageDown)
-      case 123: return .special(.left)
-      case 124: return .special(.right)
-      case 125: return .special(.down)
-      case 126: return .special(.up)
-      default: return .unknown(Int(keyCode))
+        if let interaction { self.parent.onVimInteractionChange(interaction) }
+        if publishesInputSource { self.parent.onVimInputSourceChange(inputSource) }
       }
     }
 
@@ -1852,7 +1738,10 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       guard vimDocumentComposition == nil else { return }
       let currentRanges = textView.selectedRanges.map(\.rangeValue)
-      let expectedRanges = vimSelections(from: controller.engine.state)
+      let expectedRanges = CalciteVimSelectionPresenter.ranges(
+        for: controller.engine.state,
+        selectionSet: controller.engine.selectionSet
+      )
       let textChanged =
         synchronizedVimTextRevision != parent.textRevision
         || controller.engine.state.text != textView.string
@@ -1865,21 +1754,31 @@ struct CodeTextEditor: NSViewRepresentable {
     private func applyVimExecution(
       _ execution: VimExecutionResult,
       edits incrementalEdits: [(range: Range<Int>, replacement: String)] = [],
+      controller: VimKeymapController,
       to textView: NSTextView
     ) {
       let state = execution.state
       updateVimCursorStyle(for: state.mode, in: textView)
-      let selections = vimSelections(from: state)
-      let primarySelection = vimPrimarySelection(from: selections, state: state)
+      let selections = CalciteVimSelectionPresenter.ranges(
+        for: state,
+        selectionSet: controller.engine.selectionSet
+      )
+      let primarySelection = CalciteVimSelectionPresenter.primaryRange(
+        from: selections,
+        state: state,
+        selectionSet: controller.engine.selectionSet
+      )
       let selectionValues = selections.map { NSValue(range: $0) }
       if state.text != textView.string {
         var edits = incrementalEdits
         if !Self.edits(edits, transform: textView.string, into: state.text) {
           let fallback = Self.singleEdit(from: textView.string, to: state.text)
-          edits = [(
-            fallback.range.location..<NSMaxRange(fallback.range),
-            fallback.replacement
-          )]
+          edits = [
+            (
+              fallback.range.location..<NSMaxRange(fallback.range),
+              fallback.replacement
+            )
+          ]
         }
 
         isApplyingExternalUpdate = true
@@ -1956,26 +1855,6 @@ struct CodeTextEditor: NSViewRepresentable {
         )
       }
       return value == expected
-    }
-
-    private func vimSelections(from state: VimState) -> [NSRange] {
-      let length = (state.text as NSString).length
-      if let visual = state.selection {
-        let lower = min(max(visual.lowerBound, 0), length)
-        let upper = min(max(visual.upperBound, lower), length)
-        return [NSRange(location: lower, length: upper - lower)]
-      }
-      return [NSRange(location: min(max(state.cursor, 0), length), length: 0)]
-    }
-
-    private func vimPrimarySelection(from selections: [NSRange], state: VimState) -> NSRange {
-      guard let first = selections.first else {
-        return NSRange(location: max(0, state.cursor), length: 0)
-      }
-      guard selections.count > 1 else { return first }
-      let lower = selections.map(\.location).min() ?? first.location
-      let upper = selections.map(NSMaxRange).max() ?? NSMaxRange(first)
-      return NSRange(location: lower, length: max(0, upper - lower))
     }
 
     private static func applying(

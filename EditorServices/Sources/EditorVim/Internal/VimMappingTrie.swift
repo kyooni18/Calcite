@@ -2,13 +2,13 @@ import Foundation
 
 final class VimMappingTrie: @unchecked Sendable {
   final class Node {
-    var invocation: VimInvocation?
+    var mapping: VimResolvedMapping?
     var children: [VimInputToken: Node] = [:]
   }
 
   private(set) var root = Node()
 
-  func replace(with mappings: [(tokens: [VimInputToken], invocation: VimInvocation)]) {
+  func replace(with mappings: [(tokens: [VimInputToken], mapping: VimResolvedMapping)]) {
     let replacement = Node()
     for mapping in mappings where !mapping.tokens.isEmpty {
       var node = replacement
@@ -21,29 +21,29 @@ final class VimMappingTrie: @unchecked Sendable {
           node = child
         }
       }
-      node.invocation = mapping.invocation
+      node.mapping = mapping.mapping
     }
     root = replacement
   }
 
-  func match(_ tokens: [VimInputToken]) -> (exact: VimInvocation?, isPrefix: Bool) {
+  func match(_ tokens: [VimInputToken]) -> (exact: VimResolvedMapping?, isPrefix: Bool) {
     var node = root
     for token in tokens {
       guard let next = node.children[token] else { return (nil, false) }
       node = next
     }
-    return (node.invocation, !node.children.isEmpty)
+    return (node.mapping, !node.children.isEmpty)
   }
 
   func longestExactPrefix(
     in tokens: [VimInputToken]
-  ) -> (length: Int, invocation: VimInvocation)? {
+  ) -> (length: Int, mapping: VimResolvedMapping)? {
     var node = root
-    var best: (Int, VimInvocation)?
+    var best: (Int, VimResolvedMapping)?
     for (index, token) in tokens.enumerated() {
       guard let next = node.children[token] else { break }
       node = next
-      if let invocation = node.invocation { best = (index + 1, invocation) }
+      if let mapping = node.mapping { best = (index + 1, mapping) }
     }
     return best
   }

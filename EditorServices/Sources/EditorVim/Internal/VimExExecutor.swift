@@ -149,7 +149,15 @@ extension VimEngine {
       return [.custom(name == "make" ? "build" : name)]
     }
     if name == "noh" || name == "nohlsearch" { return [] }
-    return [.custom(command)]
+    publishMessage(
+      VimMessage(
+        text: "Not an editor command: \(command)",
+        code: "E492",
+        severity: .error,
+        lifetime: .timed(milliseconds: 3200)
+      )
+    )
+    return []
   }
 
   private func executeGroupedExHistory<T>(_ body: () throws -> T) throws -> T {
@@ -441,14 +449,34 @@ extension VimEngine {
         ignoreCase: searchIgnoreCase,
         smartCase: searchSmartCase
       )
-    else { return }
+    else {
+      publishMessage(
+        VimMessage(
+          text: "Invalid search pattern: \(query)",
+          code: "E54",
+          severity: .error,
+          lifetime: .timed(milliseconds: 3200)
+        )
+      )
+      return
+    }
 
     let length = state.text.utf16.count
     let matches = compiled.expression.matches(
       in: state.text,
       range: NSRange(location: 0, length: length)
     )
-    guard !matches.isEmpty else { return }
+    guard !matches.isEmpty else {
+      publishMessage(
+        VimMessage(
+          text: "Pattern not found: \(query)",
+          code: "E486",
+          severity: .error,
+          lifetime: .timed(milliseconds: 3200)
+        )
+      )
+      return
+    }
 
     let destination: Int?
     if forward {

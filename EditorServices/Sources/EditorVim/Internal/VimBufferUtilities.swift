@@ -17,18 +17,49 @@ extension VimEngine {
   func rememberVisualSelection() {
     guard state.mode == .visualCharacter || state.mode == .visualLine else { return }
     let anchor = visualAnchor ?? state.selection?.lowerBound ?? state.cursor
-    lastVisual = VimVisualSnapshot(anchor: anchor, caret: state.cursor, mode: state.mode)
+    lastVisual = VimVisualSnapshot(
+      anchor: anchor,
+      caret: state.cursor,
+      mode: state.mode,
+      shape: visualSelectionShape
+    )
+  }
+
+  func enterVisualBlock() {
+    if state.mode == .visualCharacter, visualSelectionShape == .block {
+      rememberVisualSelection()
+      state.mode = .normal
+      state.selection = nil
+      visualAnchor = nil
+      visualSelectionShape = .character
+      return
+    }
+    visualAnchor = state.cursor
+    visualSelectionShape = .block
+    state.mode = .visualCharacter
+    updateVisualSelection()
   }
 
   func updateVisualSelection() {
     guard state.mode == .visualCharacter || state.mode == .visualLine else { return }
     let anchor = visualAnchor ?? state.cursor
     visualAnchor = anchor
-    if state.mode == .visualCharacter {
+    if visualSelectionShape == .block {
+      let ranges = projectedVisualRanges()
+      guard let first = ranges.first else {
+        state.selection = VimSelection(state.cursor, state.cursor)
+        return
+      }
+      let lower = ranges.map(\.lowerBound).min() ?? first.lowerBound
+      let upper = ranges.map(\.upperBound).max() ?? first.upperBound
+      state.selection = VimSelection(lower, upper)
+    } else if state.mode == .visualCharacter {
+      visualSelectionShape = .character
       let lower = min(anchor, state.cursor)
       let upper = nextCharacterBoundary(from: max(anchor, state.cursor))
       state.selection = VimSelection(lower, max(lower, upper))
     } else {
+      visualSelectionShape = .line
       let anchorStart = lineStart(at: anchor)
       let caretStart = lineStart(at: state.cursor)
       let lower = min(anchorStart, caretStart)
@@ -54,6 +85,13 @@ extension VimEngine {
 
   func visualRange() -> Range<Int>? {
     guard state.mode == .visualCharacter || state.mode == .visualLine else { return nil }
+    if visualSelectionShape == .block {
+      let ranges = projectedVisualRanges()
+      guard let lower = ranges.map(\.lowerBound).min(),
+        let upper = ranges.map(\.upperBound).max()
+      else { return nil }
+      return lower..<max(lower, upper)
+    }
     let anchor = clamp(visualAnchor ?? state.selection?.lowerBound ?? state.cursor)
     if state.mode == .visualLine {
       let lower = lineStart(at: min(anchor, state.cursor))
@@ -63,6 +101,115 @@ extension VimEngine {
     let lower = min(anchor, state.cursor)
     let upper = nextCharacterBoundary(from: max(anchor, state.cursor))
     return lower..<max(lower, upper)
+  }
+
+  func projectedVisualRanges() -> [Range<Int>] {
+    guard let anchor = visualAnchor,
+      state.mode == .visualCharacter || state.mode == .visualLine
+    else { return [] }
+    if visualSelectionShape != .block {
+      return visualRange().map { [$0] } ?? []
+    }
+
+    let anchorStart = lineStart(at: anchor)
+    let caretStart = lineStart(at: state.cursor)
+    let top = min(anchorStart, caretStart)
+    let bottom = max(anchorStart, caretStart)
+    guard let columns = visualBlockColumnBounds() else { return [] }
+    let left = columns.lowerBound
+    let right = columns.upperBound
+
+    var ranges: [Range<Int>] = []
+    var line = top
+    while true {
+      let end = lineContentEnd(at: line)
+      let lower = blockBoundaryOffset(from: line, desiredColumn: left, contentEnd: end)
+      let upper = offsetAtOrAfterDisplayColumn(
+        from: line,
+        desiredColumn: right,
+        contentEnd: end
+      )
+      ranges.append(lower..<max(lower, upper))
+      if line == bottom { break }
+      let next = nextLineStart(line)
+      if next == line { break }
+      line = next
+    }
+    return ranges
+  }
+
+  func visualBlockColumnBounds() -> Range<Int>? {
+    guard let anchor = visualAnchor, visualSelectionShape == .block else { return nil }
+    let anchorStart = lineStart(at: anchor)
+    let caretStart = lineStart(at: state.cursor)
+    let anchorColumn = displayColumn(from: anchorStart, to: anchor)
+    let caretColumn = displayColumn(from: caretStart, to: state.cursor)
+    let anchorWidth = displayWidthOfCharacter(at: anchor, column: anchorColumn)
+    let caretWidth = displayWidthOfCharacter(at: state.cursor, column: caretColumn)
+    let left = min(anchorColumn, caretColumn)
+    let right = max(anchorColumn + anchorWidth, caretColumn + caretWidth)
+    return left..<max(left + 1, right)
+  }
+
+  func displayWidthOfCharacter(at offset: Int, column: Int) -> Int {
+    guard offset < lineContentEnd(at: offset), let character = character(at: offset) else {
+      return 1
+    }
+    return max(
+      1,
+      VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+    )
+  }
+
+  func blockBoundaryOffset(
+    from lineStart: Int,
+    desiredColumn: Int,
+    contentEnd: Int
+  ) -> Int {
+    let start = clamp(lineStart)
+    let end = clamp(contentEnd)
+    guard start < end else { return start }
+    var column = 0
+    var current = start
+    while current < end {
+      if column >= desiredColumn { return current }
+      guard let character = character(at: current) else { break }
+      let width = max(
+        1,
+        VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+      )
+      if column + width > desiredColumn { return current }
+      let next = nextCharacterBoundary(from: current)
+      guard next > current else { break }
+      current = next
+      column += width
+    }
+    return end
+  }
+
+  func offsetAtOrAfterDisplayColumn(
+    from lineStart: Int,
+    desiredColumn: Int,
+    contentEnd: Int
+  ) -> Int {
+    let start = clamp(lineStart)
+    let end = clamp(contentEnd)
+    guard start < end else { return start }
+    var column = 0
+    var current = start
+    while current < end {
+      guard let character = character(at: current) else { break }
+      let width = max(
+        1,
+        VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+      )
+      let next = nextCharacterBoundary(from: current)
+      if column + width >= desiredColumn { return max(current, next) }
+      guard next > current else { break }
+      current = next
+      column += width
+    }
+    return end
   }
 
   func verticalMove(_ delta: Int) {
