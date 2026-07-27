@@ -61,6 +61,8 @@ final class CodeEditorTextView: NSTextView {
   var languageID = ""
   var keyEventHandler: ((NSEvent, NSTextView) -> Bool)?
   var textInputHandler: ((Any, NSRange, NSTextView) -> Bool)?
+  var markedTextHandler: ((Any, NSRange, NSRange, NSTextView) -> Bool)?
+  var unmarkTextHandler: ((NSTextView) -> Bool)?
   var zoomHandler: ((CGFloat, NSTextView) -> Bool)?
   var goToDefinitionHandler: (() -> Void)?
   var findReferencesHandler: (() -> Void)?
@@ -107,6 +109,8 @@ final class CodeEditorTextView: NSTextView {
     }
   }
   private let customCursorView = EditorInsertionCaretView(frame: .zero)
+  private var virtualMarkedText: NSAttributedString?
+  private var isDiscardingMarkedText = false
   private enum InlineDiagnosticHitAction {
     case toggle(lineLocation: Int)
     case copy(message: String)
@@ -648,8 +652,75 @@ final class CodeEditorTextView: NSTextView {
     }
   }
 
+  override func setMarkedText(
+    _ string: Any,
+    selectedRange: NSRange,
+    replacementRange: NSRange
+  ) {
+    if markedTextHandler?(string, selectedRange, replacementRange, self) == true {
+      let attributed: NSAttributedString
+      if let value = string as? NSAttributedString {
+        attributed = value
+      } else if let value = string as? String {
+        attributed = NSAttributedString(string: value)
+      } else {
+        attributed = NSAttributedString(string: String(describing: string))
+      }
+      virtualMarkedText = attributed
+      refreshCustomInsertionPoint()
+      return
+    }
+    virtualMarkedText = nil
+    super.setMarkedText(
+      string,
+      selectedRange: selectedRange,
+      replacementRange: replacementRange
+    )
+    refreshCustomInsertionPoint()
+  }
+
+  override func unmarkText() {
+    if isDiscardingMarkedText {
+      super.unmarkText()
+      return
+    }
+    let consumed = unmarkTextHandler?(self) == true
+    virtualMarkedText = nil
+    refreshCustomInsertionPoint()
+    if consumed { return }
+    super.unmarkText()
+    refreshCustomInsertionPoint()
+  }
+
+  override func hasMarkedText() -> Bool {
+    virtualMarkedText != nil || super.hasMarkedText()
+  }
+
+  override func markedRange() -> NSRange {
+    if let virtualMarkedText {
+      return NSRange(location: selectedRange().location, length: virtualMarkedText.length)
+    }
+    return super.markedRange()
+  }
+
+  func discardMarkedTextState() {
+    virtualMarkedText = nil
+    isDiscardingMarkedText = true
+    defer {
+      isDiscardingMarkedText = false
+      refreshCustomInsertionPoint()
+    }
+    inputContext?.discardMarkedText()
+    if super.hasMarkedText() { super.unmarkText() }
+  }
+
   override func insertText(_ insertString: Any, replacementRange: NSRange) {
-    if textInputHandler?(insertString, replacementRange, self) == true { return }
+    if textInputHandler?(insertString, replacementRange, self) == true {
+      virtualMarkedText = nil
+      refreshCustomInsertionPoint()
+      return
+    }
+    virtualMarkedText = nil
     super.insertText(insertString, replacementRange: replacementRange)
     refreshCustomInsertionPoint()
   }

@@ -47,6 +47,24 @@ enum EditorCursorStyle: String, CaseIterable, Codable, Identifiable, Sendable {
 
 /// Vim modes can inherit the editor-wide cursor shape or opt into an explicit
 /// shape for that mode.
+enum EditorVimKeyboardPolicy: String, CaseIterable, Codable, Identifiable, Sendable {
+  case automatic
+  case logical
+  case physicalUS
+  case languageMap
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .automatic: "Automatic (Physical Commands)"
+    case .logical: "Active Keyboard Layout"
+    case .physicalUS: "Physical US-QWERTY"
+    case .languageMap: "Language Map"
+    }
+  }
+}
+
 enum EditorVimCursorStyle: String, CaseIterable, Codable, Identifiable, Sendable {
   case `default`
   case line
@@ -353,6 +371,8 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
   var startInInsertMode: Bool
   var leader: String
   var relativeLineNumbers: Bool
+  var keyboardPolicy: EditorVimKeyboardPolicy
+  var languageMap: String
   var normalCursorStyle: EditorVimCursorStyle
   var insertCursorStyle: EditorVimCursorStyle
   var replaceCursorStyle: EditorVimCursorStyle
@@ -363,6 +383,8 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     startInInsertMode: Bool,
     leader: String,
     relativeLineNumbers: Bool,
+    keyboardPolicy: EditorVimKeyboardPolicy = .automatic,
+    languageMap: String = "",
     normalCursorStyle: EditorVimCursorStyle = .default,
     insertCursorStyle: EditorVimCursorStyle = .default,
     replaceCursorStyle: EditorVimCursorStyle = .default,
@@ -372,6 +394,8 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     self.startInInsertMode = startInInsertMode
     self.leader = leader
     self.relativeLineNumbers = relativeLineNumbers
+    self.keyboardPolicy = keyboardPolicy
+    self.languageMap = languageMap
     self.normalCursorStyle = normalCursorStyle
     self.insertCursorStyle = insertCursorStyle
     self.replaceCursorStyle = replaceCursorStyle
@@ -380,6 +404,7 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
 
   private enum CodingKeys: String, CodingKey {
     case enabled, startInInsertMode, leader, relativeLineNumbers
+    case keyboardPolicy, languageMap
     case normalCursorStyle, insertCursorStyle, replaceCursorStyle, mappings
   }
 
@@ -389,6 +414,10 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     startInInsertMode = try container.decode(Bool.self, forKey: .startInInsertMode)
     leader = try container.decode(String.self, forKey: .leader)
     relativeLineNumbers = try container.decode(Bool.self, forKey: .relativeLineNumbers)
+    keyboardPolicy =
+      try container.decodeIfPresent(EditorVimKeyboardPolicy.self, forKey: .keyboardPolicy)
+      ?? .automatic
+    languageMap = try container.decodeIfPresent(String.self, forKey: .languageMap) ?? ""
     normalCursorStyle = try Self.decodeCursorStyle(
       from: container,
       key: .normalCursorStyle,

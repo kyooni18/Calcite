@@ -106,16 +106,16 @@ extension VimEngine {
       }
       let desired =
         preferredColumn
-        ?? characterDistance(from: lineStart(at: destination), to: destination)
+        ?? displayColumn(from: lineStart(at: destination), to: destination)
       for _ in 0..<repetitions {
         let currentStart = lineStart(at: destination)
         let targetStart =
           direction < 0 ? previousLineStart(currentStart) : nextLineStart(currentStart)
         guard targetStart != currentStart else { break }
-        destination = characterOffset(
+        destination = offset(
           from: targetStart,
-          count: desired,
-          limit: lineContentEnd(at: targetStart)
+          atDisplayColumn: desired,
+          contentEnd: lineContentEnd(at: targetStart)
         )
       }
       desiredColumn = desired

@@ -638,6 +638,25 @@ struct EditorProfileSettingsView: View {
         .disabled(editorMode != .calciteVim)
       Toggle("Relative Line Numbers", isOn: $profile.vim.relativeLineNumbers)
         .disabled(editorMode != .calciteVim)
+      Picker("Command Keyboard", selection: $profile.vim.keyboardPolicy) {
+        ForEach(EditorVimKeyboardPolicy.allCases) { policy in
+          Text(policy.title).tag(policy)
+        }
+      }
+      .disabled(editorMode != .calciteVim)
+      Text(
+        "Automatic keeps Normal-mode commands on their US-QWERTY key positions while Insert, Replace, search, command, and character arguments use the active input method."
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      if profile.vim.keyboardPolicy == .languageMap {
+        TextField("Language map, for example ㅗ=h,ㅓ=j,ㅏ=k,ㅣ=l", text: $profile.vim.languageMap)
+          .font(.system(.body, design: .monospaced))
+          .disabled(editorMode != .calciteVim)
+        Text("Use comma- or whitespace-separated source=Vim-key pairs.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
       Picker("Normal Cursor Shape", selection: $profile.vim.normalCursorStyle) {
         ForEach(EditorVimCursorStyle.allCases) { style in
           Text(style.title).tag(style)

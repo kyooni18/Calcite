@@ -1,85 +1,79 @@
-# VimEngine Stage 4 Improvements
+# VimEngine Stage 5 Improvements
 
-This revision implements the Stage 4 semantic-history, search/Ex, visual-mode, and Calcite-integration milestone while preserving the existing ordinary public `EditorVim` API. Swift API-digester validation reports no source-breaking differences and the generated symbol graph remains at exactly 223 public symbols.
+This revision adds a typed multilingual keyboard and input-method pipeline to the Stage 4 VimEngine while preserving the ordinary public `EditorVim` API. The new host-facing input types are exposed only through Calcite SPI, and Swift API-digester validation reports no source-breaking differences.
 
-## Branch-preserving undo history
+## Typed keyboard and text input
 
-Linear undo and redo stacks are now backed by an internal undo tree. Editing after undo creates an alternate branch instead of discarding later history. Undo walks to the parent transaction, redo follows the preferred child, and the newest visited or created branch becomes the preferred redo path. Retention is bounded by an estimated UTF-16 edit-storage budget.
+`VimKeymapController` no longer relies on notation strings as its runtime input representation. A typed event layer now distinguishes:
 
-Existing public `.undo` and `.redo` actions are unchanged. Compatibility accessors retained for the test target expose the current active path without changing the public module surface.
+- Physical key strokes and canonical US-QWERTY key positions
+- Logical text produced by the active keyboard layout
+- Committed text from an input method
+- Composition start, update, commit, and cancellation
+- Mapping timeouts
 
-## Semantic repeat and macro storage
+The existing `handle(token:)` API remains available as a compatibility boundary. Internally, mappings and pending commands use typed tokens, with Vim notation generated only when input reaches the existing parser.
 
-Dot-repeat and macro recording now use normalized internal commands instead of depending only on public action invocations. Paste commands capture the resolved typed register value, including linewise metadata, at recording time. Later register changes therefore do not alter dot-repeat or recorded macro playback.
+The controller also reports what kind of input the parser expects: a command, literal character, replacement character, register name, mark name, or prompt text. Calcite can therefore send command keys directly to Vim while leaving native text entry and IME candidate handling to AppKit.
 
-Macro append, counts, register prefixes, `@@`, recursion limits, mapped commands, insert sessions, and prompt/Ex actions continue through the common execution pipeline.
+## Multilingual command keyboard policies
 
-## Exact execution edit batches
+Calcite now exposes four command-key policies in the editor profile:
 
-Every engine-originated text mutation is retained as an ordered edit batch. History replay records exact inverse edits, and recursively expanded mappings are wrapped in one controller-level batch. The most recent top-level batch replaces the previous unconsumed batch, preventing edit accumulation in clients that do not use Calcite's incremental-edit SPI.
+- **Automatic:** Normal and Visual commands use canonical physical US-QWERTY positions; Insert, Replace, prompts, and literal arguments use the active input method.
+- **Active Keyboard Layout:** Commands use logical characters from the selected layout.
+- **Physical US-QWERTY:** Commands always use canonical physical key positions.
+- **Language Map:** Logical command characters are translated through a configurable `source=target` map.
 
-Calcite consumes the exact edits and applies them sequentially to `NSTextStorage`. It falls back to a broad diff only if the batch cannot reproduce the engine's final text. Presentation invalidation, geometry updates, selection publication, and text revisions are coalesced around the completed execution.
+The default Automatic policy allows commands such as `h`, `j`, `k`, `l`, `d`, and `x` to continue working while Korean, Japanese, Chinese, Dvorak, Colemak, AZERTY, or another layout is selected. Character arguments for `f`, `F`, `t`, `T`, and `r` remain native Unicode text rather than being converted back to physical command identities.
 
-## Vim regex compatibility layer
+## AppKit IME composition lifecycle
 
-Search, substitution, and Ex search addresses now share one Vim-pattern compiler. The Stage 4 layer supports:
+`CodeEditorTextView` and `CalciteEditorSurface` now coordinate marked text explicitly.
 
-- `\\<` and `\\>` word boundaries
-- `\\c` and `\\C` case overrides
-- `\\v`, `\\m`, `\\M`, and `\\V` magic modes
-- Vim grouping, alternation, optional, one-or-more, and counted repetition forms
-- Character classes, anchors, and escaped delimiters
-- Replacement `&`, `\\0` through `\\9`, `\\r`, `\\n`, slash, and backslash handling
-- Previous search and substitution pattern reuse
+During Insert and Replace composition:
 
-Invalid patterns now fail deterministically instead of silently changing to literal search.
+- Native marked text remains a visual pre-edit state.
+- Pre-edit mutations are not published to the Calcite document model.
+- VimEngine history, macros, registers, and repeat state are not updated until commit.
+- The original document and selection are restored before the final composed string is applied through VimEngine.
+- A completed composition is inserted as one payload and one undo transaction.
+- Replace mode replaces by grapheme count rather than UTF-16 code-unit count.
 
-## Expanded Ex parser and executor
+Search and command prompts, as well as Unicode character arguments, use a virtual composition path so marked text does not leak into the editor document. Escape explicitly discards the active AppKit marked-text session first; a subsequent Escape performs the ordinary Vim prompt or mode transition.
 
-The Ex parser now recognizes unescaped command chaining, search addresses, marks, relative addresses, `%`, `.`, `$`, comma and semicolon ranges, bang modifiers, counts, registers, escaped arguments, and repeat-substitution commands.
+Candidate navigation, conversion, deletion, and other composition keys remain under the native input method while marked text is active.
 
-Stage 4 execution includes:
+## Unicode display-column movement
 
-- Chained commands using `|`, grouped into one undo transaction
-- `:normal` and `:normal!` over ranges
-- `:global` and `:vglobal`
-- `:sort` with case-insensitive, numeric, and unique flags
-- Ranged `:delete`, `:yank`, and `:put` with registers and counts
-- `:copy`, `:move`, and ranged `:join`
-- `:substitute` with discrete per-match edits and common Vim flags
-- `:&` and `:~` repeat substitution
-- Search-pattern Ex addresses
-- Existing Calcite host-command fallback through `.custom(...)`
+Vertical movement now retains a deterministic display column rather than a Swift `Character` count. The fallback display-width model handles:
 
-Nested Ex execution participates in the owning top-level transaction instead of creating accidental nested undo nodes.
+- Configurable tab stops
+- Zero-width combining and formatting scalars
+- Double-width Hangul, CJK, full-width characters, and emoji
+- Extended grapheme cluster boundaries
 
-## Visual character and line behavior
+The core engine continues to use UTF-16 offsets at its host boundary but normalizes operations to valid grapheme boundaries. Calcite can still use AppKit geometry for proportional rendering; the new model provides stable platform-independent Vim movement and tests.
 
-Visual selections retain a private directional anchor/caret state while continuing to expose the existing sorted public `VimSelection`. Stage 4 adds endpoint swapping with `o`, directional `gv` restoration, visual replacement paste, visual-range Ex prompts, inclusive character selections, and additional visual delete/change/insert variants that can be represented by the existing API.
+## Stage 4 capabilities retained
 
-True visual-block mode remains intentionally deferred because the frozen public mode and single-range selection model cannot represent it accurately.
+The Stage 4 undo tree, semantic dot-repeat and macro storage, exact edit batches, Vim regex compatibility, expanded Ex execution, directional Visual behavior, viewport-aware movement, 500 differential fixtures, and 10,000-edit randomized line-index stress test remain intact.
 
-## Viewport-aware movement
+True Visual Block mode and public mapping-option types remain deferred because adding them to the frozen public mode and mapping models would be source-breaking. Recursive/non-recursive mapping metadata and `nowait` can be added later through a separately versioned API without weakening the Stage 5 input architecture.
 
-Calcite supplies the visible UTF-16 range through a Calcite-only SPI. Page and half-page motions use the actual visible line count instead of fixed 20/10-line constants. `H`, `M`, and `L` move relative to the visible top, middle, and bottom lines. Standalone `EditorVim` use retains conservative defaults when no viewport has been supplied.
+## Stage 5 coverage
 
-## Compatibility and stress coverage
+The focused multilingual suite covers:
 
-The deterministic system-Vim fixture corpus has grown from 50 to 500 cases. It covers the same command families across ten structurally equivalent text variants and is generated with Vim in a controlled non-interactive configuration.
-
-The incremental UTF-16 line-index test now performs 10,000 deterministic randomized replacements containing LF, CR, CRLF, Korean text, emoji, and mixed terminator boundaries. Every incremental state is compared with a fresh full rebuild.
-
-Additional Stage 4 tests cover:
-
-- Undo branching and preferred redo paths
-- Resolved-register dot-repeat and macro playback
-- Vim regex modes and boundaries
-- Discrete substitution edit batches
-- Chained Ex history grouping
-- Global/vglobal, ranged normal, sort, and search addresses
-- Visual endpoint swapping, replacement paste, and visual Ex ranges
-- Mapping-wide bounded exact edit batches
-- Viewport-relative movement and page counts
+- Physical commands with Korean logical key output
+- Logical-layout command policy
+- User language-map translation
+- Physical multi-key mappings under non-Latin layouts
+- Korean composition for Insert and Replace modes
+- Unicode `f` and `r` arguments
+- Two-step Escape behavior during prompt composition
+- One-transaction composed insertion and undo
+- CJK display columns and tab-stop preservation
 
 ## Verification
 
@@ -95,13 +89,13 @@ swift-format lint --recursive --strict Sources/EditorVim Tests/EditorVimTests
 
 Final validation in the supplied Linux environment:
 
-- 87 package tests passed.
+- 98 package tests passed with no failures.
 - All 500 committed Vim 9.1 differential fixtures passed.
 - The 10,000-edit randomized line-index comparison passed.
 - `swift build --target EditorVim` passed.
-- Strict `swift-format` lint passed.
-- `CalciteEditorSurface.swift` passed Swift parser validation.
-- Swift API digester reported no source-breaking changes.
-- The generated `EditorVim` symbol graph contains exactly 223 public symbols.
+- Strict `swift-format` lint passed for the complete VimEngine source and test trees.
+- The modified Calcite AppKit and settings sources passed Swift parser validation.
+- Swift API digester reported no ordinary public API changes.
+- The generated ordinary `EditorVim` API remains at the Stage 4 baseline.
 
-Full AppKit type-checking, IME automation, and Xcode UI tests require macOS with Xcode and are not executable in the supplied Linux environment. The AppKit integration has therefore been parser-validated here and should receive a clean macOS Xcode build before release.
+Full AppKit type-checking, installed-input-source automation, and Xcode UI tests require macOS with Xcode and cannot run in the supplied Linux environment. The Calcite integration should receive a clean macOS Xcode build and manual Korean, Japanese, Simplified Chinese, Traditional Chinese, and alternate-Latin-layout smoke test before release.

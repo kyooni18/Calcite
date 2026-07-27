@@ -67,14 +67,14 @@ extension VimEngine {
 
   func verticalMove(_ delta: Int) {
     let currentStart = lineStart(at: state.cursor)
-    let desired = preferredColumn ?? characterDistance(from: currentStart, to: state.cursor)
+    let desired = preferredColumn ?? displayColumn(from: currentStart, to: state.cursor)
     preferredColumn = desired
     let targetStart = delta < 0 ? previousLineStart(currentStart) : nextLineStart(currentStart)
     guard targetStart != currentStart else { return }
-    state.cursor = characterOffset(
+    state.cursor = offset(
       from: targetStart,
-      count: desired,
-      limit: normalLineEnd(at: targetStart)
+      atDisplayColumn: desired,
+      contentEnd: lineContentEnd(at: targetStart)
     )
   }
 

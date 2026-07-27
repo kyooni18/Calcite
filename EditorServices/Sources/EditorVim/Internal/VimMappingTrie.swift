@@ -3,12 +3,12 @@ import Foundation
 final class VimMappingTrie: @unchecked Sendable {
   final class Node {
     var invocation: VimInvocation?
-    var children: [String: Node] = [:]
+    var children: [VimInputToken: Node] = [:]
   }
 
   private(set) var root = Node()
 
-  func replace(with mappings: [(tokens: [String], invocation: VimInvocation)]) {
+  func replace(with mappings: [(tokens: [VimInputToken], invocation: VimInvocation)]) {
     let replacement = Node()
     for mapping in mappings where !mapping.tokens.isEmpty {
       var node = replacement
@@ -26,7 +26,7 @@ final class VimMappingTrie: @unchecked Sendable {
     root = replacement
   }
 
-  func match(_ tokens: [String]) -> (exact: VimInvocation?, isPrefix: Bool) {
+  func match(_ tokens: [VimInputToken]) -> (exact: VimInvocation?, isPrefix: Bool) {
     var node = root
     for token in tokens {
       guard let next = node.children[token] else { return (nil, false) }
@@ -35,7 +35,9 @@ final class VimMappingTrie: @unchecked Sendable {
     return (node.invocation, !node.children.isEmpty)
   }
 
-  func longestExactPrefix(in tokens: [String]) -> (length: Int, invocation: VimInvocation)? {
+  func longestExactPrefix(
+    in tokens: [VimInputToken]
+  ) -> (length: Int, invocation: VimInvocation)? {
     var node = root
     var best: (Int, VimInvocation)?
     for (index, token) in tokens.enumerated() {
