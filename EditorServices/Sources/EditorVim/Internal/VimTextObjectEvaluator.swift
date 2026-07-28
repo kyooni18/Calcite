@@ -1,6 +1,22 @@
 import Foundation
 
 extension VimEngine {
+  func selectVisualTextObject(_ object: VimTextObject, inner: Bool, count: Int) {
+    let wasReversed = visualAnchor.map { state.cursor < $0 } ?? false
+    let range = textObjectRange(object, inner: inner, count: count)
+    guard !range.isEmpty else { return }
+    visualSelectionShape = .character
+    state.mode = .visualCharacter
+    if wasReversed {
+      visualAnchor = previousCharacterBoundary(from: range.upperBound)
+      state.cursor = range.lowerBound
+    } else {
+      visualAnchor = range.lowerBound
+      state.cursor = previousCharacterBoundary(from: range.upperBound)
+    }
+    updateVisualSelection()
+  }
+
   func textObjectRange(_ object: VimTextObject, inner: Bool, count: Int) -> Range<Int> {
     var range: Range<Int>
     switch object {
@@ -15,15 +31,15 @@ extension VimEngine {
     case .quotes(let quote):
       range = quoteRange(quote, inner: inner)
     case .parentheses:
-      range = enclosingRange(open: "(", close: ")", inner: inner)
+      return enclosingRange(open: "(", close: ")", inner: inner, level: count)
     case .brackets:
-      range = enclosingRange(open: "[", close: "]", inner: inner)
+      return enclosingRange(open: "[", close: "]", inner: inner, level: count)
     case .braces:
-      range = enclosingRange(open: "{", close: "}", inner: inner)
+      return enclosingRange(open: "{", close: "}", inner: inner, level: count)
     case .angles:
-      range = enclosingRange(open: "<", close: ">", inner: inner)
+      return enclosingRange(open: "<", close: ">", inner: inner, level: count)
     case .tag:
-      range = tagRange(inner: inner)
+      return tagRange(inner: inner, level: count)
     }
 
     guard count > 1, !range.isEmpty else { return range }
@@ -70,7 +86,23 @@ extension VimEngine {
       upper = nextCharacterBoundary(from: upper)
     }
 
-    guard !inner, classification != .whitespace else { return lower..<upper }
+    if inner { return lower..<upper }
+
+    if classification == .whitespace {
+      guard upper < contentEnd,
+        let followingClass = wordClass(at: upper, whole: whole),
+        followingClass != .whitespace
+      else {
+        return cursor..<cursor
+      }
+      var followingUpper = nextCharacterBoundary(from: upper)
+      while followingUpper < contentEnd,
+        wordClass(at: followingUpper, whole: whole) == followingClass
+      {
+        followingUpper = nextCharacterBoundary(from: followingUpper)
+      }
+      return lower..<followingUpper
+    }
 
     var trailing = upper
     while trailing < contentEnd, wordClass(at: trailing, whole: whole) == .whitespace {
@@ -196,7 +228,12 @@ extension VimEngine {
     return state.cursor..<state.cursor
   }
 
-  func enclosingRange(open: Character, close: Character, inner: Bool) -> Range<Int> {
+  func enclosingRange(
+    open: Character,
+    close: Character,
+    inner: Bool,
+    level: Int = 1
+  ) -> Range<Int> {
     let ns = state.text as NSString
     guard ns.length > 0 else { return 0..<0 }
     var stack: [Int] = []
@@ -204,17 +241,21 @@ extension VimEngine {
     var index = 0
     let cursor = min(state.cursor, ns.length - 1)
 
-    while index <= cursor, index < ns.length {
+    let cursorIsClosingDelimiter = character(at: cursor) == close
+    while index < ns.length, index < cursor || (index == cursor && !cursorIsClosingDelimiter) {
       let current = character(at: index)
       if current == open {
         stack.append(index)
       } else if current == close, !stack.isEmpty {
         stack.removeLast()
       }
-      index = nextCharacterBoundary(from: index)
-      if index == 0 { break }
+      let next = nextCharacterBoundary(from: index)
+      guard next > index else { break }
+      index = next
     }
-    containingOpen = stack.last
+    let requestedLevel = max(1, level)
+    guard stack.count >= requestedLevel else { return state.cursor..<state.cursor }
+    containingOpen = stack[stack.count - requestedLevel]
     guard let left = containingOpen else { return state.cursor..<state.cursor }
 
     var depth = 0
@@ -240,7 +281,7 @@ extension VimEngine {
     return lower..<max(lower, upper)
   }
 
-  func tagRange(inner: Bool) -> Range<Int> {
+  func tagRange(inner: Bool, level: Int = 1) -> Range<Int> {
     let pattern = #"<\s*(/?)\s*([A-Za-z][A-Za-z0-9:_-]*)\b[^>]*?>"#
     guard let regex = try? NSRegularExpression(pattern: pattern) else {
       return state.cursor..<state.cursor
@@ -265,11 +306,18 @@ extension VimEngine {
     }
 
     let cursor = state.cursor
-    let containing =
+    let containingCandidates =
       candidates
       .filter { $0.open.location <= cursor && cursor <= NSMaxRange($0.close) }
-      .min { (NSMaxRange($0.close) - $0.open.location) < (NSMaxRange($1.close) - $1.open.location) }
-    guard let containing else { return cursor..<cursor }
+      .sorted {
+        (NSMaxRange($0.close) - $0.open.location)
+          < (NSMaxRange($1.close) - $1.open.location)
+      }
+    let requestedLevel = max(1, level)
+    guard containingCandidates.indices.contains(requestedLevel - 1) else {
+      return cursor..<cursor
+    }
+    let containing = containingCandidates[requestedLevel - 1]
     let lower = inner ? NSMaxRange(containing.open) : containing.open.location
     let upper = inner ? containing.close.location : NSMaxRange(containing.close)
     return normalized(lower..<upper)

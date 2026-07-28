@@ -900,7 +900,10 @@ private struct ThemeEditorPreview: View {
         hasCompletions: false,
         vimHistory: VimHistorySnapshot(),
         documentURL: nil,
+        documentID: nil,
         editorSessionID: nil,
+        tabPageID: nil,
+        sharedVimController: nil,
         onWillEdit: {},
         onEdit: { _, _, resultingText, selectionAfter in
           text = resultingText

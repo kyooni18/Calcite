@@ -82,16 +82,36 @@ struct CalciteEditorView: View {
       profile.vim.enabled = false
     }
     profile.vim.ensureNavigationMappings()
+    let vimController: VimKeymapController?
+    if editorInterface.usesCalciteVim {
+      vimController = windowSession.vimSessionCoordinator.controller(
+        for: VimWindowID(editorSession.id),
+        displaying: VimBufferID(tab.id),
+        text: tab.text,
+        cursor: editorSession.selectedRange.location,
+        name: tab.url.path,
+        leader: profile.vim.normalizedLeader,
+        localLeader: profile.vim.normalizedLeader,
+        tabWidth: profile.behavior.tabWidth,
+        history: tab.vimHistory
+      )
+    } else {
+      vimController = nil
+    }
     return CalciteEditorSurface(
       tab: tab,
+      editorSession: editorSession,
+      onActivate: activate,
       liveMarkdownStyling: windowSession.usesLiveMarkdownEditor,
       showsMarkdownSyntax: windowSession.showsMarkdownSyntax,
       wrapsMarkdownLines: windowSession.markdownWrapsLines,
       profile: profile,
       editorMode: editorInterface,
+      vimController: vimController,
+      onVimHistoryChange: windowSession.persistVimHistory,
       onVimHostInvocation: { invocation in
         activate()
-        return backend.handleVimHostInvocation(invocation)
+        return windowSession.handleVimHostInvocation(invocation)
       },
       onGoToDefinition: {
         activate()

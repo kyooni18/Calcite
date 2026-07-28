@@ -92,8 +92,7 @@ public final class VimKeymapController: @unchecked Sendable {
   @_spi(Calcite)
   public func restoreHistory(_ snapshot: VimHistorySnapshot) {
     lock.withLock {
-      commandHistory = Array(snapshot.commands.suffix(200))
-      searchHistory = Array(snapshot.searches.suffix(200))
+      historyStorage.merge(snapshot)
       historyIndex = nil
       historySearchPrefix = nil
     }
@@ -107,8 +106,15 @@ public final class VimKeymapController: @unchecked Sendable {
   private var promptKind: PromptKind?
   private var promptBuffer: [Character] = []
   private var promptCursor = 0
-  private var commandHistory: [String] = []
-  private var searchHistory: [String] = []
+  private let historyStorage: VimCommandLineHistoryStorage
+  private var commandHistory: [String] {
+    get { historyStorage.commands }
+    set { historyStorage.commands = newValue }
+  }
+  private var searchHistory: [String] {
+    get { historyStorage.searches }
+    set { historyStorage.searches = newValue }
+  }
   private var historyIndex: Int?
   private var historySearchPrefix: String?
   private var compositionIsActive = false
@@ -124,11 +130,24 @@ public final class VimKeymapController: @unchecked Sendable {
   private var mappingDepth = 0
   private let mappingRecursionLimit = 100
 
-  public init(
+  public convenience init(
     engine: VimEngine = VimEngine(),
     mappings: [VimKeyMapping] = []
   ) {
+    self.init(
+      engine: engine,
+      mappings: mappings,
+      historyStorage: engine.globalStateStorage.history
+    )
+  }
+
+  init(
+    engine: VimEngine,
+    mappings: [VimKeyMapping] = [],
+    historyStorage: VimCommandLineHistoryStorage
+  ) {
     self.engine = engine
+    self.historyStorage = historyStorage
     setMappings(mappings)
   }
 
@@ -389,11 +408,11 @@ public final class VimKeymapController: @unchecked Sendable {
       beginPrompt(.command, prefix: engine.prepareVisualExRange() ?? ":")
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
-    if token.text == "/" {
+    if token.text == "/", commandParser.isAtCommandBoundary {
       beginPrompt(.search(forward: true), prefix: "/")
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
-    if token.text == "?" {
+    if token.text == "?", commandParser.isAtCommandBoundary {
       beginPrompt(.search(forward: false), prefix: "?")
       return VimKeyHandlingResult(consumed: true, awaitingMoreInput: true)
     }
@@ -772,15 +791,7 @@ public final class VimKeymapController: @unchecked Sendable {
     if promptKind != nil { return .promptText }
     let mode = engine.state.mode
     if mode == .insert || mode == .replace { return .literalCharacter }
-    if commandParser.pendingFind != nil { return .literalCharacter }
-    if commandParser.pendingReplace { return .replacementCharacter }
-    if commandParser.pendingRegister || commandParser.pendingMacro
-      || commandParser.pendingMacroStart
-    {
-      return .registerName
-    }
-    if commandParser.pendingMark || commandParser.pendingJump != nil { return .markName }
-    return .command
+    return commandParser.expectedInput
   }
 
   private func token(for stroke: VimKeyStroke) -> VimInputToken? {
@@ -888,7 +899,7 @@ public final class VimKeymapController: @unchecked Sendable {
     case .visualCharacter, .visualLine: return .visual
     case .commandLine, .search: return .commandLine
     case .normal:
-      return commandParser.pendingOperator == nil ? .normal : .operatorPending
+      return commandParser.isOperatorPending ? .operatorPending : .normal
     }
   }
 
@@ -910,22 +921,7 @@ public final class VimKeymapController: @unchecked Sendable {
       : activeMappingTrieUnlocked(domain: pendingInputDomain ?? .command)
         .match(pendingTokens)
     let registerName = displayName(for: commandParser.selectedRegister)
-    let prefix: String?
-    if commandParser.pendingG || commandParser.pendingOperatorG {
-      prefix = "g"
-    } else if commandParser.pendingTextObjectInner == true {
-      prefix = "i"
-    } else if commandParser.pendingTextObjectInner == false {
-      prefix = "a"
-    } else if commandParser.pendingMacro || commandParser.pendingMacroStart {
-      prefix = "@"
-    } else if commandParser.pendingMark {
-      prefix = "m"
-    } else if let linewise = commandParser.pendingJump {
-      prefix = linewise ? "'" : "`"
-    } else {
-      prefix = nil
-    }
+    let prefix = commandParser.displayPrefix
 
     let pending = VimPendingCommandSnapshot(
       notation: storedPendingNotation,

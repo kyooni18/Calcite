@@ -7,6 +7,7 @@ nonisolated enum MainSectionKind: String, CaseIterable, Codable, Equatable, Iden
   case editor
   case panel
   case sidebar
+  case symbols
   case settings
   case themeBuilder
   case terminal
@@ -34,12 +35,17 @@ nonisolated enum MainSectionKind: String, CaseIterable, Codable, Equatable, Iden
     Self.bottomPanelKinds.contains(self)
   }
 
+  var isEditorHost: Bool {
+    self == .workspace || self == .editor
+  }
+
   var title: String {
     switch self {
     case .workspace: "Workspace"
     case .editor: "Editor"
     case .panel: "Panel"
     case .sidebar: "Sidebar"
+    case .symbols: "Symbols"
     case .settings: "Settings"
     case .themeBuilder: "Theme Builder"
     case .terminal: "Terminal"
@@ -56,6 +62,7 @@ nonisolated enum MainSectionKind: String, CaseIterable, Codable, Equatable, Iden
     case .editor: "doc.text"
     case .panel: "rectangle.bottomhalf.inset.filled"
     case .sidebar: "sidebar.left"
+    case .symbols: "list.bullet.indent"
     case .settings: "gearshape"
     case .themeBuilder: "paintpalette"
     case .terminal: "terminal"
@@ -68,7 +75,7 @@ nonisolated enum MainSectionKind: String, CaseIterable, Codable, Equatable, Iden
 
   var minimumWidth: Double {
     switch self {
-    case .sidebar: 160
+    case .sidebar, .symbols: 160
     case .settings, .themeBuilder: 300
     case .terminal, .problems, .buildOutput, .debug, .panel: 220
     case .workspace, .editor: 280
@@ -78,7 +85,7 @@ nonisolated enum MainSectionKind: String, CaseIterable, Codable, Equatable, Iden
 
   var minimumHeight: Double {
     switch self {
-    case .sidebar: 180
+    case .sidebar, .symbols: 180
     case .settings, .themeBuilder: 240
     case .terminal, .problems, .buildOutput, .debug, .panel: 96
     case .workspace, .editor: 180
@@ -122,7 +129,7 @@ nonisolated enum MainSectionSplitAxis: String, Codable, Equatable, Sendable {
   case vertical
 }
 
-nonisolated enum MainSectionDirection: Sendable {
+nonisolated enum MainSectionDirection: Equatable, Sendable {
   case left, right, up, down
 }
 
@@ -403,6 +410,22 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
     }
   }
 
+  /// Visible section leaves that can host a Vim editor window.
+  ///
+  /// A section remains a Vim window even when one of its utility tabs is selected. Vim window
+  /// navigation selects the section's editor-host tab before transferring focus.
+  var visibleVimEditorSectionIDs: [UUID] {
+    switch type {
+    case .section:
+      guard isSectionVisible,
+        tabs.contains(where: { $0.isVisible && $0.kind.isEditorHost })
+      else { return [] }
+      return [id]
+    case .split:
+      return children.flatMap(\.visibleVimEditorSectionIDs)
+    }
+  }
+
   var fastPanelSectionIDs: [UUID] {
     switch type {
     case .section:
@@ -482,6 +505,52 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
     }
   }
 
+  func vimEditorTabID(in sectionID: UUID) -> UUID? {
+    guard let section = sectionNode(id: sectionID), section.isSectionVisible else { return nil }
+    return section.tabs.first { $0.isVisible && $0.kind.isEditorHost }?.id
+  }
+
+  /// Returns the editor section nearest to `sectionID` in the requested physical direction.
+  /// The recursive Section Layout tree is the sole topology source; no parallel Vim split tree is
+  /// maintained.
+  func neighboringVimEditorSectionID(
+    from sectionID: UUID,
+    direction: MainSectionDirection
+  ) -> UUID? {
+    guard let path = sectionPath(to: sectionID), !path.isEmpty else { return nil }
+    let requiredAxis: MainSectionSplitAxis =
+      switch direction {
+      case .left, .right: .horizontal
+      case .up, .down: .vertical
+      }
+    let movesForward = direction == .right || direction == .down
+
+    var ancestorPath = path
+    while let childIndex = ancestorPath.popLast() {
+      guard let ancestor = node(at: ancestorPath),
+        ancestor.type == .split,
+        ancestor.splitAxis == requiredAxis
+      else { continue }
+
+      let siblingIndices: [Int]
+      if movesForward {
+        siblingIndices = Array((childIndex + 1)..<ancestor.children.count)
+      } else if childIndex > 0 {
+        siblingIndices = Array(stride(from: childIndex - 1, through: 0, by: -1))
+      } else {
+        siblingIndices = []
+      }
+
+      for siblingIndex in siblingIndices {
+        let candidates = ancestor.children[siblingIndex].visibleVimEditorSectionIDs
+        if let candidate = movesForward ? candidates.first : candidates.last {
+          return candidate
+        }
+      }
+    }
+    return nil
+  }
+
   func firstSectionID(preferredKinds: [MainSectionKind] = []) -> UUID? {
     switch type {
     case .section:
@@ -495,6 +564,26 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
       }
       return preferredKinds.isEmpty ? nil : firstSectionID()
     }
+  }
+
+  private func sectionPath(to sectionID: UUID) -> [Int]? {
+    switch type {
+    case .section:
+      return id == sectionID ? [] : nil
+    case .split:
+      for index in children.indices {
+        if let childPath = children[index].sectionPath(to: sectionID) {
+          return [index] + childPath
+        }
+      }
+      return nil
+    }
+  }
+
+  private func node(at path: [Int]) -> MainSectionLayoutNode? {
+    guard let first = path.first else { return self }
+    guard type == .split, children.indices.contains(first) else { return nil }
+    return children[first].node(at: Array(path.dropFirst()))
   }
 
   mutating func selectTab(sectionID: UUID, tabID: UUID) -> Bool {
@@ -594,20 +683,14 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
     switch type {
     case .section:
       guard self.id == id else { return false }
+      // Keep the new divider inside the target section. Inserting it into a matching ancestor
+      // split makes AppKit redistribute every sibling in that split, including unrelated panes.
       let original = self
       let ordered = placement == .before ? [newSection, original] : [original, newSection]
       self = .split(axis, children: ordered)
       return true
 
     case .split:
-      guard let splitAxis else { return false }
-      if splitAxis == axis,
-        let directIndex = children.firstIndex(where: { $0.type == .section && $0.id == id })
-      {
-        let insertionIndex = placement == .before ? directIndex : directIndex + 1
-        children.insert(newSection, at: insertionIndex)
-        return true
-      }
       for index in children.indices {
         if children[index].splitSection(
           id: id,
@@ -1040,6 +1123,47 @@ final class MainSectionalLayoutController: ObservableObject {
     return sectionID
   }
 
+  /// Activates a Vim-capable section and selects its editor-host tab.
+  @discardableResult
+  func activateVimEditorSection(_ sectionID: UUID) -> UUID? {
+    guard let tabID = root.vimEditorTabID(in: sectionID) else { return nil }
+    selectTab(sectionID: sectionID, tabID: tabID)
+    activeSectionID = sectionID
+    return tabID
+  }
+
+  /// Cycles only through sections that contain a visible editor host. Utility-only sections do
+  /// not participate in Vim's `<C-W>w` / `<C-W>W` window order.
+  @discardableResult
+  func navigateVimEditorSection(forward: Bool) -> UUID? {
+    let sectionIDs = root.visibleVimEditorSectionIDs
+    guard !sectionIDs.isEmpty else { return nil }
+    let currentIndex =
+      activeSectionID.flatMap { sectionIDs.firstIndex(of: $0) }
+      ?? (forward ? -1 : 0)
+    let nextIndex =
+      forward
+      ? (currentIndex + 1) % sectionIDs.count
+      : (currentIndex - 1 + sectionIDs.count) % sectionIDs.count
+    let sectionID = sectionIDs[nextIndex]
+    _ = activateVimEditorSection(sectionID)
+    return sectionID
+  }
+
+  /// Navigates the persisted Section Layout split tree instead of maintaining a second Vim
+  /// topology model.
+  @discardableResult
+  func navigateVimEditorSection(direction: MainSectionDirection) -> UUID? {
+    guard let activeSectionID,
+      let sectionID = root.neighboringVimEditorSectionID(
+        from: activeSectionID,
+        direction: direction
+      )
+    else { return nil }
+    _ = activateVimEditorSection(sectionID)
+    return sectionID
+  }
+
   func selectTab(sectionID: UUID, tabID: UUID) {
     var updated = root
     guard updated.selectTab(sectionID: sectionID, tabID: tabID) else { return }
@@ -1090,6 +1214,36 @@ final class MainSectionalLayoutController: ObservableObject {
     mutate {
       $0.splitSection(id: id, axis: axis, newKind: newKind, placement: placement)
     }
+  }
+
+  /// Creates a new editor section through Calcite's persisted Section Layout and returns both
+  /// identities needed to bind a Vim editor window immediately.
+  @discardableResult
+  func splitVimEditorSection(
+    id sectionID: UUID,
+    axis: MainSectionSplitAxis,
+    placement: MainSectionPlacement = .after
+  ) -> (sectionID: UUID, editorTabID: UUID)? {
+    guard root.vimEditorTabID(in: sectionID) != nil else { return nil }
+    let newSectionID = UUID()
+    let editorTab = MainSectionTab(kind: .editor)
+    let newSection = MainSectionLayoutNode.section(
+      tabs: [editorTab],
+      selectedTabID: editorTab.id,
+      id: newSectionID
+    )
+    var updated = root
+    guard
+      updated.splitSection(
+        id: sectionID,
+        axis: axis,
+        newSection: newSection,
+        placement: placement
+      )
+    else { return nil }
+    commit(updated.normalized())
+    activeSectionID = newSectionID
+    return (newSectionID, editorTab.id)
   }
 
   func splitSection(
@@ -1327,7 +1481,7 @@ final class MainSectionalLayoutController: ObservableObject {
       equivalentKinds = [.panel, .terminal]
     case .terminal:
       equivalentKinds = [.terminal, .panel]
-    case .sidebar, .settings, .themeBuilder, .problems, .buildOutput, .debug, .empty:
+    case .sidebar, .symbols, .settings, .themeBuilder, .problems, .buildOutput, .debug, .empty:
       equivalentKinds = [kind]
     }
 

@@ -49,32 +49,79 @@ extension VimEngine {
     }
     if name == "wa" || name == "wall" { return [.custom("save-all")] }
 
-    if name == "bn" || VimExParser.matches(name, command: "bnext", minimum: 2)
-      || VimExParser.matches(name, command: "tabnext", minimum: 4)
-    {
-      return [.nextTab]
+    if name == "bn" || VimExParser.matches(name, command: "bnext", minimum: 2) {
+      return [.custom("vim-buffer-next")]
     }
-    if name == "bp" || VimExParser.matches(name, command: "bprevious", minimum: 2)
-      || VimExParser.matches(name, command: "tabprevious", minimum: 4)
-    {
-      return [.previousTab]
+    if name == "bp" || VimExParser.matches(name, command: "bprevious", minimum: 2) {
+      return [.custom("vim-buffer-previous")]
     }
+    if VimExParser.matches(name, command: "bfirst", minimum: 2) {
+      return [.custom("vim-buffer-first")]
+    }
+    if VimExParser.matches(name, command: "blast", minimum: 2) {
+      return [.custom("vim-buffer-last")]
+    }
+    if VimExParser.matches(name, command: "tabnext", minimum: 4) { return [.nextTab] }
+    if VimExParser.matches(name, command: "tabprevious", minimum: 4) { return [.previousTab] }
 
     if VimExParser.matches(name, command: "edit") {
       return arguments.isEmpty
         ? [.custom("reload-file")] : [.openFile(unescapeExArgument(arguments))]
     }
+    if name == "ls" || VimExParser.matches(name, command: "buffers", minimum: 3)
+      || VimExParser.matches(name, command: "files", minimum: 2)
+    {
+      return [.custom("vim-buffer-list")]
+    }
+    if VimExParser.matches(name, command: "badd", minimum: 2) {
+      guard !arguments.isEmpty else { return [] }
+      return [.custom("vim-buffer-add:\(unescapeExArgument(arguments))")]
+    }
     if VimExParser.matches(name, command: "buffer") {
+      if arguments.isEmpty { return [.custom("vim-buffer-current")] }
       if let number = Int(arguments) { return [.switchBuffer(number)] }
+      return [.custom("vim-buffer-switch:\(arguments)")]
+    }
+    if VimExParser.matches(name, command: "bdelete", minimum: 2) {
+      return [.custom("vim-buffer-delete:\(parsed.bang ? "!" : "")\(arguments)")]
+    }
+    if VimExParser.matches(name, command: "bunload", minimum: 3) {
+      return [.custom("vim-buffer-unload:\(parsed.bang ? "!" : "")\(arguments)")]
+    }
+    if VimExParser.matches(name, command: "bwipeout", minimum: 2) {
+      return [.custom("vim-buffer-wipeout:\(parsed.bang ? "!" : "")\(arguments)")]
     }
     if name == "sp" || VimExParser.matches(name, command: "split", minimum: 2) {
-      return [.split(horizontal: true)]
+      return arguments.isEmpty
+        ? [.split(horizontal: true)]
+        : [.custom("vim-window-split-horizontal:\(unescapeExArgument(arguments))")]
     }
     if name == "vs" || VimExParser.matches(name, command: "vsplit", minimum: 2) {
-      return [.split(horizontal: false)]
+      return arguments.isEmpty
+        ? [.split(horizontal: false)]
+        : [.custom("vim-window-split-vertical:\(unescapeExArgument(arguments))")]
+    }
+    if VimExParser.matches(name, command: "new") {
+      return arguments.isEmpty
+        ? [.custom("vim-window-new-horizontal")]
+        : [.custom("vim-window-split-horizontal:\(unescapeExArgument(arguments))")]
+    }
+    if VimExParser.matches(name, command: "vnew", minimum: 2) {
+      return arguments.isEmpty
+        ? [.custom("vim-window-new-vertical")]
+        : [.custom("vim-window-split-vertical:\(unescapeExArgument(arguments))")]
+    }
+    if VimExParser.matches(name, command: "close") {
+      return parsed.bang ? [.custom("vim-window-force-close")] : [.closeWindow]
+    }
+    if VimExParser.matches(name, command: "only") { return [.custom("vim-window-only")] }
+    if VimExParser.matches(name, command: "wincmd") {
+      return [.custom("vim-wincmd:\(arguments)")]
     }
     if VimExParser.matches(name, command: "tabnew", minimum: 4) { return [.newTab] }
-    if VimExParser.matches(name, command: "tabclose", minimum: 4) { return [.closeTab] }
+    if VimExParser.matches(name, command: "tabclose", minimum: 4) {
+      return [.custom("vim-tab-close")]
+    }
 
     if VimExParser.matches(name, command: "delete") {
       let specification = try exRegisterSpecification(arguments)
@@ -183,7 +230,43 @@ extension VimEngine {
 
   func applySetOptions(_ arguments: String) {
     for option in arguments.split(whereSeparator: \.isWhitespace).map(String.init) {
-      switch option.lowercased() {
+      let lowercase = option.lowercased()
+      if let specification = optionValue(
+        in: option, lowercase: lowercase, prefixes: ["iskeyword+=", "isk+="])
+      {
+        keywordOptions.add(specification)
+        continue
+      }
+      if let specification = optionValue(
+        in: option, lowercase: lowercase, prefixes: ["iskeyword-=", "isk-="])
+      {
+        keywordOptions.remove(specification)
+        continue
+      }
+      if let specification = optionValue(
+        in: option, lowercase: lowercase, prefixes: ["iskeyword=", "isk="])
+      {
+        keywordOptions.assign(specification)
+        continue
+      }
+      if lowercase == "iskeyword&" || lowercase == "isk&" {
+        keywordOptions.reset()
+        continue
+      }
+      if let width = optionValue(
+        in: option,
+        lowercase: lowercase,
+        prefixes: ["textwidth=", "tw="]
+      ).flatMap(Int.init) {
+        textWidth = max(0, width)
+        continue
+      }
+      if lowercase == "textwidth&" || lowercase == "tw&" {
+        textWidth = 0
+        continue
+      }
+
+      switch lowercase {
       case "ic", "ignorecase": searchIgnoreCase = true
       case "noic", "noignorecase": searchIgnoreCase = false
       case "scs", "smartcase": searchSmartCase = true
@@ -196,6 +279,15 @@ extension VimEngine {
       default: break
       }
     }
+  }
+
+  private func optionValue(
+    in option: String,
+    lowercase: String,
+    prefixes: [String]
+  ) -> String? {
+    guard let prefix = prefixes.first(where: { lowercase.hasPrefix($0) }) else { return nil }
+    return String(option.dropFirst(prefix.count))
   }
 
   func exLineRange(_ expression: String?) -> Range<Int> {
@@ -492,6 +584,7 @@ extension VimEngine {
 
     if let destination { state.cursor = destination }
     preferredColumn = nil
+    preferredVisualColumn = nil
     normalizeCursorForMode()
     updateVisualSelection()
   }

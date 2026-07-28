@@ -146,7 +146,7 @@ final class VimStage5InputTests: XCTestCase {
     XCTAssertTrue(first.awaitingMoreInput)
     _ = try controller.handle(event: .key(stroke))
 
-    XCTAssertEqual(engine.state.text, "")
+    XCTAssertEqual(engine.state.text, "\n")
   }
 
   func testLanguageMapTranslatesLogicalCommandKeys() throws {

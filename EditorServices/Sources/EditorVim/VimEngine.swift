@@ -193,7 +193,7 @@ enum VimRegisterShape: Hashable, Sendable {
   case blockwise(width: Int)
 }
 
-struct VimRegisterValue: Sendable {
+struct VimRegisterValue: Hashable, Sendable {
   var text: String
   var shape: VimRegisterShape
 
@@ -241,6 +241,11 @@ struct VimVisualSnapshot: Sendable {
 struct VimOperatorRange {
   var range: Range<Int>
   var linewise: Bool
+  var blockRanges: [Range<Int>] = []
+  var blockWidth: Int = 0
+  var succeeded: Bool = true
+
+  var isBlockwise: Bool { !blockRanges.isEmpty }
 }
 
 enum VimWordClass: Equatable {
@@ -252,9 +257,8 @@ enum VimWordClass: Equatable {
 public final class VimEngine: @unchecked Sendable {
   let lock = NSRecursiveLock()
   var storedState: VimState
-  var storedLeader: String
-  var storedLocalLeader: String
-  var storedTabWidth: Int
+  let globalStateStorage: VimGlobalStateStorage
+  let bufferStateStorage: VimBufferStateStorage
 
   public internal(set) var state: VimState {
     get { lock.withLock { storedState } }
@@ -262,29 +266,50 @@ public final class VimEngine: @unchecked Sendable {
   }
 
   public var leader: String {
-    get { lock.withLock { storedLeader } }
-    set { lock.withLock { storedLeader = newValue } }
+    get { lock.withLock { globalStateStorage.leader } }
+    set { lock.withLock { globalStateStorage.leader = newValue } }
   }
 
   public var localLeader: String {
-    get { lock.withLock { storedLocalLeader } }
-    set { lock.withLock { storedLocalLeader = newValue } }
+    get { lock.withLock { globalStateStorage.localLeader } }
+    set { lock.withLock { globalStateStorage.localLeader = newValue } }
   }
 
   public var tabWidth: Int {
-    get { lock.withLock { storedTabWidth } }
-    set { lock.withLock { storedTabWidth = max(1, newValue) } }
+    get { lock.withLock { bufferStateStorage.tabWidth } }
+    set { lock.withLock { bufferStateStorage.tabWidth = max(1, newValue) } }
   }
 
   let lineIndex = VimLineIndex()
-  var registers: [VimRegister: VimRegisterValue] = [:]
-  var marks: [Character: Int] = [:]
-  var macros: [Character: [VimSemanticCommand]] = [:]
-  var recording: Character?
-  var recordingActions: [VimSemanticCommand] = []
-  var leaderMappings: [String: VimInvocation] = [:]
-  var localLeaderMappings: [String: VimInvocation] = [:]
-  let undoTree = VimUndoTree()
+  var registers: [VimRegister: VimRegisterValue] {
+    get { globalStateStorage.registers }
+    set { globalStateStorage.registers = newValue }
+  }
+  var marks: [Character: Int] {
+    get { bufferStateStorage.marks }
+    set { bufferStateStorage.marks = newValue }
+  }
+  var macros: [Character: [VimSemanticCommand]] {
+    get { globalStateStorage.macros }
+    set { globalStateStorage.macros = newValue }
+  }
+  var recording: Character? {
+    get { globalStateStorage.recording }
+    set { globalStateStorage.recording = newValue }
+  }
+  var recordingActions: [VimSemanticCommand] {
+    get { globalStateStorage.recordingActions }
+    set { globalStateStorage.recordingActions = newValue }
+  }
+  var leaderMappings: [String: VimInvocation] {
+    get { globalStateStorage.leaderMappings }
+    set { globalStateStorage.leaderMappings = newValue }
+  }
+  var localLeaderMappings: [String: VimInvocation] {
+    get { globalStateStorage.localLeaderMappings }
+    set { globalStateStorage.localLeaderMappings = newValue }
+  }
+  var undoTree: VimUndoTree { bufferStateStorage.undoTree }
   var undoStack: [VimHistoryEntry] { undoTree.activeTransactions() }
   var redoStack: [VimHistoryEntry] { undoTree.preferredRedoTransactions() }
   var editCaptureDepth = 0
@@ -292,23 +317,53 @@ public final class VimEngine: @unchecked Sendable {
   var executionBatchDepth = 0
   var currentExecutionEdits: [VimEditDelta] = []
   var completedExecutionEdits: [VimEditDelta] = []
-  var lastChange: VimAction?
-  var lastRepeat: VimRepeatRecord?
+  var lastChange: VimAction? {
+    get { globalStateStorage.lastChange }
+    set { globalStateStorage.lastChange = newValue }
+  }
+  var lastRepeat: VimRepeatRecord? {
+    get { globalStateStorage.lastRepeat }
+    set { globalStateStorage.lastRepeat = newValue }
+  }
   var activeChange: VimChangeSession?
-  var lastSearch: (String, Bool)?
-  var searchIgnoreCase = false
-  var searchSmartCase = true
-  var searchWrap = true
+  var lastSearch: (String, Bool)? {
+    get { globalStateStorage.lastSearch }
+    set { globalStateStorage.lastSearch = newValue }
+  }
+  var searchIgnoreCase: Bool {
+    get { globalStateStorage.searchIgnoreCase }
+    set { globalStateStorage.searchIgnoreCase = newValue }
+  }
+  var searchSmartCase: Bool {
+    get { globalStateStorage.searchSmartCase }
+    set { globalStateStorage.searchSmartCase = newValue }
+  }
+  var searchWrap: Bool {
+    get { globalStateStorage.searchWrap }
+    set { globalStateStorage.searchWrap = newValue }
+  }
+  var keywordOptions: VimKeywordOptions {
+    get { bufferStateStorage.keywordOptions }
+    set { bufferStateStorage.keywordOptions = newValue }
+  }
+  var textWidth: Int {
+    get { bufferStateStorage.textWidth }
+    set { bufferStateStorage.textWidth = newValue }
+  }
   var visualAnchor: Int?
   var visualSelectionShape: VimSelectionShape = .character
   var lastVisual: VimVisualSnapshot?
   var blockInsertSession: VimBlockInsertSession?
   var preferredColumn: Int?
+  var preferredVisualColumn: Int?
   weak var storedVisualGeometryProvider: (any VimVisualGeometryProviding)?
   var lastFind: (character: Character, forward: Bool, till: Bool)?
   var jumpBackStack: [Int] = []
   var jumpForwardStack: [Int] = []
-  var changePositions: [Int] = []
+  var changePositions: [Int] {
+    get { bufferStateStorage.changePositions }
+    set { bufferStateStorage.changePositions = newValue }
+  }
   var changePositionIndex = 0
   var temporaryInsertReturnMode: VimMode?
   var lastPlayedMacro: Character?
@@ -317,24 +372,49 @@ public final class VimEngine: @unchecked Sendable {
   var historySuppressionDepth = 0
   var isReplayingChange = false
   var replaceRestorations: [VimReplaceRestoration] = []
-  var lastInsertedText = ""
-  var lastSubstitutePattern = ""
-  var lastSubstituteReplacement = ""
-  var lastSubstituteFlags = ""
+  var lastInsertedText: String {
+    get { bufferStateStorage.lastInsertedText }
+    set { bufferStateStorage.lastInsertedText = newValue }
+  }
+  var lastSubstitutePattern: String {
+    get { globalStateStorage.lastSubstitutePattern }
+    set { globalStateStorage.lastSubstitutePattern = newValue }
+  }
+  var lastSubstituteReplacement: String {
+    get { globalStateStorage.lastSubstituteReplacement }
+    set { globalStateStorage.lastSubstituteReplacement = newValue }
+  }
+  var lastSubstituteFlags: String {
+    get { globalStateStorage.lastSubstituteFlags }
+    set { globalStateStorage.lastSubstituteFlags = newValue }
+  }
   var pendingMessage: VimMessage?
   var viewportTopLine = 1
   var viewportBottomLine = 20
   var viewportPageLineCount = 20
   var viewportHalfPageLineCount = 10
 
-  public init(
+  public convenience init(
     text: String = "", cursor: Int = 0, leader: String = "\\", localLeader: String = "\\",
     tabWidth: Int = 2
   ) {
+    self.init(
+      text: text,
+      cursor: cursor,
+      globalStateStorage: VimGlobalStateStorage(leader: leader, localLeader: localLeader),
+      bufferStateStorage: VimBufferStateStorage(text: text, tabWidth: tabWidth)
+    )
+  }
+
+  init(
+    text: String,
+    cursor: Int,
+    globalStateStorage: VimGlobalStateStorage,
+    bufferStateStorage: VimBufferStateStorage
+  ) {
     self.storedState = VimState(text: text, cursor: cursor)
-    self.storedLeader = leader
-    self.storedLocalLeader = localLeader
-    self.storedTabWidth = max(1, tabWidth)
+    self.globalStateStorage = globalStateStorage
+    self.bufferStateStorage = bufferStateStorage
     normalizeCursorForMode()
   }
 
@@ -355,6 +435,7 @@ public final class VimEngine: @unchecked Sendable {
           }
           state.selection = nil
           preferredColumn = nil
+          preferredVisualColumn = nil
         }
         normalizeCursorForMode()
         return
@@ -362,6 +443,7 @@ public final class VimEngine: @unchecked Sendable {
 
       activeChange = nil
       let delta = VimEditDelta.between(before.text, and: text)
+      let updatesSharedBufferState = bufferStateStorage.authoritativeText != text
       state.text = text
       if let delta {
         lineIndex.synchronize(with: before.text)
@@ -371,11 +453,19 @@ public final class VimEngine: @unchecked Sendable {
           insertedText: delta.insertedText,
           resultingText: text
         )
-        adjustStoredPositions(
-          afterReplacing: delta.location..<(delta.location + delta.removedUTF16Count),
+        if updatesSharedBufferState {
+          adjustBufferPositions(
+            afterReplacing: delta.forwardRange,
+            replacementUTF16Count: delta.insertedUTF16Count
+          )
+          bufferStateStorage.authoritativeText = text
+        }
+        adjustWindowPositions(
+          afterReplacing: delta.forwardRange,
           replacementUTF16Count: delta.insertedUTF16Count
         )
       } else {
+        bufferStateStorage.authoritativeText = text
         lineIndex.invalidate()
       }
       state.cursor = targetCursor
@@ -385,6 +475,7 @@ public final class VimEngine: @unchecked Sendable {
       visualSelectionShape = .character
       blockInsertSession = nil
       preferredColumn = nil
+      preferredVisualColumn = nil
       normalizeCursorForMode()
 
       if historySuppressionDepth == 0,

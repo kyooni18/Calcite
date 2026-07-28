@@ -400,6 +400,182 @@
     "expectedCursor": 0
   },
   {
+    "name": "delete-find-forward-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "one two three\nfive six\nseven eight nine\nlast line\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "one two three\n-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-0",
+    "initialText": "a-b-c-d\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "ac-d\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-0",
+    "initialText": "a-b-c-d\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "a-c-d\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-0",
+    "initialText": "One sentence. Two sentence. Three.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Two sentence. Three.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-0",
+    "initialText": "one\ntwo\n\nthree\nfour\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nthree\nfour\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "ONE two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-0",
+    "initialText": "ONE TWO THREE\n    FOUR-FIVE SIX\nSEVEN EIGHT NINE\nLAST LINE\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "one TWO THREE\n    FOUR-FIVE SIX\nSEVEN EIGHT NINE\nLAST LINE\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "ONE two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "bar two three\n    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-0",
+    "initialText": "one two three\n    four-five six\nseven eight nine\nlast line\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    four-five six\nseven eight nine\nlast line\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-0",
+    "initialText": "abc (de) x\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "abc (de) x\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-0",
+    "initialText": "abc (de) x\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " x\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-0",
+    "initialText": "abc   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-0",
+    "initialText": "foo xx foo yy\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "foo yy\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-0",
+    "initialText": "foo xx foobar yy\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "foobar yy\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-0",
+    "initialText": "foo xx foo yy\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "foo yy\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-0",
+    "initialText": "foo xx foobar yy\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "foo xx foobar yy\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-0",
+    "initialText": "foo xx foo yy foo\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "foo xx  yy foo\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-0",
+    "initialText": "foo xx foo yy foo\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "foo xx  yy foo\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-0",
+    "initialText": "foo xx foo yy foo\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "foo xx foo yy \n",
+    "expectedCursor": 13
+  },
+  {
     "name": "word-forward-variant-1",
     "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
     "initialCursor": 0,
@@ -798,6 +974,182 @@
     "notation": "Vjd",
     "expectedText": "tfwfo fjhiu ojof\nmbtu mjof\n",
     "expectedCursor": 0
+  },
+  {
+    "name": "delete-find-forward-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "pof uxp uisff\ngjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "pof uxp uisff\n-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-1",
+    "initialText": "b-c-d-e\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "bd-e\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-1",
+    "initialText": "b-c-d-e\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "b-d-e\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-1",
+    "initialText": "Pof tfoufodf. Uxp tfoufodf. Uisff.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Uxp tfoufodf. Uisff.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-1",
+    "initialText": "pof\nuxp\n\nuisff\ngpvs\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nuisff\ngpvs\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "POF uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-1",
+    "initialText": "POF UXP UISFF\n    GPVS-GJWF TJY\nTFWFO FJHIU OJOF\nMBTU MJOF\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "pof UXP UISFF\n    GPVS-GJWF TJY\nTFWFO FJHIU OJOF\nMBTU MJOF\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "POF uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "cbs uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-1",
+    "initialText": "pof uxp uisff\n    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    gpvs-gjwf tjy\ntfwfo fjhiu ojof\nmbtu mjof\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-1",
+    "initialText": "bcd (ef) y\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "bcd (ef) y\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-1",
+    "initialText": "bcd (ef) y\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " y\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-1",
+    "initialText": "bcd   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-1",
+    "initialText": "gpp yy gpp zz\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "gpp zz\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-1",
+    "initialText": "gpp yy gppcbs zz\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "gppcbs zz\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-1",
+    "initialText": "gpp yy gpp zz\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "gpp zz\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-1",
+    "initialText": "gpp yy gppcbs zz\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "gpp yy gppcbs zz\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-1",
+    "initialText": "gpp yy gpp zz gpp\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "gpp yy  zz gpp\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-1",
+    "initialText": "gpp yy gpp zz gpp\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "gpp yy  zz gpp\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-1",
+    "initialText": "gpp yy gpp zz gpp\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "gpp yy gpp zz \n",
+    "expectedCursor": 13
   },
   {
     "name": "word-forward-variant-2",
@@ -1200,6 +1552,182 @@
     "expectedCursor": 0
   },
   {
+    "name": "delete-find-forward-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "qpg vyq vjtgg\nhkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "qpg vyq vjtgg\n-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-2",
+    "initialText": "c-d-e-f\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "ce-f\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-2",
+    "initialText": "c-d-e-f\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "c-e-f\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-2",
+    "initialText": "Qpg ugpvgpeg. Vyq ugpvgpeg. Vjtgg.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Vyq ugpvgpeg. Vjtgg.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-2",
+    "initialText": "qpg\nvyq\n\nvjtgg\nhqwt\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nvjtgg\nhqwt\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "QPG vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-2",
+    "initialText": "QPG VYQ VJTGG\n    HQWT-HKXG UKZ\nUGXGP GKIJV PKPG\nNCUV NKPG\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "qpg VYQ VJTGG\n    HQWT-HKXG UKZ\nUGXGP GKIJV PKPG\nNCUV NKPG\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "QPG vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "dct vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-2",
+    "initialText": "qpg vyq vjtgg\n    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    hqwt-hkxg ukz\nugxgp gkijv pkpg\nncuv nkpg\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-2",
+    "initialText": "cde (fg) z\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "cde (fg) z\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-2",
+    "initialText": "cde (fg) z\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " z\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-2",
+    "initialText": "cde   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-2",
+    "initialText": "hqq zz hqq aa\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "hqq aa\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-2",
+    "initialText": "hqq zz hqqdct aa\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "hqqdct aa\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-2",
+    "initialText": "hqq zz hqq aa\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "hqq aa\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-2",
+    "initialText": "hqq zz hqqdct aa\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "hqq zz hqqdct aa\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-2",
+    "initialText": "hqq zz hqq aa hqq\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "hqq zz  aa hqq\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-2",
+    "initialText": "hqq zz hqq aa hqq\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "hqq zz  aa hqq\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-2",
+    "initialText": "hqq zz hqq aa hqq\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "hqq zz hqq aa \n",
+    "expectedCursor": 13
+  },
+  {
     "name": "word-forward-variant-3",
     "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
     "initialCursor": 0,
@@ -1598,6 +2126,182 @@
     "notation": "Vjd",
     "expectedText": "vhyhq hljkw qlqh\nodvw olqh\n",
     "expectedCursor": 0
+  },
+  {
+    "name": "delete-find-forward-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "rqh wzr wkuhh\nilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "rqh wzr wkuhh\n-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-3",
+    "initialText": "d-e-f-g\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "df-g\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-3",
+    "initialText": "d-e-f-g\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "d-f-g\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-3",
+    "initialText": "Rqh vhqwhqfh. Wzr vhqwhqfh. Wkuhh.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Wzr vhqwhqfh. Wkuhh.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-3",
+    "initialText": "rqh\nwzr\n\nwkuhh\nirxu\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nwkuhh\nirxu\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "RQH wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-3",
+    "initialText": "RQH WZR WKUHH\n    IRXU-ILYH VLA\nVHYHQ HLJKW QLQH\nODVW OLQH\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "rqh WZR WKUHH\n    IRXU-ILYH VLA\nVHYHQ HLJKW QLQH\nODVW OLQH\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "RQH wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "edu wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-3",
+    "initialText": "rqh wzr wkuhh\n    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    irxu-ilyh vla\nvhyhq hljkw qlqh\nodvw olqh\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-3",
+    "initialText": "def (gh) a\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "def (gh) a\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-3",
+    "initialText": "def (gh) a\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " a\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-3",
+    "initialText": "def   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-3",
+    "initialText": "irr aa irr bb\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "irr bb\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-3",
+    "initialText": "irr aa irredu bb\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "irredu bb\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-3",
+    "initialText": "irr aa irr bb\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "irr bb\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-3",
+    "initialText": "irr aa irredu bb\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "irr aa irredu bb\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-3",
+    "initialText": "irr aa irr bb irr\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "irr aa  bb irr\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-3",
+    "initialText": "irr aa irr bb irr\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "irr aa  bb irr\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-3",
+    "initialText": "irr aa irr bb irr\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "irr aa irr bb \n",
+    "expectedCursor": 13
   },
   {
     "name": "word-forward-variant-4",
@@ -2000,6 +2704,182 @@
     "expectedCursor": 0
   },
   {
+    "name": "delete-find-forward-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "sri xas xlvii\njmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "sri xas xlvii\n-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-4",
+    "initialText": "e-f-g-h\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "eg-h\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-4",
+    "initialText": "e-f-g-h\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "e-g-h\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-4",
+    "initialText": "Sri wirxirgi. Xas wirxirgi. Xlvii.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Xas wirxirgi. Xlvii.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-4",
+    "initialText": "sri\nxas\n\nxlvii\njsyv\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nxlvii\njsyv\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "SRI xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-4",
+    "initialText": "SRI XAS XLVII\n    JSYV-JMZI WMB\nWIZIR IMKLX RMRI\nPEWX PMRI\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "sri XAS XLVII\n    JSYV-JMZI WMB\nWIZIR IMKLX RMRI\nPEWX PMRI\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "SRI xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "fev xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-4",
+    "initialText": "sri xas xlvii\n    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    jsyv-jmzi wmb\nwizir imklx rmri\npewx pmri\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-4",
+    "initialText": "efg (hi) b\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "efg (hi) b\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-4",
+    "initialText": "efg (hi) b\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " b\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-4",
+    "initialText": "efg   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-4",
+    "initialText": "jss bb jss cc\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "jss cc\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-4",
+    "initialText": "jss bb jssfev cc\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "jssfev cc\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-4",
+    "initialText": "jss bb jss cc\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "jss cc\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-4",
+    "initialText": "jss bb jssfev cc\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "jss bb jssfev cc\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-4",
+    "initialText": "jss bb jss cc jss\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "jss bb  cc jss\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-4",
+    "initialText": "jss bb jss cc jss\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "jss bb  cc jss\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-4",
+    "initialText": "jss bb jss cc jss\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "jss bb jss cc \n",
+    "expectedCursor": 13
+  },
+  {
     "name": "word-forward-variant-5",
     "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
     "initialCursor": 0,
@@ -2398,6 +3278,182 @@
     "notation": "Vjd",
     "expectedText": "xjajs jnlmy snsj\nqfxy qnsj\n",
     "expectedCursor": 0
+  },
+  {
+    "name": "delete-find-forward-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "tsj ybt ymwjj\nknaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "tsj ybt ymwjj\n-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-5",
+    "initialText": "f-g-h-i\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "fh-i\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-5",
+    "initialText": "f-g-h-i\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "f-h-i\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-5",
+    "initialText": "Tsj xjsyjshj. Ybt xjsyjshj. Ymwjj.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Ybt xjsyjshj. Ymwjj.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-5",
+    "initialText": "tsj\nybt\n\nymwjj\nktzw\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nymwjj\nktzw\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "TSJ ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-5",
+    "initialText": "TSJ YBT YMWJJ\n    KTZW-KNAJ XNC\nXJAJS JNLMY SNSJ\nQFXY QNSJ\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "tsj YBT YMWJJ\n    KTZW-KNAJ XNC\nXJAJS JNLMY SNSJ\nQFXY QNSJ\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "TSJ ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "gfw ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-5",
+    "initialText": "tsj ybt ymwjj\n    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    ktzw-knaj xnc\nxjajs jnlmy snsj\nqfxy qnsj\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-5",
+    "initialText": "fgh (ij) c\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "fgh (ij) c\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-5",
+    "initialText": "fgh (ij) c\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " c\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-5",
+    "initialText": "fgh   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-5",
+    "initialText": "ktt cc ktt dd\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "ktt dd\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-5",
+    "initialText": "ktt cc kttgfw dd\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "kttgfw dd\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-5",
+    "initialText": "ktt cc ktt dd\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "ktt dd\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-5",
+    "initialText": "ktt cc kttgfw dd\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "ktt cc kttgfw dd\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-5",
+    "initialText": "ktt cc ktt dd ktt\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "ktt cc  dd ktt\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-5",
+    "initialText": "ktt cc ktt dd ktt\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "ktt cc  dd ktt\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-5",
+    "initialText": "ktt cc ktt dd ktt\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "ktt cc ktt dd \n",
+    "expectedCursor": 13
   },
   {
     "name": "word-forward-variant-6",
@@ -2800,6 +3856,182 @@
     "expectedCursor": 0
   },
   {
+    "name": "delete-find-forward-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "utk zcu znxkk\nlobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "utk zcu znxkk\n-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-6",
+    "initialText": "g-h-i-j\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "gi-j\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-6",
+    "initialText": "g-h-i-j\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "g-i-j\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-6",
+    "initialText": "Utk yktzktik. Zcu yktzktik. Znxkk.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Zcu yktzktik. Znxkk.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-6",
+    "initialText": "utk\nzcu\n\nznxkk\nluax\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nznxkk\nluax\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "UTK zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-6",
+    "initialText": "UTK ZCU ZNXKK\n    LUAX-LOBK YOD\nYKBKT KOMNZ TOTK\nRGYZ ROTK\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "utk ZCU ZNXKK\n    LUAX-LOBK YOD\nYKBKT KOMNZ TOTK\nRGYZ ROTK\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "UTK zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "hgx zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-6",
+    "initialText": "utk zcu znxkk\n    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    luax-lobk yod\nykbkt komnz totk\nrgyz rotk\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-6",
+    "initialText": "ghi (jk) d\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "ghi (jk) d\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-6",
+    "initialText": "ghi (jk) d\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " d\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-6",
+    "initialText": "ghi   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-6",
+    "initialText": "luu dd luu ee\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "luu ee\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-6",
+    "initialText": "luu dd luuhgx ee\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "luuhgx ee\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-6",
+    "initialText": "luu dd luu ee\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "luu ee\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-6",
+    "initialText": "luu dd luuhgx ee\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "luu dd luuhgx ee\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-6",
+    "initialText": "luu dd luu ee luu\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "luu dd  ee luu\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-6",
+    "initialText": "luu dd luu ee luu\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "luu dd  ee luu\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-6",
+    "initialText": "luu dd luu ee luu\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "luu dd luu ee \n",
+    "expectedCursor": 13
+  },
+  {
     "name": "word-forward-variant-7",
     "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
     "initialCursor": 0,
@@ -3198,6 +4430,182 @@
     "notation": "Vjd",
     "expectedText": "zlclu lpnoa upul\nshza spul\n",
     "expectedCursor": 0
+  },
+  {
+    "name": "delete-find-forward-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "vul adv aoyll\nmpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "vul adv aoyll\n-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-7",
+    "initialText": "h-i-j-k\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "hj-k\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-7",
+    "initialText": "h-i-j-k\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "h-j-k\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-7",
+    "initialText": "Vul zlualujl. Adv zlualujl. Aoyll.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Adv zlualujl. Aoyll.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-7",
+    "initialText": "vul\nadv\n\naoyll\nmvby\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\naoyll\nmvby\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "VUL adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-7",
+    "initialText": "VUL ADV AOYLL\n    MVBY-MPCL ZPE\nZLCLU LPNOA UPUL\nSHZA SPUL\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "vul ADV AOYLL\n    MVBY-MPCL ZPE\nZLCLU LPNOA UPUL\nSHZA SPUL\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "VUL adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "ihy adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-7",
+    "initialText": "vul adv aoyll\n    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    mvby-mpcl zpe\nzlclu lpnoa upul\nshza spul\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-7",
+    "initialText": "hij (kl) e\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "hij (kl) e\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-7",
+    "initialText": "hij (kl) e\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " e\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-7",
+    "initialText": "hij   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-7",
+    "initialText": "mvv ee mvv ff\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "mvv ff\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-7",
+    "initialText": "mvv ee mvvihy ff\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "mvvihy ff\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-7",
+    "initialText": "mvv ee mvv ff\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "mvv ff\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-7",
+    "initialText": "mvv ee mvvihy ff\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "mvv ee mvvihy ff\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-7",
+    "initialText": "mvv ee mvv ff mvv\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "mvv ee  ff mvv\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-7",
+    "initialText": "mvv ee mvv ff mvv\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "mvv ee  ff mvv\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-7",
+    "initialText": "mvv ee mvv ff mvv\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "mvv ee mvv ff \n",
+    "expectedCursor": 13
   },
   {
     "name": "word-forward-variant-8",
@@ -3600,6 +5008,182 @@
     "expectedCursor": 0
   },
   {
+    "name": "delete-find-forward-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "wvm bew bpzmm\nnqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "wvm bew bpzmm\n-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-8",
+    "initialText": "i-j-k-l\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "ik-l\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-8",
+    "initialText": "i-j-k-l\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "i-k-l\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-8",
+    "initialText": "Wvm amvbmvkm. Bew amvbmvkm. Bpzmm.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Bew amvbmvkm. Bpzmm.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-8",
+    "initialText": "wvm\nbew\n\nbpzmm\nnwcz\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\nbpzmm\nnwcz\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "WVM bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-8",
+    "initialText": "WVM BEW BPZMM\n    NWCZ-NQDM AQF\nAMDMV MQOPB VQVM\nTIAB TQVM\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "wvm BEW BPZMM\n    NWCZ-NQDM AQF\nAMDMV MQOPB VQVM\nTIAB TQVM\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "WVM bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "jiz bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-8",
+    "initialText": "wvm bew bpzmm\n    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    nwcz-nqdm aqf\namdmv mqopb vqvm\ntiab tqvm\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-8",
+    "initialText": "ijk (lm) f\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "ijk (lm) f\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-8",
+    "initialText": "ijk (lm) f\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " f\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-8",
+    "initialText": "ijk   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-8",
+    "initialText": "nww ff nww gg\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "nww gg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-8",
+    "initialText": "nww ff nwwjiz gg\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "nwwjiz gg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-8",
+    "initialText": "nww ff nww gg\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "nww gg\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-8",
+    "initialText": "nww ff nwwjiz gg\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "nww ff nwwjiz gg\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-8",
+    "initialText": "nww ff nww gg nww\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "nww ff  gg nww\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-8",
+    "initialText": "nww ff nww gg nww\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "nww ff  gg nww\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-8",
+    "initialText": "nww ff nww gg nww\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "nww ff nww gg \n",
+    "expectedCursor": 13
+  },
+  {
     "name": "word-forward-variant-9",
     "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
     "initialCursor": 0,
@@ -3998,5 +5582,181 @@
     "notation": "Vjd",
     "expectedText": "bnenw nrpqc wrwn\nujbc urwn\n",
     "expectedCursor": 0
+  },
+  {
+    "name": "delete-find-forward-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 14,
+    "notation": "df-",
+    "expectedText": "xwn cfx cqann\noren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-till-forward-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 14,
+    "notation": "dt-",
+    "expectedText": "xwn cfx cqann\n-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 14
+  },
+  {
+    "name": "delete-repeat-find-variant-9",
+    "initialText": "j-k-l-m\n",
+    "initialCursor": 0,
+    "notation": "f-d;",
+    "expectedText": "jl-m\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-reverse-find-variant-9",
+    "initialText": "j-k-l-m\n",
+    "initialCursor": 0,
+    "notation": "f-;d,",
+    "expectedText": "j-l-m\n",
+    "expectedCursor": 1
+  },
+  {
+    "name": "delete-sentence-variant-9",
+    "initialText": "Xwn bnwcnwln. Cfx bnwcnwln. Cqann.\n",
+    "initialCursor": 0,
+    "notation": "d)",
+    "expectedText": "Cfx bnwcnwln. Cqann.\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-paragraph-variant-9",
+    "initialText": "xwn\ncfx\n\ncqann\noxda\n",
+    "initialCursor": 0,
+    "notation": "d}",
+    "expectedText": "\ncqann\noxda\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "uppercase-inner-word-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 0,
+    "notation": "gUiw",
+    "expectedText": "XWN cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "lowercase-inner-word-variant-9",
+    "initialText": "XWN CFX CQANN\n    OXDA-OREN BRG\nBNENW NRPQC WRWN\nUJBC URWN\n",
+    "initialCursor": 0,
+    "notation": "guiw",
+    "expectedText": "xwn CFX CQANN\n    OXDA-OREN BRG\nBNENW NRPQC WRWN\nUJBC URWN\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "swap-case-word-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 0,
+    "notation": "g~w",
+    "expectedText": "XWN cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "rot13-inner-word-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 0,
+    "notation": "g?iw",
+    "expectedText": "kja cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "forced-characterwise-down-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 0,
+    "notation": "dvj",
+    "expectedText": "    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "forced-linewise-word-variant-9",
+    "initialText": "xwn cfx cqann\n    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "initialCursor": 0,
+    "notation": "dVw",
+    "expectedText": "    oxda-oren brg\nbnenw nrpqc wrwn\nujbc urwn\n",
+    "expectedCursor": 4
+  },
+  {
+    "name": "match-pair-scan-variant-9",
+    "initialText": "jkl (mn) g\n",
+    "initialCursor": 0,
+    "notation": "%",
+    "expectedText": "jkl (mn) g\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "delete-match-pair-scan-variant-9",
+    "initialText": "jkl (mn) g\n",
+    "initialCursor": 0,
+    "notation": "d%",
+    "expectedText": " g\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-last-nonblank-variant-9",
+    "initialText": "jkl   \n",
+    "initialCursor": 0,
+    "notation": "dg_",
+    "expectedText": "   \n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-whole-word-match-variant-9",
+    "initialText": "oxx gg oxx hh\n",
+    "initialCursor": 0,
+    "notation": "d*",
+    "expectedText": "oxx hh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-next-partial-word-match-variant-9",
+    "initialText": "oxx gg oxxkja hh\n",
+    "initialCursor": 0,
+    "notation": "dg*",
+    "expectedText": "oxxkja hh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-whole-word-match-variant-9",
+    "initialText": "oxx gg oxx hh\n",
+    "initialCursor": 7,
+    "notation": "d#",
+    "expectedText": "oxx hh\n",
+    "expectedCursor": 0
+  },
+  {
+    "name": "delete-previous-partial-word-match-variant-9",
+    "initialText": "oxx gg oxxkja hh\n",
+    "initialCursor": 7,
+    "notation": "dg#",
+    "expectedText": "oxx gg oxxkja hh\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-next-match-delete-variant-9",
+    "initialText": "oxx gg oxx hh oxx\n",
+    "initialCursor": 0,
+    "notation": "*gnd",
+    "expectedText": "oxx gg  hh oxx\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "operator-next-match-delete-variant-9",
+    "initialText": "oxx gg oxx hh oxx\n",
+    "initialCursor": 0,
+    "notation": "*dgn",
+    "expectedText": "oxx gg  hh oxx\n",
+    "expectedCursor": 7
+  },
+  {
+    "name": "visual-previous-match-delete-variant-9",
+    "initialText": "oxx gg oxx hh oxx\n",
+    "initialCursor": 7,
+    "notation": "*gNd",
+    "expectedText": "oxx gg oxx hh \n",
+    "expectedCursor": 13
   }
 ]

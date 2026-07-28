@@ -103,13 +103,62 @@ extension VimEngine {
       column += VimDisplayColumns.width(
         of: character,
         at: column,
-        tabWidth: storedTabWidth
+        tabWidth: bufferStateStorage.tabWidth
       )
       let next = nextCharacterBoundary(from: current)
       guard next > current else { break }
       current = next
     }
     return column
+  }
+
+  func logicalDisplayColumn(from lineStart: Int, to offset: Int) -> Int {
+    let lower = clamp(lineStart)
+    let upper = clamp(offset)
+    guard upper > lower else { return 0 }
+
+    var column = 0
+    var current = lower
+    while current < upper {
+      guard let character = character(at: current) else { break }
+      column += VimDisplayColumns.width(
+        of: character,
+        at: column,
+        tabWidth: bufferStateStorage.tabWidth
+      )
+      let next = nextCharacterBoundary(from: current)
+      guard next > current else { break }
+      current = next
+    }
+    return column
+  }
+
+  func logicalOffset(
+    from lineStart: Int,
+    atDisplayColumn desiredColumn: Int,
+    contentEnd: Int
+  ) -> Int {
+    let start = clamp(lineStart)
+    let end = clamp(contentEnd)
+    guard start < end else { return start }
+
+    var column = 0
+    var current = start
+    while current < end {
+      if column >= desiredColumn { return current }
+      guard let character = character(at: current) else { break }
+      let width = VimDisplayColumns.width(
+        of: character,
+        at: column,
+        tabWidth: bufferStateStorage.tabWidth
+      )
+      if column + width > desiredColumn { return current }
+      let next = nextCharacterBoundary(from: current)
+      guard next > current, next <= end else { break }
+      current = next
+      column += width
+    }
+    return normalLineEnd(at: start)
   }
 
   func offset(
@@ -138,7 +187,7 @@ extension VimEngine {
       let width = VimDisplayColumns.width(
         of: character,
         at: column,
-        tabWidth: storedTabWidth
+        tabWidth: bufferStateStorage.tabWidth
       )
       if column + width > desiredColumn { return current }
       let next = nextCharacterBoundary(from: current)

@@ -4,7 +4,9 @@ import Foundation
 @MainActor
 struct CalciteVimHostRouter {
   var documentURL: URL?
+  var documentID: UUID?
   var editorSessionID: UUID?
+  var tabPageID: UUID?
   var revision: UInt64
   var handler: (VimHostInvocation) -> VimHostResponse
 
@@ -20,6 +22,9 @@ struct CalciteVimHostRouter {
           context: VimHostInvocationContext(
             documentURL: documentURL,
             editorSessionID: editorSessionID,
+            bufferID: documentID.map(VimBufferID.init),
+            windowID: editorSessionID.map(VimWindowID.init),
+            tabPageID: tabPageID.map(VimTabPageID.init),
             selection: VimSelection(selection.location, NSMaxRange(selection)),
             revision: VimDocumentRevision(revision)
           )

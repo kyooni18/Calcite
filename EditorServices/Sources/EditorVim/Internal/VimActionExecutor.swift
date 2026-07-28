@@ -187,6 +187,7 @@ extension VimEngine {
       } else {
         evaluated = operatorRange(for: motion, count: count)
       }
+      guard evaluated.succeeded else { break }
       if op == .change {
         beginInsertChange(action: action, count: count, register: register)
         apply(op, range: evaluated.range, register: register, linewise: evaluated.linewise)
@@ -286,6 +287,7 @@ extension VimEngine {
         recordJumpOrigin()
         state.cursor = linewise ? firstNonBlank(at: position) : clamp(position)
         preferredColumn = nil
+        preferredVisualColumn = nil
         normalizeCursorForMode()
         updateVisualSelection()
       } else {

@@ -91,7 +91,11 @@ final class EditorTab: ObservableObject, Identifiable {
   var errorCount: Int { diagnostics.filter { $0.severity == .error }.count }
   var warningCount: Int { diagnostics.filter { $0.severity == .warning }.count }
   var currentLine: Int {
-    lineIndex.lineNumber(atUTF16Offset: selectedRange.location)
+    lineNumber(atUTF16Offset: selectedRange.location)
+  }
+
+  func lineNumber(atUTF16Offset offset: Int) -> Int {
+    lineIndex.lineNumber(atUTF16Offset: offset)
   }
 
   private init(
@@ -182,7 +186,11 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   var currentColumn: Int {
-    lineIndex.columnNumber(atUTF16Offset: selectedRange.location)
+    columnNumber(atUTF16Offset: selectedRange.location)
+  }
+
+  func columnNumber(atUTF16Offset offset: Int) -> Int {
+    lineIndex.columnNumber(atUTF16Offset: offset)
   }
 
   var snippetProgress: (current: Int, total: Int)? {
@@ -672,6 +680,11 @@ final class EditorTab: ObservableObject, Identifiable {
   func referencesAtSelection() async throws -> [SourceLocation] {
     await editTask?.value
     return try await pipeline.references(atUTF16Offset: navigationUTF16Offset)
+  }
+
+  func documentSymbols() async throws -> [EditorDocumentSymbol] {
+    await editTask?.value
+    return try await pipeline.documentSymbols()
   }
 
   func hoverAtSelection() async throws -> HoverResult? {

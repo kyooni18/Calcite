@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 
 struct CalciteEditorSurface: View {
   @ObservedObject var tab: EditorTab
+  @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
+  let onActivate: () -> Void
   @State private var zoomScale: CGFloat = 1
   @State private var showsFind = false
   @State private var showsReplace = false
@@ -17,6 +19,8 @@ struct CalciteEditorSurface: View {
   let wrapsMarkdownLines: Bool
   let profile: EditorCustomProfile
   let editorMode: EditorInterface
+  let vimController: VimKeymapController?
+  var onVimHistoryChange: ((VimHistorySnapshot) -> Void)? = nil
   let onVimHostInvocation: (VimHostInvocation) -> VimHostResponse
   let onGoToDefinition: () -> Void
   let onFindReferences: () -> Void
@@ -31,6 +35,7 @@ struct CalciteEditorSurface: View {
 
       CalciteEditorStatusBar(
         tab: tab,
+        selectedRange: editorSession.selectedRange,
         profile: profile,
         editorMode: editorMode,
         onSelectInputMode: onSelectInputMode
@@ -78,13 +83,18 @@ struct CalciteEditorSurface: View {
         diagnostics: profile.behavior.showDiagnostics ? tab.diagnostics : [],
         showsInlineDiagnosticMessages: profile.behavior.showInlineDiagnosticMessages,
         breakpoints: tab.breakpoints,
-        selectedRange: tab.selectedRange,
+        selectedRange: editorSession.selectedRange,
         hasCompletions: !tab.completions.isEmpty,
         vimHistory: tab.vimHistory,
         documentURL: tab.url,
-        editorSessionID: tab.id,
+        documentID: tab.id,
+        editorSessionID: editorSession.id,
+        tabPageID: nil,
+        sharedVimController: vimController,
         onWillEdit: tab.markModified,
         onEdit: { range, replacement, resultingText, selectionAfter in
+          onActivate()
+          editorSession.updateSelection(selectionAfter)
           tab.submitEdit(
             range: range,
             replacement: replacement,
@@ -94,20 +104,24 @@ struct CalciteEditorSurface: View {
           )
         },
         onVimEdit: { transaction, selectionAfter in
+          onActivate()
+          editorSession.updateSelection(selectionAfter)
           tab.submitVimTransaction(
             transaction,
             selectionAfter: selectionAfter,
             suggestionDelay: profile.behavior.suggestionDelay
           )
         },
-        onSelectionChange: tab.updateSelection,
+        onSelectionChange: { range in
+          onActivate()
+          editorSession.updateSelection(range)
+        },
         onToggleBreakpoint: { line in
-          if line == tab.currentLine {
-            tab.toggleBreakpointAtCurrentLine()
-          } else {
-            tab.updateSelection(selectedRange(forLine: line, in: tab.text))
-            tab.toggleBreakpointAtCurrentLine()
-          }
+          onActivate()
+          let selection = selectedRange(forLine: line, in: tab.text)
+          editorSession.updateSelection(selection)
+          tab.updateSelection(selection)
+          tab.toggleBreakpointAtCurrentLine()
         },
         onAcceptCompletion: tab.acceptSelectedCompletion,
         onMoveCompletionDown: tab.selectNextCompletion,
@@ -130,7 +144,10 @@ struct CalciteEditorSurface: View {
         },
         onVimModeChange: tab.updateVimMode,
         onVimPromptChange: tab.updateVimPrompt,
-        onVimInteractionChange: tab.updateVimInteraction,
+        onVimInteractionChange: { snapshot in
+          tab.updateVimInteraction(snapshot)
+          onVimHistoryChange?(snapshot.history)
+        },
         onVimInputSourceChange: tab.updateVimInputSourceIdentifier,
         onCaretRectChange: { completionAnchor = $0 }
       )
@@ -176,12 +193,15 @@ struct CalciteEditorSurface: View {
         EditorFindReplaceBar(
           text: tab.text,
           textRevision: tab.textRevision,
-          selection: tab.selectedRange,
+          selection: editorSession.selectedRange,
           query: $findQuery,
           replacement: $replacement,
           showsReplace: $showsReplace,
           close: dismissFindReplace,
-          select: { tab.updateSelection($0) },
+          select: { range in
+            onActivate()
+            editorSession.updateSelection(range)
+          },
           replaceCurrent: { range in replace(range: range, with: replacement) },
           replaceAll: replaceAll
         )
@@ -195,6 +215,8 @@ struct CalciteEditorSurface: View {
     let source = tab.text as NSString
     let text = source.replacingCharacters(in: range, with: value)
     let selection = NSRange(location: range.location, length: (value as NSString).length)
+    onActivate()
+    editorSession.updateSelection(selection)
     tab.submitEdit(
       range: range, replacement: value, resultingText: text, selectionAfter: selection,
       suggestionDelay: profile.behavior.suggestionDelay)
@@ -215,7 +237,7 @@ struct CalciteEditorSurface: View {
     guard text != tab.text else { return }
     tab.submitEdit(
       range: NSRange(location: 0, length: (tab.text as NSString).length), replacement: text,
-      resultingText: text, selectionAfter: tab.selectedRange,
+      resultingText: text, selectionAfter: editorSession.selectedRange,
       suggestionDelay: profile.behavior.suggestionDelay)
   }
 
@@ -531,7 +553,10 @@ struct CodeTextEditor: NSViewRepresentable {
   let hasCompletions: Bool
   let vimHistory: VimHistorySnapshot
   let documentURL: URL?
+  let documentID: UUID?
   let editorSessionID: UUID?
+  let tabPageID: UUID?
+  let sharedVimController: VimKeymapController?
   let onWillEdit: () -> Void
   let onEdit: (NSRange, String, String, NSRange) -> Void
   let onVimEdit: (VimEditTransaction, NSRange) -> Void
@@ -1043,6 +1068,14 @@ struct CodeTextEditor: NSViewRepresentable {
         tabWidth: parent.profile.behavior.tabWidth,
         mappings: mappings
       )
+      if let shared = parent.sharedVimController, vimController !== shared {
+        if let controller = vimController {
+          cancelVimComposition(in: textView, controller: controller)
+        }
+        vimController = shared
+        synchronizedVimTextRevision = nil
+        vimConfigurationSignature = ""
+      }
       if vimController == nil {
         let engine = VimEngine(
           text: textView.string,
@@ -1911,7 +1944,9 @@ struct CodeTextEditor: NSViewRepresentable {
       if !execution.hostRequests.isEmpty {
         CalciteVimHostRouter(
           documentURL: parent.documentURL,
+          documentID: parent.documentID,
           editorSessionID: parent.editorSessionID,
+          tabPageID: parent.tabPageID,
           revision: parent.textRevision,
           handler: parent.onVimHostInvocation
         ).route(

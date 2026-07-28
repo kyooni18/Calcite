@@ -14,6 +14,9 @@ extension VimEngine {
       deltas: completedExecutionEdits,
       repeatRecord: lastRepeat
     )
+    if before.text != result.state.text {
+      bufferStateStorage.authoritativeText = result.state.text
+    }
     return result
   }
 
@@ -30,6 +33,9 @@ extension VimEngine {
       deltas: completedExecutionEdits,
       repeatRecord: lastRepeat
     )
+    if before.text != execution.state.text {
+      bufferStateStorage.authoritativeText = execution.state.text
+    }
     result.execution = execution
     return result
   }

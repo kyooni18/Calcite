@@ -775,22 +775,17 @@ final class EditorWorkspaceController: ObservableObject {
     }
 
     if Self.requiresOriginatingDocument(invocation.request) {
-      guard let originID = invocation.context.editorSessionID,
-        let originTab = tabs.first(where: { $0.id == originID }),
-        invocation.context.documentURL == nil
-          || originTab.url.standardizedFileURL
-            == invocation.context.documentURL?.standardizedFileURL
-      else {
+      let originTab =
+        invocation.context.bufferID.flatMap { bufferID in
+          tabs.first { $0.id == bufferID.rawValue }
+        }
+        ?? invocation.context.documentURL.flatMap { url in
+          tabs.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+        }
+      guard let originTab else { return .rejected(.staleContext) }
+      if let revision = invocation.context.revision, revision.value != originTab.textRevision {
         return .rejected(.staleContext)
       }
-      if let revision = invocation.context.revision,
-        revision.value != originTab.textRevision
-      {
-        return .rejected(.staleContext)
-      }
-      // Route the request to the editor that produced it rather than whichever
-      // tab became active while the invocation was crossing the host boundary.
-      selectedTabID = originID
     }
 
     let previousError = fileOperationError

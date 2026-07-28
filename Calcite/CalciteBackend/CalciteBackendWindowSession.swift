@@ -1,4 +1,5 @@
 import Combine
+@_spi(Calcite) import EditorVim
 import Foundation
 
 nonisolated enum CalciteFastPanelTarget: String, CaseIterable, Identifiable, Sendable {
@@ -48,6 +49,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     case sectionTab(UUID)
   }
 
+  private struct VimWindowLocation: Equatable {
+    let sectionID: UUID
+    let editorTabID: UUID
+  }
+
   #if os(macOS)
     private struct TerminalEditorSessionEntry {
       let command: String?
@@ -62,7 +68,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   @MainActor
   final class EditorSession: ObservableObject, Identifiable {
     let id: UUID
-    let documentID: UUID
+    @Published private(set) var documentID: UUID
 
     @Published private(set) var selectedRange: NSRange
     @Published private(set) var horizontalScrollOffset: Double
@@ -95,6 +101,17 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       self.verticalScrollOffset = max(0, verticalScrollOffset)
       self.zoomScale = Self.clampedZoom(zoomScale)
       self.windowSession = windowSession
+    }
+
+    fileprivate func switchDocument(to document: EditorTab) {
+      guard documentID != document.id else { return }
+      documentID = document.id
+      selectedRange = Self.clamped(
+        document.selectedRange,
+        utf16Length: document.text.utf16.count
+      )
+      horizontalScrollOffset = 0
+      verticalScrollOffset = 0
     }
 
     func updateSelection(_ range: NSRange) {
@@ -176,9 +193,12 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   let nowPlaying: NowPlayingController
   let sectionalLayout: MainSectionalLayoutController
   let layoutProfile: CalciteLayoutProfileService
+  let vimSessionCoordinator: VimSessionCoordinator
+  private let vimStateStore: CalciteVimStateStore
 
   @Published private(set) var editorSessions: [EditorSession] = []
   @Published private(set) var activeEditorSessionID: UUID?
+  private var previousActiveEditorSessionID: UUID?
   @Published private(set) var editorCommandEvent: EditorCommandEvent?
   @Published private(set) var pendingDocumentOpenURLs: [URL] = []
   private var sectionalEditorAssignments: [UUID: UUID] = [:]
@@ -218,6 +238,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   private let onRequestCloseWindow: () -> Void
   private var observations = Set<AnyCancellable>()
   private var isSynchronizingSelection = false
+  private var lastPersistedVimHistory = VimHistorySnapshot()
 
   var controller: EditorWorkspaceController? { backend?.controller }
   var terminal: EditorTerminalSession? { backend?.terminal }
@@ -285,6 +306,14 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     self.onOpenItem = onOpenItem
     self.onRequestCloseWindow = onRequestCloseWindow
 
+    let vimStateStore = CalciteVimStateStore(workspaceURL: backend.workspaceURL)
+    let persistedVimHistory = vimStateStore.loadHistory()
+    let vimSessionCoordinator = VimSessionCoordinator()
+    vimSessionCoordinator.mergeHistory(persistedVimHistory)
+    self.vimStateStore = vimStateStore
+    self.vimSessionCoordinator = vimSessionCoordinator
+    self.lastPersistedVimHistory = persistedVimHistory
+
     let palette = CommandPaletteState()
     let themeBuilderSession = ThemeBuilderSession(controller: backend.controller)
     let initialSidebarVisibility = EditorWorkspaceLayoutStore.loadSidebarVisibility(
@@ -335,6 +364,14 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
   isolated deinit {
     nowPlaying.stop()
+  }
+
+  func persistVimHistory(_ history: VimHistorySnapshot) {
+    vimSessionCoordinator.mergeHistory(history)
+    let merged = vimSessionCoordinator.historySnapshot
+    guard merged != lastPersistedVimHistory else { return }
+    lastPersistedVimHistory = merged
+    vimStateStore.saveHistory(merged)
   }
 
   // MARK: - Lifecycle
@@ -418,12 +455,15 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
     guard let document = await backend.openDocument(at: url) else { return nil }
     let editor: EditorSession
-    if inNewEditor {
+    if inNewEditor || activeEditorSession == nil {
       editor = createEditorSession(for: document, activate: false)
-    } else if let existing = editorSessions.first(where: { $0.documentID == document.id }) {
-      editor = existing
     } else {
-      editor = createEditorSession(for: document, activate: false)
+      editor = activeEditorSession!
+      editor.switchDocument(to: document)
+      _ = vimSessionCoordinator.switchBuffer(
+        in: VimWindowID(editor.id),
+        to: VimBufferID(document.id)
+      )
     }
     activateEditorSession(editor.id)
     return editor
@@ -450,6 +490,20 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   func createAdditionalEditor(for documentID: UUID) -> EditorSession? {
     guard let document = backend?.document(id: documentID) else { return nil }
     return createEditorSession(for: document)
+  }
+
+  @discardableResult
+  func switchEditorSession(_ editorSessionID: UUID, to documentID: UUID) -> Bool {
+    guard let backend, let document = backend.document(id: documentID),
+      let editor = editorSessions.first(where: { $0.id == editorSessionID })
+    else { return false }
+    _ = vimSessionCoordinator.switchBuffer(
+      in: VimWindowID(editorSessionID),
+      to: VimBufferID(documentID)
+    )
+    editor.switchDocument(to: document)
+    if activeEditorSessionID == editorSessionID { activateEditorSession(editorSessionID) }
+    return true
   }
 
   /// Returns a stable editor instance for a sectional editor leaf. Additional leaves reuse an
@@ -508,24 +562,17 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   func selectDocument(_ documentID: UUID, inSection sectionID: UUID) -> UUID? {
     guard let backend, let document = backend.document(id: documentID) else { return nil }
 
-    if let assigned = editorSessionAssigned(toSection: sectionID),
-      assigned.documentID == documentID
-    {
+    if let assigned = editorSessionAssigned(toSection: sectionID) {
+      assigned.switchDocument(to: document)
+      _ = vimSessionCoordinator.switchBuffer(
+        in: VimWindowID(assigned.id),
+        to: VimBufferID(document.id)
+      )
       activateEditorSession(assigned.id)
       return assigned.id
     }
 
-    let otherAssignedEditorIDs = Set(
-      sectionalEditorAssignments.compactMap { key, editorID in
-        key == sectionID ? nil : editorID
-      }
-    )
-    let editor =
-      editorSessions.first { session in
-        session.documentID == documentID && !otherAssignedEditorIDs.contains(session.id)
-      }
-      ?? createEditorSession(for: document, activate: false)
-
+    let editor = createEditorSession(for: document, activate: false)
     sectionalEditorAssignments[sectionID] = editor.id
     activateEditorSession(editor.id)
     return editor.id
@@ -556,6 +603,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
     activeEditorSession?.captureSelectionFromDocument()
     isSynchronizingSelection = true
+    if let activeEditorSessionID, activeEditorSessionID != editor.id {
+      previousActiveEditorSessionID = activeEditorSessionID
+    }
     activeEditorSessionID = editor.id
     if backend.controller.selectedTabID != editor.documentID {
       backend.controller.selectedTabID = editor.documentID
@@ -571,7 +621,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard let index = editorSessions.firstIndex(where: { $0.id == id }) else { return }
     let wasActive = activeEditorSessionID == id
     editorSessions[index].captureSelectionFromDocument()
+    vimSessionCoordinator.removeWindow(VimWindowID(id))
     editorSessions.remove(at: index)
+    if previousActiveEditorSessionID == id { previousActiveEditorSessionID = nil }
 
     guard wasActive else { return }
     let replacement =
@@ -591,10 +643,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       editorSessions.removeAll { !availableIDs.contains($0.documentID) }
     }
 
-    for document in backend.documents
-    where !editorSessions.contains(where: {
-      $0.documentID == document.id
-    }) {
+    if editorSessions.isEmpty, let document = backend.activeDocument ?? backend.documents.first {
       _ = createEditorSession(for: document, activate: false)
     }
 
@@ -632,17 +681,21 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   }
 
   func synchronizeSelectedDocumentFromController(_ documentID: UUID?) {
-    guard !isSynchronizingSelection, !isClosed, let documentID else { return }
-    guard let editor = editorSessions.first(where: { $0.documentID == documentID }) else {
-      reconcileDocuments()
-      return
+    guard !isSynchronizingSelection, !isClosed, let documentID,
+      let document = backend?.document(id: documentID)
+    else { return }
+    if let editor = activeEditorSession {
+      isSynchronizingSelection = true
+      editor.switchDocument(to: document)
+      _ = vimSessionCoordinator.switchBuffer(
+        in: VimWindowID(editor.id),
+        to: VimBufferID(document.id)
+      )
+      editor.captureSelectionFromDocument()
+      isSynchronizingSelection = false
+    } else {
+      _ = createEditorSession(for: document)
     }
-
-    isSynchronizingSelection = true
-    activeEditorSession?.captureSelectionFromDocument()
-    activeEditorSessionID = editor.id
-    editor.captureSelectionFromDocument()
-    isSynchronizingSelection = false
   }
 
   private func drainPendingDocumentOpens() async {
@@ -650,6 +703,541 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       let url = pendingDocumentOpenURLs.removeFirst()
       _ = await openDocument(at: url)
     }
+  }
+
+  // MARK: - Vim host routing
+
+  func handleVimHostInvocation(_ invocation: VimHostInvocation) -> VimHostResponse {
+    let originID = invocation.context.windowID?.rawValue ?? invocation.context.editorSessionID
+    let origin = originID.flatMap { id in editorSessions.first { $0.id == id } }
+
+    if Self.vimRequestRequiresOrigin(invocation.request) {
+      guard let origin, let document = origin.document else { return .rejected(.staleContext) }
+      if let bufferID = invocation.context.bufferID, bufferID.rawValue != document.id {
+        return .rejected(.staleContext)
+      }
+      if let url = invocation.context.documentURL,
+        url.standardizedFileURL != document.url.standardizedFileURL
+      {
+        return .rejected(.staleContext)
+      }
+      if let revision = invocation.context.revision, revision.value != document.textRevision {
+        return .rejected(.staleContext)
+      }
+    }
+
+    if let response = handleVimTopologyRequest(invocation.request, origin: origin) {
+      return response
+    }
+
+    if let origin { activateEditorSession(origin.id) }
+    guard let backend else { return .rejected(.staleContext) }
+    return backend.controller.handleVimHostInvocation(invocation)
+  }
+
+  private static func vimRequestRequiresOrigin(_ request: VimHostRequest) -> Bool {
+    switch request {
+    case .openFile, .newTab, .shell:
+      return false
+    case .custom(let command):
+      return !command.hasPrefix("vim-buffer-add:")
+    default:
+      return true
+    }
+  }
+
+  private func handleVimTopologyRequest(
+    _ request: VimHostRequest,
+    origin: EditorSession?
+  ) -> VimHostResponse? {
+    switch request {
+    case .quit, .closeWindow:
+      guard let origin else { return .rejected(.staleContext) }
+      return closeVimWindow(origin)
+    case .writeAndQuit:
+      guard let origin, let document = origin.document else { return .rejected(.staleContext) }
+      Task { @MainActor [weak self, weak origin] in
+        guard await document.save(), let self, let origin else { return }
+        _ = self.closeVimWindow(origin)
+      }
+      return .accepted
+    case .split(let horizontal):
+      guard let origin else { return .rejected(.staleContext) }
+      return splitVimWindow(origin, horizontal: horizontal)
+    case .switchBuffer(let number):
+      guard let origin else { return .rejected(.staleContext) }
+      return switchVimBuffer(number: number, in: origin)
+    case .scroll(let lines):
+      guard let origin else { return .rejected(.staleContext) }
+      scrollVimWindow(origin, lines: lines)
+      return .accepted
+    case .custom(let command) where command.hasPrefix("vim-"):
+      return handleVimCustomTopologyCommand(command, origin: origin)
+    default:
+      return nil
+    }
+  }
+
+  private func registerOpenVimBuffers() {
+    guard let backend else { return }
+    for document in backend.documents {
+      _ = vimSessionCoordinator.registerBuffer(
+        id: VimBufferID(document.id),
+        name: document.url.path,
+        text: document.text,
+        history: document.vimHistory
+      )
+      vimSessionCoordinator.updateBufferMetadata(
+        id: VimBufferID(document.id),
+        isLoaded: true,
+        isModified: document.isDirty,
+        isListed: true
+      )
+    }
+  }
+
+  private func switchVimBuffer(number: Int, in origin: EditorSession) -> VimHostResponse {
+    registerOpenVimBuffers()
+    guard let info = vimSessionCoordinator.bufferInfo(number: number),
+      backend?.document(id: info.id.rawValue) != nil,
+      switchEditorSession(origin.id, to: info.id.rawValue)
+    else {
+      return .rejected(.failed(code: "VIM_NO_BUFFER", message: "Buffer \(number) does not exist."))
+    }
+    return .completed(message: "Buffer \(number): \(info.name)")
+  }
+
+  private func switchVimBuffer(
+    _ bufferID: VimBufferID,
+    in origin: EditorSession
+  ) -> VimHostResponse {
+    guard let info = vimSessionCoordinator.bufferInfo(id: bufferID),
+      backend?.document(id: bufferID.rawValue) != nil,
+      switchEditorSession(origin.id, to: bufferID.rawValue)
+    else {
+      return .rejected(.failed(code: "VIM_NO_BUFFER", message: "Buffer is no longer available."))
+    }
+    return .completed(message: "Buffer \(info.number): \(info.name)")
+  }
+
+  private func resolveVimBuffer(_ argument: String, current: EditorSession?) -> VimBufferInfo? {
+    registerOpenVimBuffers()
+    let value = argument.trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.isEmpty || value == "%", let current {
+      return vimSessionCoordinator.bufferInfo(id: VimBufferID(current.documentID))
+    }
+    if value == "#", let current,
+      let alternate = vimSessionCoordinator.alternateBuffer(for: VimWindowID(current.id))
+    {
+      return vimSessionCoordinator.bufferInfo(id: alternate)
+    }
+    if let number = Int(value) { return vimSessionCoordinator.bufferInfo(number: number) }
+    let candidates = vimSessionCoordinator.listedBuffers.filter {
+      $0.name == value || URL(fileURLWithPath: $0.name).lastPathComponent == value
+        || $0.name.localizedCaseInsensitiveContains(value)
+    }
+    return candidates.count == 1 ? candidates[0] : nil
+  }
+
+  private func handleVimCustomTopologyCommand(
+    _ command: String,
+    origin: EditorSession?
+  ) -> VimHostResponse {
+    registerOpenVimBuffers()
+    switch command {
+    case "vim-buffer-current":
+      guard let origin,
+        let info = vimSessionCoordinator.bufferInfo(id: VimBufferID(origin.documentID))
+      else { return .rejected(.staleContext) }
+      return .completed(message: "Buffer \(info.number): \(info.name)")
+    case "vim-buffer-list":
+      let currentID = origin.map { VimBufferID($0.documentID) }
+      let lines = vimSessionCoordinator.listedBuffers.map { info in
+        let current = info.id == currentID ? "%" : " "
+        let modified = info.isModified ? "+" : " "
+        return "\(info.number)\(current)\(modified) \(info.name)"
+      }
+      return .completed(message: lines.isEmpty ? "No buffers" : lines.joined(separator: "\n"))
+    case "vim-buffer-next", "vim-buffer-previous":
+      guard let origin else { return .rejected(.staleContext) }
+      let forward = command == "vim-buffer-next"
+      guard
+        let target = vimSessionCoordinator.nextBuffer(
+          after: VimBufferID(origin.documentID),
+          forward: forward
+        )
+      else {
+        return .rejected(.failed(code: "VIM_NO_BUFFER", message: "No listed buffers."))
+      }
+      return switchVimBuffer(target, in: origin)
+    case "vim-buffer-first", "vim-buffer-last":
+      guard let origin else { return .rejected(.staleContext) }
+      let values = vimSessionCoordinator.listedBuffers
+      guard let target = command == "vim-buffer-first" ? values.first : values.last else {
+        return .rejected(.failed(code: "VIM_NO_BUFFER", message: "No listed buffers."))
+      }
+      return switchVimBuffer(target.id, in: origin)
+    case "vim-buffer-alternate":
+      guard let origin,
+        let target = vimSessionCoordinator.alternateBuffer(for: VimWindowID(origin.id))
+      else {
+        return .rejected(.failed(code: "VIM_NO_ALTERNATE", message: "No alternate buffer."))
+      }
+      return switchVimBuffer(target, in: origin)
+    case "vim-window-previous-active":
+      guard let previousActiveEditorSessionID,
+        let previous = editorSessions.first(where: { $0.id == previousActiveEditorSessionID })
+      else {
+        return .rejected(
+          .failed(code: "VIM_NO_PREVIOUS_WINDOW", message: "No previous Vim window."))
+      }
+      return activateVimWindow(previous) ? .accepted : .rejected(.staleContext)
+    case "vim-window-force-close":
+      guard let origin else { return .rejected(.staleContext) }
+      return closeVimWindow(origin, force: true)
+    case "vim-window-only":
+      guard let origin else { return .rejected(.staleContext) }
+      closeOtherVimWindows(keeping: origin.id)
+      return .accepted
+    case "vim-window-new-horizontal":
+      guard let origin else { return .rejected(.staleContext) }
+      return splitVimWindow(origin, horizontal: true)
+    case "vim-window-new-vertical":
+      guard let origin else { return .rejected(.staleContext) }
+      return splitVimWindow(origin, horizontal: false)
+    case "vim-window-split-horizontal":
+      guard let origin else { return .rejected(.staleContext) }
+      return splitVimWindow(origin, horizontal: true)
+    case "vim-window-split-vertical":
+      guard let origin else { return .rejected(.staleContext) }
+      return splitVimWindow(origin, horizontal: false)
+    case "vim-tab-close":
+      guard let origin, let document = origin.document, let backend else {
+        return .rejected(.staleContext)
+      }
+      if document.isDirty {
+        return .rejected(
+          .failed(code: "VIM_NO_WRITE", message: "No write since last change."))
+      }
+      _ = activateVimWindow(origin)
+      backend.closeDocument(document)
+      return .accepted
+    default:
+      break
+    }
+
+    for (prefix, horizontal) in [
+      ("vim-window-split-horizontal:", true),
+      ("vim-window-split-vertical:", false),
+    ] where command.hasPrefix(prefix) {
+      guard let origin, let backend else { return .rejected(.staleContext) }
+      let path = String(command.dropFirst(prefix.count))
+      guard !path.isEmpty else { return splitVimWindow(origin, horizontal: horizontal) }
+      let url = URL(
+        fileURLWithPath: NSString(string: path).expandingTildeInPath,
+        relativeTo: backend.workspaceURL
+      ).standardizedFileURL
+      let originalDocumentID = origin.documentID
+      Task { @MainActor [weak self, weak origin] in
+        guard let self, let origin, self.editorSessions.contains(where: { $0.id == origin.id }),
+          let document = await backend.openDocument(at: url)
+        else { return }
+        _ = self.switchEditorSession(origin.id, to: originalDocumentID)
+        _ = self.splitVimWindow(
+          origin,
+          horizontal: horizontal,
+          displaying: document
+        )
+      }
+      return .accepted
+    }
+    if command.hasPrefix("vim-window-") {
+      return navigateVimWindow(command, origin: origin)
+    }
+    if command.hasPrefix("vim-wincmd:") {
+      let key = String(command.dropFirst("vim-wincmd:".count))
+      return handleVimCustomTopologyCommand(
+        "vim-window-\(Self.vimWindowCommandName(key))", origin: origin)
+    }
+    if command.hasPrefix("vim-buffer-switch:") {
+      guard let origin else { return .rejected(.staleContext) }
+      let argument = String(command.dropFirst("vim-buffer-switch:".count))
+      guard let target = resolveVimBuffer(argument, current: origin) else {
+        return .rejected(
+          .failed(code: "VIM_NO_BUFFER", message: "Buffer \(argument) is ambiguous or missing."))
+      }
+      return switchVimBuffer(target.id, in: origin)
+    }
+    if command.hasPrefix("vim-buffer-add:") {
+      let path = String(command.dropFirst("vim-buffer-add:".count))
+      guard let backend else { return .rejected(.staleContext) }
+      let url = URL(
+        fileURLWithPath: NSString(string: path).expandingTildeInPath,
+        relativeTo: backend.workspaceURL
+      ).standardizedFileURL
+      let previousID = activeEditorSessionID
+      Task { @MainActor [weak self] in
+        guard let self, let document = await backend.openDocument(at: url) else { return }
+        _ = self.vimSessionCoordinator.registerBuffer(
+          id: VimBufferID(document.id),
+          name: document.url.path,
+          text: document.text,
+          history: document.vimHistory
+        )
+        if let previousID { self.activateEditorSession(previousID) }
+      }
+      return .accepted
+    }
+    for (prefix, wipe) in [
+      ("vim-buffer-delete:", false),
+      ("vim-buffer-unload:", false),
+      ("vim-buffer-wipeout:", true),
+    ] where command.hasPrefix(prefix) {
+      guard let origin else { return .rejected(.staleContext) }
+      var argument = String(command.dropFirst(prefix.count))
+      let force = argument.hasPrefix("!")
+      if force { argument.removeFirst() }
+      guard let target = resolveVimBuffer(argument, current: origin) else {
+        return .rejected(.failed(code: "VIM_NO_BUFFER", message: "Buffer does not exist."))
+      }
+      return deleteVimBuffer(target, force: force, wipe: wipe)
+    }
+    return .rejected(.failed(code: "VIM_UNKNOWN_HOST_COMMAND", message: command))
+  }
+
+  private static func vimWindowCommandName(_ key: String) -> String {
+    switch key.trimmingCharacters(in: .whitespacesAndNewlines) {
+    case "h": return "left:1"
+    case "j": return "down:1"
+    case "k": return "up:1"
+    case "l": return "right:1"
+    case "w": return "next:1"
+    case "W": return "previous:1"
+    case "p": return "previous-active"
+    case "s", "S": return "split-horizontal"
+    case "v": return "split-vertical"
+    case "n": return "new-horizontal"
+    case "o": return "only"
+    case "q", "c": return "close"
+    default: return "unknown"
+    }
+  }
+
+  private func navigateVimWindow(
+    _ command: String,
+    origin: EditorSession?
+  ) -> VimHostResponse {
+    guard let origin, activateVimWindow(origin) else { return .rejected(.staleContext) }
+    let body = String(command.dropFirst("vim-window-".count))
+    let pieces = body.split(separator: ":", maxSplits: 1).map(String.init)
+    let count = pieces.count > 1 ? max(1, Int(pieces[1]) ?? 1) : 1
+    switch pieces[0] {
+    case "left":
+      for _ in 0..<count { navigateVimSection(direction: .left) }
+    case "right":
+      for _ in 0..<count { navigateVimSection(direction: .right) }
+    case "up":
+      for _ in 0..<count { navigateVimSection(direction: .up) }
+    case "down":
+      for _ in 0..<count { navigateVimSection(direction: .down) }
+    case "next":
+      for _ in 0..<count { navigateVimSection(forward: true) }
+    case "previous":
+      for _ in 0..<count { navigateVimSection(forward: false) }
+    case "close":
+      return closeVimWindow(origin)
+    default:
+      return .rejected(.failed(code: "VIM_BAD_WINCOMMAND", message: command))
+    }
+    return .accepted
+  }
+
+  private func closeVimWindow(
+    _ origin: EditorSession,
+    force: Bool = false
+  ) -> VimHostResponse {
+    guard let location = vimWindowLocation(for: origin) else {
+      return .rejected(.staleContext)
+    }
+    if sectionalLayout.root.visibleVimEditorSectionIDs.count <= 1 {
+      if origin.document?.isDirty == true, !force {
+        return .rejected(
+          .failed(code: "VIM_NO_WRITE", message: "No write since last change. Use :q! to force."))
+      }
+      requestWindowClose()
+      return .accepted
+    }
+    removeVimWindowPresentation(origin, at: location)
+    activateBestAvailableVimWindow()
+    return .accepted
+  }
+
+  private func closeOtherVimWindows(keeping editorID: UUID) {
+    guard let kept = editorSessions.first(where: { $0.id == editorID }),
+      let keptLocation = vimWindowLocation(for: kept)
+    else { return }
+    let closing = editorSessions.filter { editor in
+      editor.id != editorID && vimWindowLocation(for: editor) != nil
+    }
+    for editor in closing {
+      guard let location = vimWindowLocation(for: editor),
+        location != keptLocation
+      else { continue }
+      removeVimWindowPresentation(editor, at: location)
+    }
+    _ = activateVimWindow(kept)
+  }
+
+  private func vimWindowLocation(for editor: EditorSession) -> VimWindowLocation? {
+    guard
+      let editorTabID = sectionalEditorAssignments.first(where: { $0.value == editor.id })?.key,
+      let sectionID = sectionalLayout.root.sectionID(containingTab: editorTabID),
+      let section = sectionalLayout.root.sectionNode(id: sectionID),
+      section.isSectionVisible,
+      section.tabs.contains(where: {
+        $0.id == editorTabID && $0.isVisible && $0.kind.isEditorHost
+      })
+    else { return nil }
+    return VimWindowLocation(sectionID: sectionID, editorTabID: editorTabID)
+  }
+
+  @discardableResult
+  private func activateVimWindow(_ editor: EditorSession) -> Bool {
+    guard let location = vimWindowLocation(for: editor) else { return false }
+    _ = sectionalLayout.activateVimEditorSection(location.sectionID)
+    activateEditorSession(editor.id)
+    return true
+  }
+
+  private func activateVimSection(_ sectionID: UUID) {
+    guard let editorTabID = sectionalLayout.activateVimEditorSection(sectionID),
+      let editorID = assignEditorSession(toSection: editorTabID)
+    else { return }
+    activateEditorSession(editorID)
+  }
+
+  private func navigateVimSection(forward: Bool) {
+    guard let sectionID = sectionalLayout.navigateVimEditorSection(forward: forward) else { return }
+    activateVimSection(sectionID)
+  }
+
+  private func navigateVimSection(direction: MainSectionDirection) {
+    guard let sectionID = sectionalLayout.navigateVimEditorSection(direction: direction) else {
+      return
+    }
+    activateVimSection(sectionID)
+  }
+
+  private func splitVimWindow(
+    _ origin: EditorSession,
+    horizontal: Bool,
+    displaying requestedDocument: EditorTab? = nil
+  ) -> VimHostResponse {
+    guard let document = requestedDocument ?? origin.document,
+      let location = vimWindowLocation(for: origin)
+    else {
+      return .rejected(.staleContext)
+    }
+    _ = activateVimWindow(origin)
+    let axis: MainSectionSplitAxis = horizontal ? .vertical : .horizontal
+    guard
+      let created = sectionalLayout.splitVimEditorSection(
+        id: location.sectionID,
+        axis: axis
+      )
+    else {
+      return .rejected(
+        .failed(code: "VIM_SPLIT_FAILED", message: "Calcite could not split this section."))
+    }
+
+    let editor = createEditorSession(for: document, activate: false)
+    editor.updateSelection(origin.selectedRange)
+    editor.updateScroll(
+      horizontal: origin.horizontalScrollOffset,
+      vertical: origin.verticalScrollOffset
+    )
+    editor.updateZoom(origin.zoomScale)
+    sectionalEditorAssignments[created.editorTabID] = editor.id
+    _ = sectionalLayout.activateVimEditorSection(created.sectionID)
+    activateEditorSession(editor.id)
+    return .accepted
+  }
+
+  private func removeVimWindowPresentation(
+    _ editor: EditorSession,
+    at location: VimWindowLocation
+  ) {
+    guard let section = sectionalLayout.root.sectionNode(id: location.sectionID) else { return }
+    sectionalEditorAssignments.removeValue(forKey: location.editorTabID)
+    if section.tabs.count > 1 {
+      sectionalLayout.removeTab(sectionID: location.sectionID, tabID: location.editorTabID)
+    } else {
+      sectionalLayout.removeSection(id: location.sectionID)
+    }
+    closeEditorSession(editor.id)
+  }
+
+  private func activateBestAvailableVimWindow() {
+    let preferredSectionID = sectionalLayout.activeSectionID.flatMap { candidate in
+      sectionalLayout.root.visibleVimEditorSectionIDs.contains(candidate) ? candidate : nil
+    }
+    guard
+      let sectionID = preferredSectionID ?? sectionalLayout.root.visibleVimEditorSectionIDs.first
+    else { return }
+    activateVimSection(sectionID)
+  }
+
+  private func deleteVimBuffer(
+    _ info: VimBufferInfo,
+    force: Bool,
+    wipe: Bool
+  ) -> VimHostResponse {
+    guard let backend, let document = backend.document(id: info.id.rawValue) else {
+      return .rejected(.failed(code: "VIM_NO_BUFFER", message: "Buffer does not exist."))
+    }
+    if document.isDirty, !force {
+      return .rejected(
+        .failed(code: "VIM_NO_WRITE", message: "No write since last change for \(document.title)."))
+    }
+    let fallback = vimSessionCoordinator.listedBuffers.first {
+      $0.id != info.id && backend.document(id: $0.id.rawValue) != nil
+    }
+    let affected = editorSessions.filter { $0.documentID == info.id.rawValue }
+    for editor in affected {
+      if let fallback {
+        _ = switchEditorSession(editor.id, to: fallback.id.rawValue)
+      } else {
+        closeEditorSession(editor.id)
+      }
+    }
+    vimSessionCoordinator.updateBufferMetadata(
+      id: info.id,
+      isLoaded: false,
+      isModified: document.isDirty, isListed: false
+    )
+    if wipe { vimSessionCoordinator.wipeBuffer(info.id) }
+    backend.closeDocument(document)
+    return .accepted
+  }
+
+  private func scrollVimWindow(_ origin: EditorSession, lines: Int) {
+    guard let document = origin.document else { return }
+    let text = document.text as NSString
+    let location = min(max(0, origin.selectedRange.location), text.length)
+    var target = location
+    if lines > 0 {
+      for _ in 0..<lines {
+        let range = text.lineRange(for: NSRange(location: target, length: 0))
+        target = min(text.length, NSMaxRange(range))
+      }
+    } else if lines < 0 {
+      for _ in 0..<(-lines) {
+        guard target > 0 else { break }
+        let probe = max(0, target - 1)
+        target = text.lineRange(for: NSRange(location: probe, length: 0)).location
+      }
+    }
+    origin.updateSelection(NSRange(location: target, length: 0))
   }
 
   // MARK: - Document and utility close workflows
@@ -835,13 +1423,15 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   )? {
     guard let backend else { return nil }
     let sectionID = sectionalLayout.activeSectionID ?? sectionalLayout.root.visibleSectionIDs.first
-    guard let sectionID, let section = sectionalLayout.root.sectionNode(id: sectionID) else { return nil }
+    guard let sectionID, let section = sectionalLayout.root.sectionNode(id: sectionID) else {
+      return nil
+    }
     let primaryEditorTabID = section.visibleTabs.first {
       $0.kind == .editor || $0.kind == .workspace
     }?.id
     let items = section.visibleTabs.flatMap { tab -> [SectionTabNavigationItem] in
       if tab.id == primaryEditorTabID,
-        (tab.kind == .editor || tab.kind == .workspace),
+        tab.kind == .editor || tab.kind == .workspace,
         !backend.documents.isEmpty
       {
         return backend.documents.map { .document(editorTabID: tab.id, documentID: $0.id) }
@@ -864,7 +1454,8 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   }
 
   func receiveVimSplit(horizontal: Bool) {
-    sendLayoutCommand(horizontal ? .splitBelow : .splitRight)
+    guard let origin = activeEditorSession else { return }
+    _ = splitVimWindow(origin, horizontal: horizontal)
   }
 
   func requestWindowClose() {
@@ -1043,10 +1634,16 @@ extension CalciteBackendWindowSession: EditorCommandExecutorDelegate {
 
   func commandSelectDocument(_ id: UUID) {
     guard let backend, let document = backend.document(id: id) else { return }
-    let editor =
-      editorSessions.first { $0.documentID == id }
-      ?? createEditorSession(for: document, activate: false)
-    activateEditorSession(editor.id)
+    if let editor = activeEditorSession {
+      editor.switchDocument(to: document)
+      _ = vimSessionCoordinator.switchBuffer(
+        in: VimWindowID(editor.id),
+        to: VimBufferID(document.id)
+      )
+      activateEditorSession(editor.id)
+    } else {
+      _ = createEditorSession(for: document)
+    }
   }
 
   func commandPresentSection(_ kind: MainSectionKind) {

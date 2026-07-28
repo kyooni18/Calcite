@@ -165,7 +165,7 @@ extension VimEngine {
     }
     return max(
       1,
-      VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+      VimDisplayColumns.width(of: character, at: column, tabWidth: bufferStateStorage.tabWidth)
     )
   }
 
@@ -193,7 +193,7 @@ extension VimEngine {
       guard let character = character(at: current) else { break }
       let width = max(
         1,
-        VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+        VimDisplayColumns.width(of: character, at: column, tabWidth: bufferStateStorage.tabWidth)
       )
       if column + width > desiredColumn { return current }
       let next = nextCharacterBoundary(from: current)
@@ -227,7 +227,7 @@ extension VimEngine {
       guard let character = character(at: current) else { break }
       let width = max(
         1,
-        VimDisplayColumns.width(of: character, at: column, tabWidth: storedTabWidth)
+        VimDisplayColumns.width(of: character, at: column, tabWidth: bufferStateStorage.tabWidth)
       )
       let next = nextCharacterBoundary(from: current)
       if column + width >= desiredColumn { return max(current, next) }
@@ -381,8 +381,9 @@ extension VimEngine {
       return .whitespace
     }
     if whole { return .keyword }
-    let keyword = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
-    return character.unicodeScalars.contains(where: keyword.contains) ? .keyword : .punctuation
+    return character.unicodeScalars.contains(where: keywordOptions.contains)
+      ? .keyword
+      : .punctuation
   }
 
   func isHorizontalWhitespace(at offset: Int) -> Bool {
@@ -518,55 +519,102 @@ extension VimEngine {
     state.cursor = normalizedRange.lowerBound + replacement.utf16.count
   }
 
-  func adjustStoredPositions(
+  func adjustedPosition(
+    _ position: Int,
     afterReplacing range: Range<Int>,
-    replacementUTF16Count: Int
-  ) {
+    replacementUTF16Count: Int,
+    insertionAdvancesBoundary: Bool
+  ) -> Int {
     let delta = replacementUTF16Count - range.count
-    func adjusted(_ position: Int) -> Int {
-      if position < range.lowerBound { return position }
-      if range.isEmpty, position == range.lowerBound { return position + replacementUTF16Count }
-      if position <= range.upperBound { return range.lowerBound + replacementUTF16Count }
-      return position + delta
+    if position < range.lowerBound { return position }
+    if range.isEmpty, position == range.lowerBound {
+      return insertionAdvancesBoundary ? position + replacementUTF16Count : position
     }
-    marks = marks.mapValues { normalizedVimUTF16Offset(adjusted($0), in: state.text) }
-    jumpBackStack = jumpBackStack.map { normalizedVimUTF16Offset(adjusted($0), in: state.text) }
-    jumpForwardStack = jumpForwardStack.map {
-      normalizedVimUTF16Offset(adjusted($0), in: state.text)
+    if position <= range.upperBound { return range.lowerBound + replacementUTF16Count }
+    return position + delta
+  }
+
+  func adjustBufferPositions(
+    afterReplacing range: Range<Int>,
+    replacementUTF16Count: Int,
+    insertionAdvancesBoundary: Bool = true
+  ) {
+    marks = marks.mapValues {
+      normalizedVimUTF16Offset(
+        adjustedPosition(
+          $0,
+          afterReplacing: range,
+          replacementUTF16Count: replacementUTF16Count,
+          insertionAdvancesBoundary: insertionAdvancesBoundary
+        ),
+        in: state.text
+      )
     }
     changePositions = changePositions.map {
-      normalizedVimUTF16Offset(adjusted($0), in: state.text)
+      normalizedVimUTF16Offset(
+        adjustedPosition(
+          $0,
+          afterReplacing: range,
+          replacementUTF16Count: replacementUTF16Count,
+          insertionAdvancesBoundary: insertionAdvancesBoundary
+        ),
+        in: state.text
+      )
     }
-    if let anchor = visualAnchor {
-      visualAnchor = normalizedVimUTF16Offset(adjusted(anchor), in: state.text)
+  }
+
+  func adjustWindowPositions(
+    afterReplacing range: Range<Int>,
+    replacementUTF16Count: Int,
+    insertionAdvancesBoundary: Bool = true,
+    adjustCursor: Bool = false
+  ) {
+    func adjusted(_ position: Int) -> Int {
+      normalizedVimUTF16Offset(
+        adjustedPosition(
+          position,
+          afterReplacing: range,
+          replacementUTF16Count: replacementUTF16Count,
+          insertionAdvancesBoundary: insertionAdvancesBoundary
+        ),
+        in: state.text
+      )
     }
+    if adjustCursor { state.cursor = adjusted(state.cursor) }
+    jumpBackStack = jumpBackStack.map(adjusted)
+    jumpForwardStack = jumpForwardStack.map(adjusted)
+    if let anchor = visualAnchor { visualAnchor = adjusted(anchor) }
     if let selection = state.selection {
       state.selection = VimSelection(adjusted(selection.lowerBound), adjusted(selection.upperBound))
     }
   }
 
+  func adjustStoredPositions(
+    afterReplacing range: Range<Int>,
+    replacementUTF16Count: Int
+  ) {
+    adjustBufferPositions(
+      afterReplacing: range,
+      replacementUTF16Count: replacementUTF16Count
+    )
+    adjustWindowPositions(
+      afterReplacing: range,
+      replacementUTF16Count: replacementUTF16Count
+    )
+  }
+
   func adjustPositions(afterReplacing range: Range<Int>, replacementUTF16Count: Int) {
-    let delta = replacementUTF16Count - range.count
-    func adjusted(_ position: Int) -> Int {
-      if position < range.lowerBound { return position }
-      if position <= range.upperBound { return range.lowerBound + replacementUTF16Count }
-      return position + delta
-    }
-    state.cursor = normalizedVimUTF16Offset(adjusted(state.cursor), in: state.text)
-    marks = marks.mapValues { normalizedVimUTF16Offset(adjusted($0), in: state.text) }
-    jumpBackStack = jumpBackStack.map { normalizedVimUTF16Offset(adjusted($0), in: state.text) }
-    jumpForwardStack = jumpForwardStack.map {
-      normalizedVimUTF16Offset(adjusted($0), in: state.text)
-    }
-    changePositions = changePositions.map {
-      normalizedVimUTF16Offset(adjusted($0), in: state.text)
-    }
-    if let anchor = visualAnchor {
-      visualAnchor = normalizedVimUTF16Offset(adjusted(anchor), in: state.text)
-    }
-    if let selection = state.selection {
-      state.selection = VimSelection(adjusted(selection.lowerBound), adjusted(selection.upperBound))
-    }
+    adjustBufferPositions(
+      afterReplacing: range,
+      replacementUTF16Count: replacementUTF16Count,
+      insertionAdvancesBoundary: false
+    )
+    adjustWindowPositions(
+      afterReplacing: range,
+      replacementUTF16Count: replacementUTF16Count,
+      insertionAdvancesBoundary: false,
+      adjustCursor: true
+    )
   }
 
   func normalized(_ range: Range<Int>) -> Range<Int> {
@@ -625,9 +673,17 @@ extension VimEngine {
   func advanceCharacters(from offset: Int, count: Int) -> Int {
     var result = normalizedVimUTF16Offset(offset, in: state.text)
     if count >= 0 {
-      for _ in 0..<count { result = nextCharacterBoundary(from: result) }
+      for _ in 0..<count {
+        let next = nextCharacterBoundary(from: result)
+        guard next > result else { break }
+        result = next
+      }
     } else {
-      for _ in 0..<(-count) { result = previousCharacterBoundary(from: result) }
+      for _ in 0..<(-count) {
+        let previous = previousCharacterBoundary(from: result)
+        guard previous < result else { break }
+        result = previous
+      }
     }
     return result
   }
@@ -722,6 +778,7 @@ extension VimEngine {
       state.cursor = clamp(target)
     }
     preferredColumn = nil
+    preferredVisualColumn = nil
     normalizeCursorForMode()
     updateVisualSelection()
   }
@@ -733,6 +790,7 @@ extension VimEngine {
       state.cursor = clamp(target)
     }
     preferredColumn = nil
+    preferredVisualColumn = nil
     normalizeCursorForMode()
     updateVisualSelection()
   }
@@ -761,6 +819,7 @@ extension VimEngine {
     guard changePositionIndex < changePositions.count else { return }
     state.cursor = clamp(changePositions[changePositionIndex])
     preferredColumn = nil
+    preferredVisualColumn = nil
     normalizeCursorForMode()
     updateVisualSelection()
   }
@@ -781,12 +840,6 @@ extension VimEngine {
 }
 
 extension VimEngine {
-  enum VimViewportPosition {
-    case top
-    case middle
-    case bottom
-  }
-
   func moveToViewport(_ position: VimViewportPosition, count: Int) {
     lineIndex.synchronize(with: state.text)
     let top = min(max(1, viewportTopLine), lineIndex.lineCount)
@@ -802,6 +855,7 @@ extension VimEngine {
     }
     state.cursor = firstNonBlank(at: lineOffset(targetLine))
     preferredColumn = nil
+    preferredVisualColumn = nil
     normalizeCursorForMode()
     updateVisualSelection()
   }

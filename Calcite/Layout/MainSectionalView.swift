@@ -396,8 +396,11 @@ private final class MainSectionSplitAutosaveLocatorView: NSView {
           splitView.arrangedSubviews.count == 2,
           abs(splitView.arrangedSubviews[0].frame.height - splitView.bounds.height / 2) < 2
         {
+          // HSplitView measures this divider from the lower edge. The first arranged view is
+          // above it, so its lower edge must sit at the bottom-panel fraction; using the
+          // complement makes the unrelated bottom panel consume almost the whole window.
           splitView.setPosition(
-            splitView.bounds.height * (1 - fraction),
+            splitView.bounds.height * fraction,
             ofDividerAt: 0
           )
           didInstallDefaultPosition = true
@@ -482,7 +485,7 @@ private final class MainSectionKeyboardFocusLocatorView: NSView {
       matchesInput = { $0 is CodeEditorTextView || $0 is TerminalInputTextView }
     case .panel, .terminal:
       matchesInput = { $0 is TerminalInputTextView }
-    case .sidebar, .settings, .themeBuilder, .problems, .buildOutput, .debug, .empty:
+    case .sidebar, .symbols, .settings, .themeBuilder, .problems, .buildOutput, .debug, .empty:
       return
     }
 
@@ -1006,7 +1009,7 @@ private struct MainSectionLeafView: View {
 
   private var sectionBackground: Color {
     switch selectedKind {
-    case .sidebar:
+    case .sidebar, .symbols:
       backend.controller.profile.workbench.sidebarBackground.color
     case .panel, .terminal, .problems, .buildOutput, .debug:
       backend.controller.profile.workbench.panelBackground.color
@@ -1052,6 +1055,12 @@ private struct MainSectionContentView: View {
 
     case .sidebar:
       CalciteWorkspaceSidebar(
+        backend: backend,
+        windowSession: windowSession
+      )
+
+    case .symbols:
+      CalciteSymbolsView(
         backend: backend,
         windowSession: windowSession
       )

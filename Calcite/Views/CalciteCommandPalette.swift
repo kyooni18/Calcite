@@ -224,6 +224,15 @@ struct CalciteCommandPalette: View {
       ) {
         windowSession.sectionalLayout.presentTab(.debug)
       },
+      action(
+        "symbols",
+        "Show Symbols",
+        "list.bullet.indent",
+        category: "Panels",
+        keywords: ["outline", "table of contents", "document"]
+      ) {
+        windowSession.sectionalLayout.presentTab(.symbols)
+      },
 
       command(
         "fast-panel",

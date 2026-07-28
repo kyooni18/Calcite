@@ -55,6 +55,7 @@ extension VimEngine {
       blockInsertSession = nil
       temporaryInsertReturnMode = nil
 
+      let updatesSharedBufferState = bufferStateStorage.authoritativeText != text
       state.text = text
       lineIndex.synchronize(with: before.text)
       lineIndex.apply(
@@ -63,12 +64,20 @@ extension VimEngine {
         insertedText: delta.insertedText,
         resultingText: text
       )
-      adjustStoredPositions(
+      if updatesSharedBufferState {
+        adjustBufferPositions(
+          afterReplacing: changedRange,
+          replacementUTF16Count: delta.insertedUTF16Count
+        )
+        bufferStateStorage.authoritativeText = text
+      }
+      adjustWindowPositions(
         afterReplacing: changedRange,
         replacementUTF16Count: delta.insertedUTF16Count
       )
       state.cursor = normalizedVimUTF16Offset(adjustedCursor, in: text)
       preferredColumn = nil
+      preferredVisualColumn = nil
 
       if conflicts {
         state.mode = .normal

@@ -66,17 +66,26 @@ public struct VimHostCapabilities: Hashable, Sendable {
 public struct VimHostInvocationContext: Hashable, Sendable {
   public var documentURL: URL?
   public var editorSessionID: UUID?
+  public var bufferID: VimBufferID?
+  public var windowID: VimWindowID?
+  public var tabPageID: VimTabPageID?
   public var selection: VimSelection?
   public var revision: VimDocumentRevision?
 
   public init(
     documentURL: URL? = nil,
     editorSessionID: UUID? = nil,
+    bufferID: VimBufferID? = nil,
+    windowID: VimWindowID? = nil,
+    tabPageID: VimTabPageID? = nil,
     selection: VimSelection? = nil,
     revision: VimDocumentRevision? = nil
   ) {
     self.documentURL = documentURL
     self.editorSessionID = editorSessionID
+    self.bufferID = bufferID
+    self.windowID = windowID
+    self.tabPageID = tabPageID
     self.selection = selection
     self.revision = revision
   }

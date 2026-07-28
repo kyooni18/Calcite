@@ -83,13 +83,24 @@ final class VimStage8TransactionTests: XCTestCase {
     XCTAssertEqual(engine.state.mode, .normal)
   }
 
-  func testHostVisualGeometryOverridesVerticalMovement() throws {
+  func testHostVisualGeometryOverridesDisplayLineMovementOnly() throws {
     let engine = VimEngine(text: "abc\ndef", cursor: 1)
-    let geometry = FixedGeometryProvider(verticalOffset: 5, preferredColumn: 320)
+    let geometry = FixedGeometryProvider(verticalOffset: 0, preferredColumn: 320)
     engine.installVisualGeometryProvider(geometry)
 
-    _ = try engine.execute(.move(.down))
+    _ = try engine.executeNotation("j")
     XCTAssertEqual(engine.state.cursor, 5)
+    XCTAssertEqual(geometry.moveCallCount, 0)
+
+    _ = try engine.executeNotation("gk")
+    XCTAssertEqual(engine.state.cursor, 0)
+    XCTAssertEqual(geometry.moveCallCount, 1)
+    XCTAssertNil(geometry.receivedPreferredColumns[0])
+
+    _ = try engine.executeNotation("gj")
+    XCTAssertEqual(engine.state.cursor, 5)
+    XCTAssertEqual(geometry.moveCallCount, 2)
+    XCTAssertEqual(geometry.receivedPreferredColumns[1], 320)
   }
 
   func testHostCapabilitiesReturnStructuredUnsupportedMessage() {
@@ -120,6 +131,8 @@ final class VimStage8TransactionTests: XCTestCase {
 private final class FixedGeometryProvider: @unchecked Sendable, VimVisualGeometryProviding {
   let verticalOffset: Int
   let preferredColumn: Int
+  private(set) var moveCallCount = 0
+  private(set) var receivedPreferredColumns: [Int?] = []
 
   init(verticalOffset: Int, preferredColumn: Int) {
     self.verticalOffset = verticalOffset
@@ -150,6 +163,12 @@ private final class FixedGeometryProvider: @unchecked Sendable, VimVisualGeometr
     preferredColumn: Int?,
     text: String
   ) -> VimVisualMovement? {
-    VimVisualMovement(utf16Offset: verticalOffset, preferredColumn: self.preferredColumn)
+    moveCallCount += 1
+    receivedPreferredColumns.append(preferredColumn)
+    let offset = direction < 0 ? verticalOffset : min(text.utf16.count, 5)
+    return VimVisualMovement(
+      utf16Offset: offset,
+      preferredColumn: self.preferredColumn
+    )
   }
 }

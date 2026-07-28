@@ -64,7 +64,8 @@ struct EditorStatusMessagePresentation: Equatable {
 enum CalciteEditorStatusCoordinator {
   static func presentation(
     tab: EditorTab,
-    profile: EditorCustomProfile
+    profile: EditorCustomProfile,
+    selectedRange: NSRange? = nil
   ) -> CalciteEditorStatusPresentation {
     guard profile.vim.enabled else {
       return .standard(StandardEditorStatus(languageID: tab.languageID, isDirty: tab.isDirty))
@@ -100,7 +101,8 @@ enum CalciteEditorStatusCoordinator {
       return .vimInsert(
         VimInsertEditorStatus(
           label:
-            block?.isBlockAppend == true ? "V-BLOCK APPEND" : ( block != nil ? "V-BLOCK INSERT" : "INSERT" ),
+            block?.isBlockAppend == true
+            ? "V-BLOCK APPEND" : (block != nil ? "V-BLOCK INSERT" : "INSERT"),
           inputSource: friendlyInputSource(tab.vimInputSourceIdentifier),
           isComposing: interaction.isComposingText,
           completionIndex: tab.completions.isEmpty ? nil : tab.selectedCompletionIndex + 1,
@@ -136,7 +138,10 @@ enum CalciteEditorStatusCoordinator {
           )
         )
       }
-      let selection = selectionMetrics(tab: tab)
+      let selection = selectionMetrics(
+        text: tab.text,
+        selectedRange: selectedRange ?? tab.selectedRange
+      )
       return .vimVisual(
         VimVisualEditorStatus(
           label: interaction.mode == .visualLine ? "V-LINE" : "VISUAL",
@@ -161,12 +166,15 @@ enum CalciteEditorStatusCoordinator {
     }
   }
 
-  private static func selectionMetrics(tab: EditorTab) -> (characters: Int, lines: Int) {
-    let source = tab.text as NSString
-    let location = min(max(0, tab.selectedRange.location), source.length)
+  private static func selectionMetrics(
+    text: String,
+    selectedRange: NSRange
+  ) -> (characters: Int, lines: Int) {
+    let source = text as NSString
+    let location = min(max(0, selectedRange.location), source.length)
     let range = NSRange(
       location: location,
-      length: min(max(0, tab.selectedRange.length), source.length - location)
+      length: min(max(0, selectedRange.length), source.length - location)
     )
     let selected = source.substring(with: range)
     let characters = selected.count
@@ -194,12 +202,17 @@ enum CalciteEditorStatusCoordinator {
 @MainActor
 struct CalciteEditorStatusBar: View {
   @ObservedObject var tab: EditorTab
+  let selectedRange: NSRange
   let profile: EditorCustomProfile
   let editorMode: EditorInterface
   let onSelectInputMode: (EditorInterface) -> Void
 
   private var presentation: CalciteEditorStatusPresentation {
-    CalciteEditorStatusCoordinator.presentation(tab: tab, profile: profile)
+    CalciteEditorStatusCoordinator.presentation(
+      tab: tab,
+      profile: profile,
+      selectedRange: selectedRange
+    )
   }
 
   var body: some View {
@@ -217,13 +230,22 @@ struct CalciteEditorStatusBar: View {
         Label("\(tab.warningCount)", systemImage: "exclamationmark.triangle")
           .foregroundStyle(.orange)
       }
-      Text("Ln \(tab.currentLine), Col \(tab.currentColumn)")
+      let position = cursorPosition
+      Text("Ln \(position.line), Col \(position.column)")
         .monospacedDigit()
     }
     .font(.caption)
     .padding(.horizontal, 10)
     .frame(height: 24)
     .background(.bar)
+  }
+
+  private var cursorPosition: (line: Int, column: Int) {
+    let location = min(max(0, selectedRange.location), (tab.text as NSString).length)
+    return (
+      tab.lineNumber(atUTF16Offset: location),
+      tab.columnNumber(atUTF16Offset: location)
+    )
   }
 
   @ViewBuilder

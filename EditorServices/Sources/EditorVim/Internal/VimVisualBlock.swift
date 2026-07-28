@@ -115,10 +115,11 @@ extension VimEngine {
         for lineStart in lineStarts.reversed() {
           if op == .indent {
             replace(
-              range: lineStart..<lineStart, with: String(repeating: " ", count: storedTabWidth))
+              range: lineStart..<lineStart,
+              with: String(repeating: " ", count: bufferStateStorage.tabWidth))
           } else {
             var end = lineStart
-            var remaining = storedTabWidth
+            var remaining = bufferStateStorage.tabWidth
             while remaining > 0, end < lineContentEnd(at: lineStart),
               isHorizontalWhitespace(at: end)
             {
@@ -325,7 +326,7 @@ extension VimEngine {
     }
   }
 
-  private func blockOffsetsAfterDeleting(_ ranges: [Range<Int>]) -> [Int] {
+  func blockOffsetsAfterDeleting(_ ranges: [Range<Int>]) -> [Int] {
     var removed = 0
     return ranges.map { range in
       defer { removed += range.count }
@@ -333,7 +334,7 @@ extension VimEngine {
     }
   }
 
-  private func transformedBlockText(_ value: String, operation: VimOperator) -> String {
+  func transformedBlockText(_ value: String, operation: VimOperator) -> String {
     switch operation {
     case .uppercase:
       return value.uppercased()
@@ -379,5 +380,6 @@ extension VimEngine {
     visualSelectionShape = .character
     blockInsertSession = nil
     preferredColumn = nil
+    preferredVisualColumn = nil
   }
 }
