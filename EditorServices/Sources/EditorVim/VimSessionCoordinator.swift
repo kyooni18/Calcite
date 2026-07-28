@@ -19,6 +19,12 @@ public struct VimTabPageID: Hashable, Sendable, Codable {
 }
 
 @_spi(Calcite)
+public struct VimViewID: Hashable, Sendable, Codable {
+  public var rawValue: UUID
+  public init(_ rawValue: UUID) { self.rawValue = rawValue }
+}
+
+@_spi(Calcite)
 public struct VimBufferInfo: Hashable, Sendable {
   public var id: VimBufferID
   public var number: Int
@@ -44,33 +50,330 @@ public struct VimBufferInfo: Hashable, Sendable {
   }
 }
 
-/// Owns Vim's window-session global state and the buffer/window relationships
-/// used by Calcite. A controller is cached per `(window, buffer)` pair, which
-/// preserves window-local cursor/parser state while sharing the buffer's undo,
-/// marks, options, and the session's registers/macros/history.
+@_spi(Calcite)
+public struct VimBufferSnapshot: Hashable, Sendable {
+  public var text: String
+  public var revision: UInt64
+
+  public init(text: String, revision: UInt64) {
+    self.text = text
+    self.revision = revision
+  }
+}
+
+@_spi(Calcite)
+public enum VimControllerAttachment: Hashable, Sendable {
+  case activate
+  case retain
+}
+
+@_spi(Calcite)
+public enum VimBufferCommitResult: Hashable, Sendable {
+  case committed(VimBufferSnapshot)
+  case conflict(current: VimBufferSnapshot)
+  case missingBuffer
+}
+
+extension VimEngine {
+  @discardableResult
+  func registerSessionBuffer(
+    id: VimBufferID,
+    name: String,
+    text: String,
+    tabWidth: Int,
+    history: VimHistorySnapshot
+  ) -> VimBufferInfo {
+    lock.withLock {
+      globalStateStorage.history.merge(history)
+      if var record = sessionStorage.buffers[id] {
+        record.info.name = name
+        record.info.isLoaded = true
+        record.state.tabWidth = max(1, tabWidth)
+        sessionStorage.buffers[id] = record
+        return record.info
+      }
+
+      let info = VimBufferInfo(
+        id: id,
+        number: sessionStorage.nextBufferNumber,
+        name: name
+      )
+      sessionStorage.nextBufferNumber += 1
+      sessionStorage.buffers[id] = VimEngineBufferRecord(
+        info: info,
+        state: VimBufferStateStorage(text: text, tabWidth: tabWidth)
+      )
+      sessionStorage.bufferOrder.append(id)
+      return info
+    }
+  }
+
+  func updateSessionBufferMetadata(
+    id: VimBufferID,
+    name: String? = nil,
+    isLoaded: Bool? = nil,
+    isModified: Bool? = nil,
+    isListed: Bool? = nil
+  ) {
+    lock.withLock {
+      guard var record = sessionStorage.buffers[id] else { return }
+      if let name { record.info.name = name }
+      if let isLoaded { record.info.isLoaded = isLoaded }
+      if let isModified { record.info.isModified = isModified }
+      if let isListed { record.info.isListed = isListed }
+      sessionStorage.buffers[id] = record
+    }
+  }
+
+  func sessionBufferInfo(id: VimBufferID) -> VimBufferInfo? {
+    lock.withLock { sessionStorage.buffers[id]?.info }
+  }
+
+  func sessionBufferInfo(number: Int) -> VimBufferInfo? {
+    lock.withLock {
+      sessionStorage.buffers.values.first(where: { $0.info.number == number })?.info
+    }
+  }
+
+  var sessionListedBuffers: [VimBufferInfo] {
+    lock.withLock {
+      sessionStorage.bufferOrder
+        .compactMap { sessionStorage.buffers[$0]?.info }
+        .filter(\.isListed)
+    }
+  }
+
+  @discardableResult
+  func ensureSessionView(
+    windowID: VimWindowID,
+    bufferID: VimBufferID,
+    cursor: Int,
+    tabPageID: VimTabPageID?,
+    attachment: VimControllerAttachment
+  ) -> VimViewID {
+    lock.withLock {
+      guard let buffer = sessionStorage.buffers[bufferID] else {
+        preconditionFailure("Buffer must be registered before attaching a Vim view")
+      }
+
+      var window = sessionStorage.windows[windowID]
+        ?? VimEngineWindowRecord(
+          currentBuffer: nil,
+          alternateBuffer: nil,
+          tabPageID: tabPageID,
+          views: [:]
+        )
+
+      let viewID: VimViewID
+      if let existing = window.views[bufferID] {
+        viewID = existing
+      } else {
+        viewID = VimViewID(UUID())
+        window.views[bufferID] = viewID
+        sessionStorage.views[viewID] = VimEngineViewStateStorage(
+          id: viewID,
+          windowID: windowID,
+          bufferID: bufferID,
+          text: buffer.state.authoritativeText,
+          cursor: cursor
+        )
+      }
+
+      if attachment == .activate, window.currentBuffer != bufferID {
+        if let current = window.currentBuffer { window.alternateBuffer = current }
+        window.currentBuffer = bufferID
+      }
+      if let tabPageID { window.tabPageID = tabPageID }
+      sessionStorage.windows[windowID] = window
+
+      withView(viewID) { normalizeCursorForMode() }
+      return viewID
+    }
+  }
+
+  func sessionViewID(windowID: VimWindowID, bufferID: VimBufferID) -> VimViewID? {
+    lock.withLock { sessionStorage.windows[windowID]?.views[bufferID] }
+  }
+
+  func currentSessionViewID(for windowID: VimWindowID) -> VimViewID? {
+    lock.withLock {
+      guard let window = sessionStorage.windows[windowID],
+        let bufferID = window.currentBuffer
+      else { return nil }
+      return window.views[bufferID]
+    }
+  }
+
+  func currentSessionBuffer(for windowID: VimWindowID) -> VimBufferID? {
+    lock.withLock { sessionStorage.windows[windowID]?.currentBuffer }
+  }
+
+  func alternateSessionBuffer(for windowID: VimWindowID) -> VimBufferID? {
+    lock.withLock { sessionStorage.windows[windowID]?.alternateBuffer }
+  }
+
+  @discardableResult
+  func switchSessionBuffer(in windowID: VimWindowID, to bufferID: VimBufferID) -> Bool {
+    lock.withLock {
+      guard let buffer = sessionStorage.buffers[bufferID],
+        var window = sessionStorage.windows[windowID]
+      else { return false }
+      if window.views[bufferID] == nil {
+        let viewID = VimViewID(UUID())
+        window.views[bufferID] = viewID
+        sessionStorage.views[viewID] = VimEngineViewStateStorage(
+          id: viewID,
+          windowID: windowID,
+          bufferID: bufferID,
+          text: buffer.state.authoritativeText,
+          cursor: 0
+        )
+      }
+      guard window.currentBuffer != bufferID else { return true }
+      if let current = window.currentBuffer { window.alternateBuffer = current }
+      window.currentBuffer = bufferID
+      sessionStorage.windows[windowID] = window
+      return true
+    }
+  }
+
+  func nextSessionBuffer(after bufferID: VimBufferID, forward: Bool) -> VimBufferID? {
+    lock.withLock {
+      let listed = sessionStorage.bufferOrder.filter {
+        sessionStorage.buffers[$0]?.info.isListed == true
+      }
+      guard !listed.isEmpty, let index = listed.firstIndex(of: bufferID) else {
+        return listed.first
+      }
+      let delta = forward ? 1 : -1
+      return listed[(index + delta + listed.count) % listed.count]
+    }
+  }
+
+  func detachSessionBuffer(_ bufferID: VimBufferID, from windowID: VimWindowID) {
+    lock.withLock {
+      guard var window = sessionStorage.windows[windowID] else { return }
+      if let viewID = window.views.removeValue(forKey: bufferID) {
+        sessionStorage.views.removeValue(forKey: viewID)
+      }
+      if window.alternateBuffer == bufferID { window.alternateBuffer = nil }
+      if window.currentBuffer == bufferID {
+        if let alternate = window.alternateBuffer, window.views[alternate] != nil {
+          window.currentBuffer = alternate
+          window.alternateBuffer = nil
+        } else {
+          window.currentBuffer = window.views.keys.first
+        }
+      }
+      sessionStorage.windows[windowID] = window
+    }
+  }
+
+  func removeSessionWindow(_ windowID: VimWindowID) {
+    lock.withLock {
+      guard let window = sessionStorage.windows.removeValue(forKey: windowID) else { return }
+      for viewID in window.views.values { sessionStorage.views.removeValue(forKey: viewID) }
+    }
+  }
+
+  func unloadSessionBuffer(_ bufferID: VimBufferID) {
+    updateSessionBufferMetadata(id: bufferID, isLoaded: false)
+  }
+
+  func wipeSessionBuffer(_ bufferID: VimBufferID) {
+    lock.withLock {
+      sessionStorage.buffers.removeValue(forKey: bufferID)
+      sessionStorage.bufferOrder.removeAll { $0 == bufferID }
+      for windowID in Array(sessionStorage.windows.keys) {
+        detachSessionBuffer(bufferID, from: windowID)
+      }
+    }
+  }
+
+  func sessionBufferSnapshot(_ bufferID: VimBufferID) -> VimBufferSnapshot? {
+    lock.withLock {
+      guard let storage = sessionStorage.buffers[bufferID]?.state else { return nil }
+      return VimBufferSnapshot(text: storage.authoritativeText, revision: storage.revision)
+    }
+  }
+
+  func applySessionExternalSnapshot(
+    _ text: String,
+    to bufferID: VimBufferID,
+    baseRevision: UInt64
+  ) -> VimBufferCommitResult {
+    lock.withLock {
+      guard let buffer = sessionStorage.buffers[bufferID]?.state else {
+        return .missingBuffer
+      }
+      let current = VimBufferSnapshot(
+        text: buffer.authoritativeText,
+        revision: buffer.revision
+      )
+      guard current.revision == baseRevision else {
+        return .conflict(current: current)
+      }
+      guard current.text != text else { return .committed(current) }
+
+      guard let originViewID = sessionStorage.views.values.first(where: {
+        $0.bufferID == bufferID
+      })?.id else {
+        buffer.authoritativeText = text
+        buffer.revision &+= 1
+        buffer.lineIndex.synchronize(with: text)
+        return .committed(
+          VimBufferSnapshot(text: text, revision: buffer.revision)
+        )
+      }
+
+      withView(originViewID) {
+        _ = reconcileExternalText(text, cursor: nil)
+      }
+      return .committed(
+        VimBufferSnapshot(text: buffer.authoritativeText, revision: buffer.revision)
+      )
+    }
+  }
+
+  var sessionHistorySnapshot: VimHistorySnapshot {
+    lock.withLock {
+      VimHistorySnapshot(
+        commands: globalStateStorage.history.commands,
+        searches: globalStateStorage.history.searches
+      )
+    }
+  }
+
+  func mergeSessionHistory(_ history: VimHistorySnapshot) {
+    lock.withLock { globalStateStorage.history.merge(history) }
+  }
+}
+
+/// Compatibility façade for Calcite. The state graph, buffer lifecycle, and
+/// window/view relationships live entirely in `engine`; this object only caches
+/// one stateless input adapter per window.
 @_spi(Calcite)
 public final class VimSessionCoordinator: @unchecked Sendable {
-  private struct BufferRecord {
-    var info: VimBufferInfo
-    let state: VimBufferStateStorage
-  }
-
-  private struct WindowRecord {
-    var currentBuffer: VimBufferID
-    var alternateBuffer: VimBufferID?
-    var tabPageID: VimTabPageID?
-    var controllers: [VimBufferID: VimKeymapController]
-  }
-
+  public let engine: VimEngine
   private let lock = NSRecursiveLock()
-  private let globalState: VimGlobalStateStorage
-  private var buffers: [VimBufferID: BufferRecord] = [:]
-  private var bufferOrder: [VimBufferID] = []
-  private var windows: [VimWindowID: WindowRecord] = [:]
-  private var nextBufferNumber = 1
+  private var controllers: [VimWindowID: VimKeymapController] = [:]
 
   public init(leader: String = "\\", localLeader: String = "\\") {
-    self.globalState = VimGlobalStateStorage(leader: leader, localLeader: localLeader)
+    let engine = VimEngine(text: "", leader: leader, localLeader: localLeader)
+    engine.updateSessionBufferMetadata(
+      id: engine.defaultBufferID,
+      name: "[session-bootstrap]",
+      isLoaded: false,
+      isListed: false
+    )
+    engine.lock.withLock {
+      if var bootstrap = engine.sessionStorage.buffers[engine.defaultBufferID] {
+        bootstrap.info.number = 0
+        engine.sessionStorage.buffers[engine.defaultBufferID] = bootstrap
+      }
+      engine.sessionStorage.nextBufferNumber = 1
+    }
+    self.engine = engine
   }
 
   @discardableResult
@@ -81,24 +384,13 @@ public final class VimSessionCoordinator: @unchecked Sendable {
     tabWidth: Int = 2,
     history: VimHistorySnapshot = VimHistorySnapshot()
   ) -> VimBufferInfo {
-    lock.withLock {
-      globalState.history.merge(history)
-      if var record = buffers[id] {
-        record.info.name = name
-        record.info.isLoaded = true
-        record.state.tabWidth = max(1, tabWidth)
-        buffers[id] = record
-        return record.info
-      }
-      let info = VimBufferInfo(id: id, number: nextBufferNumber, name: name)
-      nextBufferNumber += 1
-      buffers[id] = BufferRecord(
-        info: info,
-        state: VimBufferStateStorage(text: text, tabWidth: tabWidth)
-      )
-      bufferOrder.append(id)
-      return info
-    }
+    engine.registerSessionBuffer(
+      id: id,
+      name: name,
+      text: text,
+      tabWidth: tabWidth,
+      history: history
+    )
   }
 
   public func updateBufferMetadata(
@@ -108,29 +400,24 @@ public final class VimSessionCoordinator: @unchecked Sendable {
     isModified: Bool? = nil,
     isListed: Bool? = nil
   ) {
-    lock.withLock {
-      guard var record = buffers[id] else { return }
-      if let name { record.info.name = name }
-      if let isLoaded { record.info.isLoaded = isLoaded }
-      if let isModified { record.info.isModified = isModified }
-      if let isListed { record.info.isListed = isListed }
-      buffers[id] = record
-    }
+    engine.updateSessionBufferMetadata(
+      id: id,
+      name: name,
+      isLoaded: isLoaded,
+      isModified: isModified,
+      isListed: isListed
+    )
   }
 
   public func bufferInfo(id: VimBufferID) -> VimBufferInfo? {
-    lock.withLock { buffers[id]?.info }
+    engine.sessionBufferInfo(id: id)
   }
 
   public func bufferInfo(number: Int) -> VimBufferInfo? {
-    lock.withLock { buffers.values.first(where: { $0.info.number == number })?.info }
+    engine.sessionBufferInfo(number: number)
   }
 
-  public var listedBuffers: [VimBufferInfo] {
-    lock.withLock {
-      bufferOrder.compactMap { buffers[$0]?.info }.filter(\.isListed)
-    }
-  }
+  public var listedBuffers: [VimBufferInfo] { engine.sessionListedBuffers }
 
   public func controller(
     for windowID: VimWindowID,
@@ -143,11 +430,11 @@ public final class VimSessionCoordinator: @unchecked Sendable {
     tabWidth: Int,
     history: VimHistorySnapshot = VimHistorySnapshot(),
     tabPageID: VimTabPageID? = nil,
-    makeCurrent: Bool = true
+    attachment: VimControllerAttachment = .activate
   ) -> VimKeymapController {
     lock.withLock {
-      globalState.leader = leader
-      globalState.localLeader = localLeader
+      engine.leader = leader
+      engine.localLeader = localLeader
       _ = registerBuffer(
         id: bufferID,
         name: name,
@@ -155,118 +442,127 @@ public final class VimSessionCoordinator: @unchecked Sendable {
         tabWidth: tabWidth,
         history: history
       )
-
-      var record =
-        windows[windowID]
-        ?? WindowRecord(
-          currentBuffer: bufferID,
-          alternateBuffer: nil,
-          tabPageID: tabPageID,
-          controllers: [:]
-        )
-      if makeCurrent, record.currentBuffer != bufferID {
-        record.alternateBuffer = record.currentBuffer
-        record.currentBuffer = bufferID
-      }
-      if let tabPageID { record.tabPageID = tabPageID }
-
-      if let controller = record.controllers[bufferID] {
-        controller.engine.leader = leader
-        controller.engine.localLeader = localLeader
-        controller.engine.tabWidth = tabWidth
-        windows[windowID] = record
-        return controller
-      }
-
-      let bufferState = buffers[bufferID]!.state
-      let engine = VimEngine(
-        text: text,
+      _ = engine.ensureSessionView(
+        windowID: windowID,
+        bufferID: bufferID,
         cursor: cursor,
-        globalStateStorage: globalState,
-        bufferStateStorage: bufferState
+        tabPageID: tabPageID,
+        attachment: attachment
       )
-      let controller = VimKeymapController(
-        engine: engine,
-        historyStorage: globalState.history
-      )
-      record.controllers[bufferID] = controller
-      windows[windowID] = record
+
+      if let controller = controllers[windowID] { return controller }
+      let controller = VimKeymapController(sessionEngine: engine, windowID: windowID)
+      controllers[windowID] = controller
       return controller
     }
   }
 
-  /// Returns an already-created controller without changing the window's
-  /// current/alternate buffer relationship or creating new state.
-  @_spi(Calcite)
+  @available(*, deprecated, message: "Use attachment: .activate or .retain")
+  public func controller(
+    for windowID: VimWindowID,
+    displaying bufferID: VimBufferID,
+    text: String,
+    cursor: Int,
+    name: String,
+    leader: String,
+    localLeader: String,
+    tabWidth: Int,
+    history: VimHistorySnapshot = VimHistorySnapshot(),
+    tabPageID: VimTabPageID? = nil,
+    makeCurrent: Bool
+  ) -> VimKeymapController {
+    controller(
+      for: windowID,
+      displaying: bufferID,
+      text: text,
+      cursor: cursor,
+      name: name,
+      leader: leader,
+      localLeader: localLeader,
+      tabWidth: tabWidth,
+      history: history,
+      tabPageID: tabPageID,
+      attachment: makeCurrent ? .activate : .retain
+    )
+  }
+
   public func existingController(
     for windowID: VimWindowID,
     displaying bufferID: VimBufferID
   ) -> VimKeymapController? {
-    lock.withLock { windows[windowID]?.controllers[bufferID] }
+    lock.withLock {
+      guard engine.sessionViewID(windowID: windowID, bufferID: bufferID) != nil else {
+        return nil
+      }
+      return controllers[windowID]
+    }
+  }
+
+  public func view(
+    for windowID: VimWindowID,
+    displaying bufferID: VimBufferID
+  ) -> VimEngineView? {
+    guard let viewID = engine.sessionViewID(windowID: windowID, bufferID: bufferID) else {
+      return nil
+    }
+    return engine.viewProjection(viewID)
   }
 
   public func currentBuffer(for windowID: VimWindowID) -> VimBufferID? {
-    lock.withLock { windows[windowID]?.currentBuffer }
+    engine.currentSessionBuffer(for: windowID)
   }
 
   public func alternateBuffer(for windowID: VimWindowID) -> VimBufferID? {
-    lock.withLock { windows[windowID]?.alternateBuffer }
+    engine.alternateSessionBuffer(for: windowID)
   }
 
   @discardableResult
-  public func switchBuffer(
-    in windowID: VimWindowID,
-    to bufferID: VimBufferID
-  ) -> Bool {
-    lock.withLock {
-      guard buffers[bufferID] != nil, var record = windows[windowID] else { return false }
-      guard record.currentBuffer != bufferID else { return true }
-      record.alternateBuffer = record.currentBuffer
-      record.currentBuffer = bufferID
-      windows[windowID] = record
-      return true
-    }
+  public func switchBuffer(in windowID: VimWindowID, to bufferID: VimBufferID) -> Bool {
+    engine.switchSessionBuffer(in: windowID, to: bufferID)
   }
 
   public func nextBuffer(after bufferID: VimBufferID, forward: Bool) -> VimBufferID? {
-    lock.withLock {
-      let listed = bufferOrder.filter { buffers[$0]?.info.isListed == true }
-      guard !listed.isEmpty, let index = listed.firstIndex(of: bufferID) else {
-        return listed.first
-      }
-      let delta = forward ? 1 : -1
-      return listed[(index + delta + listed.count) % listed.count]
-    }
+    engine.nextSessionBuffer(after: bufferID, forward: forward)
+  }
+
+  public func detachBuffer(_ bufferID: VimBufferID, from windowID: VimWindowID) {
+    engine.detachSessionBuffer(bufferID, from: windowID)
   }
 
   public func removeWindow(_ windowID: VimWindowID) {
-    lock.withLock { _ = windows.removeValue(forKey: windowID) }
+    lock.withLock {
+      controllers.removeValue(forKey: windowID)
+      engine.removeSessionWindow(windowID)
+    }
   }
 
-  /// Removes buffer state only after the host has detached every window.
+  public func unloadBuffer(_ bufferID: VimBufferID) {
+    engine.unloadSessionBuffer(bufferID)
+  }
+
   public func wipeBuffer(_ bufferID: VimBufferID) {
-    lock.withLock {
-      buffers.removeValue(forKey: bufferID)
-      bufferOrder.removeAll { $0 == bufferID }
-      for id in Array(windows.keys) {
-        guard var record = windows[id] else { continue }
-        record.controllers.removeValue(forKey: bufferID)
-        if record.alternateBuffer == bufferID { record.alternateBuffer = nil }
-        windows[id] = record
-      }
-    }
+    engine.wipeSessionBuffer(bufferID)
+  }
+
+  public func bufferSnapshot(_ bufferID: VimBufferID) -> VimBufferSnapshot? {
+    engine.sessionBufferSnapshot(bufferID)
+  }
+
+  public func applyExternalSnapshot(
+    _ text: String,
+    to bufferID: VimBufferID,
+    baseRevision: UInt64
+  ) -> VimBufferCommitResult {
+    engine.applySessionExternalSnapshot(
+      text,
+      to: bufferID,
+      baseRevision: baseRevision
+    )
   }
 
   public func mergeHistory(_ history: VimHistorySnapshot) {
-    lock.withLock { globalState.history.merge(history) }
+    engine.mergeSessionHistory(history)
   }
 
-  public var historySnapshot: VimHistorySnapshot {
-    lock.withLock {
-      VimHistorySnapshot(
-        commands: globalState.history.commands,
-        searches: globalState.history.searches
-      )
-    }
-  }
+  public var historySnapshot: VimHistorySnapshot { engine.sessionHistorySnapshot }
 }

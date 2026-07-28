@@ -54,12 +54,6 @@ final class EditorTab: ObservableObject, Identifiable {
   @Published private(set) var semanticHighlights: [SemanticHighlight]
   @Published private(set) var diagnostics: [Diagnostic]
   @Published private(set) var completions: [Completion] = []
-  @Published private(set) var vimMode: VimMode = .insert
-  @Published private(set) var vimPrompt: String?
-  @Published private(set) var vimInteraction = VimInteractionSnapshot(mode: .insert)
-  @Published private(set) var vimStatusMessage: VimMessage?
-  @Published private(set) var vimInputSourceIdentifier: String?
-  private(set) var vimHistory = VimHistorySnapshot()
   @Published private(set) var selectedCompletionIndex = 0
   @Published private(set) var isDirty = false
   @Published private(set) var errorMessage: String?
@@ -82,7 +76,6 @@ final class EditorTab: ObservableObject, Identifiable {
   private var completionOffset = 0
   private var snippetStops: [NSRange] = []
   private var snippetStopIndex = -1
-  private var vimMessageDismissTask: Task<Void, Never>?
   private var lineIndex: EditorLineIndex
   var onDiagnosticsChange: (() -> Void)?
   var onContentStateChange: (() -> Void)?
@@ -109,7 +102,6 @@ final class EditorTab: ObservableObject, Identifiable {
     self.snippetLibrary = snippetLibrary
     self.serviceDiagnostics = analysis.diagnostics
     self.url = pipeline.uri
-    self.vimHistory = Self.loadVimHistory(for: pipeline.uri)
     self.languageID = pipeline.languageID
     self.chrome = EditorTabChromeState(url: pipeline.uri)
     self.text = analysis.snapshot.text
@@ -127,7 +119,6 @@ final class EditorTab: ObservableObject, Identifiable {
     updateTask?.cancel()
     editTask?.cancel()
     completionTask?.cancel()
-    vimMessageDismissTask?.cancel()
   }
 
   static func open(
@@ -148,43 +139,6 @@ final class EditorTab: ObservableObject, Identifiable {
     snippetLibrary = value
   }
 
-  func updateVimMode(_ value: VimMode) {
-    if vimMode != value { vimMode = value }
-  }
-
-  func updateVimPrompt(_ value: String?) {
-    if vimPrompt != value { vimPrompt = value }
-  }
-
-  func updateVimInteraction(_ value: VimInteractionSnapshot) {
-    if vimInteraction != value { vimInteraction = value }
-    updateVimMode(value.mode)
-    let legacyPrompt = value.commandLine.map { snapshot in
-      let cursor = snapshot.text.index(
-        snapshot.text.startIndex,
-        offsetBy: min(snapshot.cursorOffset, snapshot.text.count)
-      )
-      return snapshot.prefix + String(snapshot.text[..<cursor]) + snapshot.markedText
-        + String(snapshot.text[cursor...])
-    }
-    updateVimPrompt(legacyPrompt)
-    if vimHistory != value.history {
-      vimHistory = value.history
-      Self.saveVimHistory(value.history, for: url)
-    }
-    updateVimMessage(value.message)
-  }
-
-  func updateVimInputSourceIdentifier(_ value: String?) {
-    if vimInputSourceIdentifier != value { vimInputSourceIdentifier = value }
-  }
-
-  func dismissVimStatusMessage() {
-    vimMessageDismissTask?.cancel()
-    vimMessageDismissTask = nil
-    if vimStatusMessage != nil { vimStatusMessage = nil }
-  }
-
   var currentColumn: Int {
     columnNumber(atUTF16Offset: selectedRange.location)
   }
@@ -196,50 +150,6 @@ final class EditorTab: ObservableObject, Identifiable {
   var snippetProgress: (current: Int, total: Int)? {
     guard !snippetStops.isEmpty, snippetStopIndex >= 0 else { return nil }
     return (snippetStopIndex + 1, snippetStops.count)
-  }
-
-  private func updateVimMessage(_ value: VimMessage?) {
-    guard vimStatusMessage != value else { return }
-    vimMessageDismissTask?.cancel()
-    vimMessageDismissTask = nil
-    vimStatusMessage = value
-    guard let value else { return }
-    switch value.lifetime {
-    case .persistent, .untilNextInput:
-      break
-    case .timed(let milliseconds):
-      let expected = value
-      vimMessageDismissTask = Task { @MainActor [weak self] in
-        try? await Task.sleep(for: .milliseconds(max(0, milliseconds)))
-        guard !Task.isCancelled, self?.vimStatusMessage == expected else { return }
-        self?.vimStatusMessage = nil
-        self?.vimMessageDismissTask = nil
-      }
-    }
-  }
-
-  private static func vimHistoryKey(for url: URL) -> String {
-    let encoded = Data(url.standardizedFileURL.path.utf8).base64EncodedString()
-    return "Calcite.VimHistory.\(encoded)"
-  }
-
-  private static func loadVimHistory(for url: URL) -> VimHistorySnapshot {
-    guard let data = UserDefaults.standard.data(forKey: vimHistoryKey(for: url)),
-      let value = try? JSONDecoder().decode(VimHistorySnapshot.self, from: data)
-    else { return VimHistorySnapshot() }
-    return VimHistorySnapshot(
-      commands: Array(value.commands.suffix(200)),
-      searches: Array(value.searches.suffix(200))
-    )
-  }
-
-  private static func saveVimHistory(_ value: VimHistorySnapshot, for url: URL) {
-    let limited = VimHistorySnapshot(
-      commands: Array(value.commands.suffix(200)),
-      searches: Array(value.searches.suffix(200))
-    )
-    guard let data = try? JSONEncoder().encode(limited) else { return }
-    UserDefaults.standard.set(data, forKey: vimHistoryKey(for: url))
   }
 
   func reportExternalFileIssue(_ message: String) {

@@ -13,7 +13,7 @@ struct CalciteVimHostRouter {
   func route(
     _ requests: [VimHostRequest],
     selection: NSRange,
-    to engine: VimEngine
+    to engine: VimEngineView
   ) {
     for request in requests {
       let response = handler(

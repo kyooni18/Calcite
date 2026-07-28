@@ -72,7 +72,7 @@ final class CalciteVimStateRestorationTests: XCTestCase {
     _ = await backend.shutdown(saveChanges: false)
   }
 
-  func testTabBoundaryReconcilesNativeCursorWhenAppKitPublicationWasCoalesced() async throws {
+  func testTabBoundaryDoesNotLetStalePresentationOverwriteEngineCursor() async throws {
     let harness = try makeHarness()
     defer { harness.cleanUp() }
 
@@ -100,16 +100,16 @@ final class CalciteVimStateRestorationTests: XCTestCase {
       tabWidth: 2
     )
 
-    // Reproduce the observed failure: AppKit and the status bar reached the
-    // clicked position, while the Vim controller was still at the old cursor.
+    // A stale presentation mirror must not become authoritative at a tab
+    // boundary. Pointer input has to enter through VimEngine first.
     editor.updateSelection(NSRange(location: 6, length: 0))
     XCTAssertEqual(firstController.engine.state.cursor, 0)
 
     _ = await session.openDocument(at: harness.secondFileURL)
     _ = await session.openDocument(at: harness.firstFileURL)
 
-    XCTAssertEqual(firstController.engine.state.cursor, 6)
-    XCTAssertEqual(editor.selectedRange, NSRange(location: 6, length: 0))
+    XCTAssertEqual(firstController.engine.state.cursor, 0)
+    XCTAssertEqual(editor.selectedRange, NSRange(location: 0, length: 0))
 
     _ = await backend.shutdown(saveChanges: false)
   }

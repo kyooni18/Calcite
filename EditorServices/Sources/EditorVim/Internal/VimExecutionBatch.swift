@@ -14,9 +14,7 @@ extension VimEngine {
       deltas: completedExecutionEdits,
       repeatRecord: lastRepeat
     )
-    if before.text != result.state.text {
-      bufferStateStorage.authoritativeText = result.state.text
-    }
+    commitActiveBufferText(before: before.text, after: result.state.text)
     return result
   }
 
@@ -33,9 +31,7 @@ extension VimEngine {
       deltas: completedExecutionEdits,
       repeatRecord: lastRepeat
     )
-    if before.text != execution.state.text {
-      bufferStateStorage.authoritativeText = execution.state.text
-    }
+    commitActiveBufferText(before: before.text, after: execution.state.text)
     result.execution = execution
     return result
   }
@@ -103,4 +99,33 @@ extension VimEngine {
   public func updateViewport(visibleUTF16Range: Range<Int>) {
     lock.withLock { updateViewportContext(visibleUTF16Range: visibleUTF16Range) }
   }
+  func commitActiveBufferText(before: String, after: String) {
+    guard before != after, bufferPropagationDepth == 0 else { return }
+    let originViewID = activeViewID
+    let bufferID = activeViewStorage.bufferID
+    guard let buffer = sessionStorage.buffers[bufferID]?.state else { return }
+
+    buffer.authoritativeText = after
+    buffer.revision &+= 1
+    let siblingViewIDs = sessionStorage.views.values.compactMap { view -> VimViewID? in
+      guard view.bufferID == bufferID, view.id != originViewID else { return nil }
+      return view.id
+    }
+
+    bufferPropagationDepth += 1
+    defer { bufferPropagationDepth -= 1 }
+    var handlers: [@MainActor () -> Void] = []
+    for viewID in siblingViewIDs {
+      withView(viewID) {
+        _ = reconcileExternalText(after, cursor: nil)
+        if let handler = windowStateStorage.stateChangeHandler { handlers.append(handler) }
+      }
+    }
+    if !handlers.isEmpty {
+      Task { @MainActor in
+        for handler in handlers { handler() }
+      }
+    }
+  }
+
 }

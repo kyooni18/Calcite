@@ -65,14 +65,16 @@ enum CalciteEditorStatusCoordinator {
   static func presentation(
     tab: EditorTab,
     profile: EditorCustomProfile,
-    selectedRange: NSRange? = nil
+    selectedRange: NSRange? = nil,
+    vimController: VimKeymapController? = nil
   ) -> CalciteEditorStatusPresentation {
-    guard profile.vim.enabled else {
+    guard profile.vim.enabled, let vimController else {
       return .standard(StandardEditorStatus(languageID: tab.languageID, isDirty: tab.isDirty))
     }
 
-    let interaction = tab.vimInteraction
-    let message = tab.vimStatusMessage.map {
+    let interaction = vimController.interactionSnapshot
+    let inputSourceIdentifier = vimController.engine.windowPresentationState.inputSourceIdentifier
+    let message = interaction.message.map {
       EditorStatusMessagePresentation(code: $0.code, text: $0.text, severity: $0.severity)
     }
 
@@ -103,7 +105,7 @@ enum CalciteEditorStatusCoordinator {
           label:
             block?.isBlockAppend == true
             ? "V-BLOCK APPEND" : (block != nil ? "V-BLOCK INSERT" : "INSERT"),
-          inputSource: friendlyInputSource(tab.vimInputSourceIdentifier),
+          inputSource: friendlyInputSource(inputSourceIdentifier),
           isComposing: interaction.isComposingText,
           completionIndex: tab.completions.isEmpty ? nil : tab.selectedCompletionIndex + 1,
           completionCount: tab.completions.count,
@@ -116,7 +118,7 @@ enum CalciteEditorStatusCoordinator {
       return .vimReplace(
         VimReplaceEditorStatus(
           label: "REPLACE",
-          inputSource: friendlyInputSource(tab.vimInputSourceIdentifier),
+          inputSource: friendlyInputSource(inputSourceIdentifier),
           isComposing: interaction.isComposingText
         )
       )
@@ -205,13 +207,16 @@ struct CalciteEditorStatusBar: View {
   let selectedRange: NSRange
   let profile: EditorCustomProfile
   let editorMode: EditorInterface
+  let vimController: VimKeymapController?
+  let vimPresentationRevision: UInt64
   let onSelectInputMode: (EditorInterface) -> Void
 
   private var presentation: CalciteEditorStatusPresentation {
     CalciteEditorStatusCoordinator.presentation(
       tab: tab,
       profile: profile,
-      selectedRange: selectedRange
+      selectedRange: selectedRange,
+      vimController: vimController
     )
   }
 

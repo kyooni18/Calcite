@@ -160,3 +160,29 @@ public struct VimInteractionSnapshot: Hashable, Sendable {
     self.message = message
   }
 }
+
+@_spi(Calcite)
+public struct VimWindowPresentationState: Hashable, Sendable {
+  public var inputSourceIdentifier: String?
+  public var horizontalScrollOffset: Double
+  public var verticalScrollOffset: Double
+  public var zoomScale: Double
+  public var viewportTopLine: Int
+  public var viewportBottomLine: Int
+
+  public init(
+    inputSourceIdentifier: String? = nil,
+    horizontalScrollOffset: Double = 0,
+    verticalScrollOffset: Double = 0,
+    zoomScale: Double = 1,
+    viewportTopLine: Int = 1,
+    viewportBottomLine: Int = 20
+  ) {
+    self.inputSourceIdentifier = inputSourceIdentifier
+    self.horizontalScrollOffset = max(0, horizontalScrollOffset)
+    self.verticalScrollOffset = max(0, verticalScrollOffset)
+    self.zoomScale = min(max(zoomScale, 0.5), 2)
+    self.viewportTopLine = max(1, viewportTopLine)
+    self.viewportBottomLine = max(self.viewportTopLine, viewportBottomLine)
+  }
+}

@@ -898,7 +898,6 @@ private struct ThemeEditorPreview: View {
         breakpoints: [],
         selectedRange: selection,
         hasCompletions: false,
-        vimHistory: VimHistorySnapshot(),
         documentURL: nil,
         documentID: nil,
         editorSessionID: nil,
@@ -938,10 +937,7 @@ private struct ThemeEditorPreview: View {
         onShowFind: { _ in },
         zoomScale: 1,
         onZoomChange: { _ in },
-        onVimModeChange: { _ in },
-        onVimPromptChange: { _ in },
-        onVimInteractionChange: { _ in },
-        onVimInputSourceChange: { _ in },
+        onVimStateChange: {},
         onCaretRectChange: { _ in }
       )
     }

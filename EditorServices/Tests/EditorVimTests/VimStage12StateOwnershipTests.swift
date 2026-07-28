@@ -37,12 +37,11 @@ final class VimStage12StateOwnershipTests: XCTestCase {
 
     try first.engine.executeNotation("0x")
     XCTAssertEqual(first.engine.state.text, "lpha beta\n")
-    _ = second.reconcileExternalText(first.engine.state.text)
+    XCTAssertEqual(second.engine.state.text, "lpha beta\n")
     XCTAssertEqual(second.engine.state.cursor, 5)
 
     try second.engine.executeNotation("u")
     XCTAssertEqual(second.engine.state.text, "alpha beta\n")
-    _ = first.reconcileExternalText(second.engine.state.text)
     XCTAssertEqual(first.engine.state.text, "alpha beta\n")
 
     try second.engine.executeNotation("`a")
@@ -76,7 +75,7 @@ final class VimStage12StateOwnershipTests: XCTestCase {
     try first.engine.executeNotation("ma")
 
     _ = first.reconcileExternalText("Xabcd\n")
-    _ = second.reconcileExternalText("Xabcd\n")
+    XCTAssertEqual(second.engine.state.text, "Xabcd\n")
     try second.engine.executeNotation("`a")
     XCTAssertEqual(second.engine.state.cursor, 3)
   }

@@ -157,7 +157,7 @@ swift-format lint --recursive --strict Sources/EditorVim Tests/EditorVimTests Pa
 ./Scripts/check-vim-api.sh
 ```
 
-The Vim suite includes 500 committed differential fixtures generated from system Vim, branch-preserving undo history, semantic repeat/macro coverage, exact incremental edit batches, and a 10,000-edit randomized UTF-16 line-index stress test. Regenerate fixtures with `Scripts/generate-vim-differential-fixtures.py` when intentionally changing compatibility behavior. See [`VIM_ENGINE_IMPROVEMENTS.md`](VIM_ENGINE_IMPROVEMENTS.md) for the current Stage 4 architecture and validation details.
+The Vim suite includes 500 committed differential fixtures generated from system Vim, branch-preserving undo history, semantic repeat/macro coverage, exact incremental edit batches, and a 10,000-edit randomized UTF-16 line-index stress test. Regenerate fixtures with `Scripts/generate-vim-differential-fixtures.py` when intentionally changing compatibility behavior. See [`VIM_ENGINE_IMPROVEMENTS.md`](VIM_ENGINE_IMPROVEMENTS.md) for the current Stage 4 architecture and validation details. The current session-state architecture is documented in [`VIM_ENGINE_STAGE17.md`](VIM_ENGINE_STAGE17.md).
 
 The repository keeps focused project tests. Historical status reports and overlapping integration suites are intentionally omitted.
 

@@ -496,7 +496,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     isClosed = true
     nowPlaying.stop()
     observations.removeAll()
+    for editor in editorSessions {
+      vimSessionCoordinator.removeWindow(VimWindowID(editor.id))
+    }
     editorSessions.removeAll()
+    sectionalEditorAssignments.removeAll()
     #if os(macOS)
       terminalEditorSessions.removeAll()
     #endif
@@ -706,37 +710,12 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
   private func captureAuthoritativeSelection(for editor: EditorSession) {
     if let controller = existingVimController(for: editor) {
-      reconcileCollapsedHostSelection(editor.selectedRange, with: controller)
+      // VimEngine is authoritative. EditorSession and EditorTab carry only a
+      // projection used by non-Vim UI and must never overwrite a cached engine.
       restoreSelection(controller, to: editor)
     } else {
       editor.captureSelectionFromDocument()
     }
-  }
-
-  /// The AppKit selection is normally written into Vim immediately. Reconcile it
-  /// once more at the tab boundary so a delayed or coalesced native selection
-  /// notification cannot leave the cached controller at the previous cursor.
-  private func reconcileCollapsedHostSelection(
-    _ selection: NSRange,
-    with controller: VimKeymapController
-  ) {
-    guard selection.length == 0 else { return }
-    switch controller.engine.state.mode {
-    case .normal, .insert, .replace:
-      break
-    case .visualCharacter, .visualLine, .commandLine, .search:
-      return
-    }
-
-    let presentation = CalciteVimSelectionPresenter.presentation(
-      for: controller.engine.state,
-      selectionSet: controller.engine.selectionSet
-    )
-    guard presentation.primaryRange.location != selection.location else { return }
-    controller.acceptHostCursorMove(
-      toUTF16Offset: selection.location,
-      source: .parentRequest
-    )
   }
 
   @discardableResult
@@ -780,6 +759,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     captureAuthoritativeSelection(for: editorSessions[index])
     vimSessionCoordinator.removeWindow(VimWindowID(id))
     editorSessions.remove(at: index)
+    sectionalEditorAssignments = sectionalEditorAssignments.filter { $0.value != id }
     if previousActiveEditorSessionID == id { previousActiveEditorSessionID = nil }
 
     guard wasActive else { return }
@@ -796,8 +776,22 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   func reconcileDocuments() {
     guard !isClosed, let backend else { return }
     let availableIDs = Set(backend.documents.map(\.id))
-    if editorSessions.contains(where: { !availableIDs.contains($0.documentID) }) {
-      editorSessions.removeAll { !availableIDs.contains($0.documentID) }
+    let vanishedEditorDocumentIDs = editorSessions.lazy
+      .map(\.documentID)
+      .filter { !availableIDs.contains($0) }
+    let vanishedRegisteredBufferIDs = vimSessionCoordinator.listedBuffers.lazy
+      .map { $0.id.rawValue }
+      .filter { !availableIDs.contains($0) }
+    var vanishedDocumentIDs = Set(vanishedEditorDocumentIDs)
+    vanishedDocumentIDs.formUnion(vanishedRegisteredBufferIDs)
+    if !vanishedDocumentIDs.isEmpty {
+      for documentID in vanishedDocumentIDs {
+        removeDocumentFromVimLifecycle(
+          documentID,
+          fallback: backend.activeDocument ?? backend.documents.first
+        )
+        vimSessionCoordinator.wipeBuffer(VimBufferID(documentID))
+      }
     }
 
     if editorSessions.isEmpty, let document = backend.activeDocument ?? backend.documents.first {
@@ -950,8 +944,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       _ = vimSessionCoordinator.registerBuffer(
         id: VimBufferID(document.id),
         name: document.url.path,
-        text: document.text,
-        history: document.vimHistory
+        text: document.text
       )
       vimSessionCoordinator.updateBufferMetadata(
         id: VimBufferID(document.id),
@@ -1147,8 +1140,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         _ = self.vimSessionCoordinator.registerBuffer(
           id: VimBufferID(document.id),
           name: document.url.path,
-          text: document.text,
-          history: document.vimHistory
+          text: document.text
         )
         if let previousID { self.activateEditorSession(previousID) }
       }
@@ -1365,55 +1357,95 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       return .rejected(
         .failed(code: "VIM_NO_WRITE", message: "No write since last change for \(document.title)."))
     }
+
+    registerOpenVimBuffers()
     let fallback = vimSessionCoordinator.listedBuffers.first {
       $0.id != info.id && backend.document(id: $0.id.rawValue) != nil
-    }
-    let affected = editorSessions.filter { $0.documentID == info.id.rawValue }
-    for editor in affected {
-      if let fallback {
-        _ = switchEditorSession(editor.id, to: fallback.id.rawValue)
-      } else {
-        closeEditorSession(editor.id)
-      }
-    }
+    }.flatMap { backend.document(id: $0.id.rawValue) }
+    removeDocumentFromVimLifecycle(document.id, fallback: fallback)
+
     vimSessionCoordinator.updateBufferMetadata(
       id: info.id,
       isLoaded: false,
-      isModified: document.isDirty, isListed: false
+      isModified: document.isDirty,
+      isListed: false
     )
-    if wipe { vimSessionCoordinator.wipeBuffer(info.id) }
+    if wipe {
+      vimSessionCoordinator.wipeBuffer(info.id)
+    } else {
+      vimSessionCoordinator.unloadBuffer(info.id)
+    }
     backend.closeDocument(document)
     return .accepted
   }
 
   private func scrollVimWindow(_ origin: EditorSession, lines: Int) {
-    guard let document = origin.document else { return }
-    let text = document.text as NSString
-    let location = min(max(0, origin.selectedRange.location), text.length)
-    var target = location
-    if lines > 0 {
-      for _ in 0..<lines {
-        let range = text.lineRange(for: NSRange(location: target, length: 0))
-        target = min(text.length, NSMaxRange(range))
-      }
-    } else if lines < 0 {
-      for _ in 0..<(-lines) {
-        guard target > 0 else { break }
-        let probe = max(0, target - 1)
-        target = text.lineRange(for: NSRange(location: probe, length: 0)).location
-      }
-    }
-    origin.updateSelection(NSRange(location: target, length: 0))
+    guard lines != 0,
+      let controller = vimSessionCoordinator.existingController(
+        for: VimWindowID(origin.id),
+        displaying: VimBufferID(origin.documentID)
+      )
+    else { return }
+    controller.engine.requestViewportScroll(lines: lines)
   }
 
   // MARK: - Document and utility close workflows
+
+  /// Removes every view of a document from the Vim session before its Calcite
+  /// document disappears. A window currently displaying the document is moved
+  /// to the fallback document when possible; retained views are detached from
+  /// every other window as well.
+  private func removeDocumentFromVimLifecycle(
+    _ documentID: UUID,
+    fallback: EditorTab?
+  ) {
+    let bufferID = VimBufferID(documentID)
+    let fallback = fallback.flatMap { $0.id == documentID ? nil : $0 }
+    let managesVimBuffer = vimSessionCoordinator.bufferInfo(id: bufferID) != nil
+
+    if managesVimBuffer, let fallback {
+      _ = vimSessionCoordinator.registerBuffer(
+        id: VimBufferID(fallback.id),
+        name: fallback.url.path,
+        text: fallback.text
+      )
+    }
+
+    for editor in Array(editorSessions) {
+      let windowID = VimWindowID(editor.id)
+      if editor.documentID == documentID {
+        if let fallback {
+          switchDocument(in: editor, to: fallback)
+          if activeEditorSessionID == editor.id {
+            activateEditorSession(editor.id)
+          }
+          vimSessionCoordinator.detachBuffer(bufferID, from: windowID)
+        } else {
+          closeEditorSession(editor.id)
+        }
+      } else {
+        vimSessionCoordinator.detachBuffer(bufferID, from: windowID)
+      }
+    }
+  }
+
+  private func closeDocumentThroughVimLifecycle(_ document: EditorTab) {
+    guard let backend, backend.document(id: document.id) != nil else { return }
+    let bufferID = VimBufferID(document.id)
+    let hadVimBuffer = vimSessionCoordinator.bufferInfo(id: bufferID) != nil
+    let fallback = backend.activeDocument.flatMap { $0.id == document.id ? nil : $0 }
+      ?? backend.documents.first(where: { $0.id != document.id })
+    removeDocumentFromVimLifecycle(document.id, fallback: fallback)
+    if hadVimBuffer { vimSessionCoordinator.wipeBuffer(bufferID) }
+    backend.closeDocument(document)
+  }
 
   func requestCloseDocument(_ document: EditorTab) {
     guard backend?.document(id: document.id) != nil else { return }
     if document.isDirty {
       pendingDocumentClose = document
     } else {
-      backend?.closeDocument(document)
+      closeDocumentThroughVimLifecycle(document)
     }
   }
 
@@ -1427,11 +1459,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     case .save:
       guard await document.save() else { return false }
       pendingDocumentClose = nil
-      backend?.closeDocument(document)
+      closeDocumentThroughVimLifecycle(document)
       return true
     case .discard:
       pendingDocumentClose = nil
-      backend?.closeDocument(document)
+      closeDocumentThroughVimLifecycle(document)
       return true
     }
   }

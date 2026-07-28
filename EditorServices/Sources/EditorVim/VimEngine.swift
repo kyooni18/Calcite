@@ -256,9 +256,33 @@ enum VimWordClass: Equatable {
 
 public final class VimEngine: @unchecked Sendable {
   let lock = NSRecursiveLock()
-  var storedState: VimState
-  let globalStateStorage: VimGlobalStateStorage
-  let bufferStateStorage: VimBufferStateStorage
+  let sessionStorage: VimEngineSessionStorage
+  let defaultWindowID: VimWindowID
+  let defaultBufferID: VimBufferID
+  let defaultViewID: VimViewID
+  private var activeViewStack: [VimViewID] = []
+  var bufferPropagationDepth = 0
+
+  var scopedViewID: VimViewID? { activeViewStack.last }
+  var activeViewID: VimViewID { scopedViewID ?? defaultViewID }
+  var activeViewStorage: VimEngineViewStateStorage {
+    guard let storage = sessionStorage.views[activeViewID] else {
+      preconditionFailure("VimEngine view is not registered: \(activeViewID.rawValue)")
+    }
+    return storage
+  }
+  var storedState: VimState {
+    get { activeViewStorage.state }
+    set { activeViewStorage.state = newValue }
+  }
+  var globalStateStorage: VimGlobalStateStorage { sessionStorage.globalState }
+  var bufferStateStorage: VimBufferStateStorage {
+    guard let storage = sessionStorage.buffers[activeViewStorage.bufferID]?.state else {
+      preconditionFailure("VimEngine buffer is not registered: \(activeViewStorage.bufferID.rawValue)")
+    }
+    return storage
+  }
+  var windowStateStorage: VimWindowStateStorage { activeViewStorage.presentation }
 
   public internal(set) var state: VimState {
     get { lock.withLock { storedState } }
@@ -280,7 +304,7 @@ public final class VimEngine: @unchecked Sendable {
     set { lock.withLock { bufferStateStorage.tabWidth = max(1, newValue) } }
   }
 
-  let lineIndex = VimLineIndex()
+  var lineIndex: VimLineIndex { bufferStateStorage.lineIndex }
   var registers: [VimRegister: VimRegisterValue] {
     get { globalStateStorage.registers }
     set { globalStateStorage.registers = newValue }
@@ -312,11 +336,26 @@ public final class VimEngine: @unchecked Sendable {
   var undoTree: VimUndoTree { bufferStateStorage.undoTree }
   var undoStack: [VimHistoryEntry] { undoTree.activeTransactions() }
   var redoStack: [VimHistoryEntry] { undoTree.preferredRedoTransactions() }
-  var editCaptureDepth = 0
-  var capturedEdits: [VimEditDelta] = []
-  var executionBatchDepth = 0
-  var currentExecutionEdits: [VimEditDelta] = []
-  var completedExecutionEdits: [VimEditDelta] = []
+  var editCaptureDepth: Int {
+    get { activeViewStorage.editCaptureDepth }
+    set { activeViewStorage.editCaptureDepth = newValue }
+  }
+  var capturedEdits: [VimEditDelta] {
+    get { activeViewStorage.capturedEdits }
+    set { activeViewStorage.capturedEdits = newValue }
+  }
+  var executionBatchDepth: Int {
+    get { activeViewStorage.executionBatchDepth }
+    set { activeViewStorage.executionBatchDepth = newValue }
+  }
+  var currentExecutionEdits: [VimEditDelta] {
+    get { activeViewStorage.currentExecutionEdits }
+    set { activeViewStorage.currentExecutionEdits = newValue }
+  }
+  var completedExecutionEdits: [VimEditDelta] {
+    get { activeViewStorage.completedExecutionEdits }
+    set { activeViewStorage.completedExecutionEdits = newValue }
+  }
   var lastChange: VimAction? {
     get { globalStateStorage.lastChange }
     set { globalStateStorage.lastChange = newValue }
@@ -325,7 +364,10 @@ public final class VimEngine: @unchecked Sendable {
     get { globalStateStorage.lastRepeat }
     set { globalStateStorage.lastRepeat = newValue }
   }
-  var activeChange: VimChangeSession?
+  var activeChange: VimChangeSession? {
+    get { activeViewStorage.activeChange }
+    set { activeViewStorage.activeChange = newValue }
+  }
   var lastSearch: (String, Bool)? {
     get { globalStateStorage.lastSearch }
     set { globalStateStorage.lastSearch = newValue }
@@ -350,28 +392,79 @@ public final class VimEngine: @unchecked Sendable {
     get { bufferStateStorage.textWidth }
     set { bufferStateStorage.textWidth = newValue }
   }
-  var visualAnchor: Int?
-  var visualSelectionShape: VimSelectionShape = .character
-  var lastVisual: VimVisualSnapshot?
-  var blockInsertSession: VimBlockInsertSession?
-  var preferredColumn: Int?
-  var preferredVisualColumn: Int?
-  weak var storedVisualGeometryProvider: (any VimVisualGeometryProviding)?
-  var lastFind: (character: Character, forward: Bool, till: Bool)?
-  var jumpBackStack: [Int] = []
-  var jumpForwardStack: [Int] = []
+  var visualAnchor: Int? {
+    get { activeViewStorage.visualAnchor }
+    set { activeViewStorage.visualAnchor = newValue }
+  }
+  var visualSelectionShape: VimSelectionShape {
+    get { activeViewStorage.visualSelectionShape }
+    set { activeViewStorage.visualSelectionShape = newValue }
+  }
+  var lastVisual: VimVisualSnapshot? {
+    get { activeViewStorage.lastVisual }
+    set { activeViewStorage.lastVisual = newValue }
+  }
+  var blockInsertSession: VimBlockInsertSession? {
+    get { activeViewStorage.blockInsertSession }
+    set { activeViewStorage.blockInsertSession = newValue }
+  }
+  var preferredColumn: Int? {
+    get { activeViewStorage.preferredColumn }
+    set { activeViewStorage.preferredColumn = newValue }
+  }
+  var preferredVisualColumn: Int? {
+    get { activeViewStorage.preferredVisualColumn }
+    set { activeViewStorage.preferredVisualColumn = newValue }
+  }
+  weak var storedVisualGeometryProvider: (any VimVisualGeometryProviding)? {
+    get { activeViewStorage.visualGeometryProvider }
+    set { activeViewStorage.visualGeometryProvider = newValue }
+  }
+  var lastFind: (character: Character, forward: Bool, till: Bool)? {
+    get { activeViewStorage.lastFind }
+    set { activeViewStorage.lastFind = newValue }
+  }
+  var jumpBackStack: [Int] {
+    get { activeViewStorage.jumpBackStack }
+    set { activeViewStorage.jumpBackStack = newValue }
+  }
+  var jumpForwardStack: [Int] {
+    get { activeViewStorage.jumpForwardStack }
+    set { activeViewStorage.jumpForwardStack = newValue }
+  }
   var changePositions: [Int] {
     get { bufferStateStorage.changePositions }
     set { bufferStateStorage.changePositions = newValue }
   }
-  var changePositionIndex = 0
-  var temporaryInsertReturnMode: VimMode?
-  var lastPlayedMacro: Character?
-  var macroDepth = 0
+  var changePositionIndex: Int {
+    get { activeViewStorage.changePositionIndex }
+    set { activeViewStorage.changePositionIndex = newValue }
+  }
+  var temporaryInsertReturnMode: VimMode? {
+    get { activeViewStorage.temporaryInsertReturnMode }
+    set { activeViewStorage.temporaryInsertReturnMode = newValue }
+  }
+  var lastPlayedMacro: Character? {
+    get { activeViewStorage.lastPlayedMacro }
+    set { activeViewStorage.lastPlayedMacro = newValue }
+  }
+  var macroDepth: Int {
+    get { activeViewStorage.macroDepth }
+    set { activeViewStorage.macroDepth = newValue }
+  }
   let macroRecursionLimit = 100
-  var historySuppressionDepth = 0
-  var isReplayingChange = false
-  var replaceRestorations: [VimReplaceRestoration] = []
+  var historySuppressionDepth: Int {
+    get { activeViewStorage.historySuppressionDepth }
+    set { activeViewStorage.historySuppressionDepth = newValue }
+  }
+  var isReplayingChange: Bool {
+    get { activeViewStorage.isReplayingChange }
+    set { activeViewStorage.isReplayingChange = newValue }
+  }
+  var replaceRestorations: [VimReplaceRestoration] {
+    get { activeViewStorage.replaceRestorations }
+    set { activeViewStorage.replaceRestorations = newValue }
+  }
   var lastInsertedText: String {
     get { bufferStateStorage.lastInsertedText }
     set { bufferStateStorage.lastInsertedText = newValue }
@@ -388,34 +481,92 @@ public final class VimEngine: @unchecked Sendable {
     get { globalStateStorage.lastSubstituteFlags }
     set { globalStateStorage.lastSubstituteFlags = newValue }
   }
-  var pendingMessage: VimMessage?
-  var viewportTopLine = 1
-  var viewportBottomLine = 20
-  var viewportPageLineCount = 20
-  var viewportHalfPageLineCount = 10
+  var pendingMessage: VimMessage? {
+    get { windowStateStorage.message }
+    set { windowStateStorage.message = newValue }
+  }
+  var viewportTopLine: Int {
+    get { windowStateStorage.viewportTopLine }
+    set { windowStateStorage.viewportTopLine = newValue }
+  }
+  var viewportBottomLine: Int {
+    get { windowStateStorage.viewportBottomLine }
+    set { windowStateStorage.viewportBottomLine = newValue }
+  }
+  var viewportPageLineCount: Int {
+    get { windowStateStorage.viewportPageLineCount }
+    set { windowStateStorage.viewportPageLineCount = newValue }
+  }
+  var viewportHalfPageLineCount: Int {
+    get { windowStateStorage.viewportHalfPageLineCount }
+    set { windowStateStorage.viewportHalfPageLineCount = newValue }
+  }
 
   public convenience init(
     text: String = "", cursor: Int = 0, leader: String = "\\", localLeader: String = "\\",
     tabWidth: Int = 2
   ) {
-    self.init(
+    let windowID = VimWindowID(UUID())
+    let bufferID = VimBufferID(UUID())
+    let viewID = VimViewID(UUID())
+    let session = VimEngineSessionStorage(leader: leader, localLeader: localLeader)
+    let info = VimBufferInfo(id: bufferID, number: 1, name: "")
+    session.buffers[bufferID] = VimEngineBufferRecord(
+      info: info,
+      state: VimBufferStateStorage(text: text, tabWidth: tabWidth)
+    )
+    session.bufferOrder = [bufferID]
+    session.nextBufferNumber = 2
+    session.windows[windowID] = VimEngineWindowRecord(
+      currentBuffer: bufferID,
+      alternateBuffer: nil,
+      tabPageID: nil,
+      views: [bufferID: viewID]
+    )
+    session.views[viewID] = VimEngineViewStateStorage(
+      id: viewID,
+      windowID: windowID,
+      bufferID: bufferID,
       text: text,
-      cursor: cursor,
-      globalStateStorage: VimGlobalStateStorage(leader: leader, localLeader: localLeader),
-      bufferStateStorage: VimBufferStateStorage(text: text, tabWidth: tabWidth)
+      cursor: cursor
+    )
+    self.init(
+      sessionStorage: session,
+      defaultWindowID: windowID,
+      defaultBufferID: bufferID,
+      defaultViewID: viewID
     )
   }
 
   init(
-    text: String,
-    cursor: Int,
-    globalStateStorage: VimGlobalStateStorage,
-    bufferStateStorage: VimBufferStateStorage
+    sessionStorage: VimEngineSessionStorage,
+    defaultWindowID: VimWindowID,
+    defaultBufferID: VimBufferID,
+    defaultViewID: VimViewID
   ) {
-    self.storedState = VimState(text: text, cursor: cursor)
-    self.globalStateStorage = globalStateStorage
-    self.bufferStateStorage = bufferStateStorage
-    normalizeCursorForMode()
+    self.sessionStorage = sessionStorage
+    self.defaultWindowID = defaultWindowID
+    self.defaultBufferID = defaultBufferID
+    self.defaultViewID = defaultViewID
+    withView(defaultViewID) { normalizeCursorForMode() }
+  }
+
+  @discardableResult
+  func withView<T>(_ viewID: VimViewID, _ body: () throws -> T) rethrows -> T {
+    try lock.withLock {
+      precondition(sessionStorage.views[viewID] != nil, "Unknown Vim view")
+      activeViewStack.append(viewID)
+      defer { _ = activeViewStack.popLast() }
+      return try body()
+    }
+  }
+
+  func viewProjection(_ viewID: VimViewID) -> VimEngineView {
+    VimEngineView(root: self, viewID: viewID)
+  }
+
+  func scopedViewProjection() -> VimEngineView? {
+    lock.withLock { scopedViewID.map(viewProjection) }
   }
 
   public func synchronize(text: String, cursor: Int? = nil) {
@@ -487,6 +638,7 @@ public final class VimEngine: @unchecked Sendable {
       {
         undoTree.append(entry)
       }
+      commitActiveBufferText(before: before.text, after: state.text)
     }
   }
 
@@ -590,6 +742,59 @@ public final class VimEngine: @unchecked Sendable {
     try lock.withLock {
       try executeTransactionBatch {
         try executeActionUnlocked(action, count: count, register: register)
+      }
+    }
+  }
+}
+
+extension VimEngine {
+  @_spi(Calcite)
+  public var windowPresentationState: VimWindowPresentationState {
+    lock.withLock {
+      VimWindowPresentationState(
+        inputSourceIdentifier: windowStateStorage.inputSourceIdentifier,
+        horizontalScrollOffset: windowStateStorage.horizontalScrollOffset,
+        verticalScrollOffset: windowStateStorage.verticalScrollOffset,
+        zoomScale: windowStateStorage.zoomScale,
+        viewportTopLine: windowStateStorage.viewportTopLine,
+        viewportBottomLine: windowStateStorage.viewportBottomLine
+      )
+    }
+  }
+
+  @_spi(Calcite)
+  public func requestViewportScroll(lines: Int) {
+    lock.withLock { windowStateStorage.pendingScrollLineDelta += lines }
+  }
+
+  @_spi(Calcite)
+  public func consumeViewportScrollRequest() -> Int {
+    lock.withLock {
+      defer { windowStateStorage.pendingScrollLineDelta = 0 }
+      return windowStateStorage.pendingScrollLineDelta
+    }
+  }
+
+  @_spi(Calcite)
+  public func updateWindowPresentation(
+    inputSourceIdentifier: String? = nil,
+    updatesInputSource: Bool = false,
+    horizontalScrollOffset: Double? = nil,
+    verticalScrollOffset: Double? = nil,
+    zoomScale: Double? = nil
+  ) {
+    lock.withLock {
+      if updatesInputSource {
+        windowStateStorage.inputSourceIdentifier = inputSourceIdentifier
+      }
+      if let horizontalScrollOffset, horizontalScrollOffset.isFinite {
+        windowStateStorage.horizontalScrollOffset = max(0, horizontalScrollOffset)
+      }
+      if let verticalScrollOffset, verticalScrollOffset.isFinite {
+        windowStateStorage.verticalScrollOffset = max(0, verticalScrollOffset)
+      }
+      if let zoomScale, zoomScale.isFinite {
+        windowStateStorage.zoomScale = min(max(zoomScale, 0.5), 2)
       }
     }
   }

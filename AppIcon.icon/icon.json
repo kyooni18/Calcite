@@ -9,54 +9,31 @@
     {
       "blend-mode-specializations" : [
         {
-          "value" : "plus-darker"
-        },
-        {
           "appearance" : "dark",
           "value" : "hard-light"
-        },
-        {
-          "appearance" : "tinted",
-          "value" : "plus-darker"
         }
       ],
       "blur-material-specializations" : [
         {
-          "value" : 0.42
+          "value" : 0.03
         },
         {
           "appearance" : "dark",
-          "value" : 0
-        },
-        {
-          "appearance" : "tinted",
           "value" : 0
         }
       ],
       "hidden" : false,
       "layers" : [
         {
-          "image-name" : "ChatGPT Image 2026년 7월 28일 오후 08_58_26.png",
-          "name" : "ChatGPT Image 2026년 7월 28일 오후 08_58_26",
-          "opacity-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : 1
-            }
-          ],
+          "image-name" : "CalciteAppIcon.png",
+          "name" : "Calcite App Icon",
           "position" : {
-            "scale" : 1.66,
+            "scale" : 0.91,
             "translation-in-points" : [
-              21.870117019267013,
-              44.28498010701094
+              -19.565000000000055,
+              7.279999999999973
             ]
           }
-        }
-      ],
-      "opacity-specializations" : [
-        {
-          "appearance" : "dark",
-          "value" : 1
         }
       ],
       "position" : {
@@ -66,43 +43,23 @@
           0
         ]
       },
-      "refractivity-specializations" : [
-        {
-          "value" : {
-            "depth" : 0.876796875,
-            "enabled" : true,
-            "strength" : 0.7119140625
-          }
-        },
-        {
-          "appearance" : "dark",
-          "value" : {
-            "depth" : 0.2651171875,
-            "enabled" : true,
-            "strength" : 0.813984375
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "depth" : 0.5691796875,
-            "enabled" : true,
-            "strength" : 0.6987109375
-          }
-        }
-      ],
+      "refractivity" : {
+        "depth" : 0.1359765625,
+        "enabled" : true,
+        "strength" : -0.2455078125
+      },
       "shadow-specializations" : [
         {
           "value" : {
             "kind" : "neutral",
-            "opacity" : 1.08
+            "opacity" : 3.84
           }
         },
         {
           "appearance" : "dark",
           "value" : {
             "kind" : "layer-color",
-            "opacity" : 0.44
+            "opacity" : 0.56
           }
         },
         {
@@ -117,129 +74,14 @@
         {
           "value" : {
             "enabled" : true,
-            "value" : 0.07
+            "value" : 0.93
           }
         },
         {
           "appearance" : "dark",
           "value" : {
             "enabled" : true,
-            "value" : 0.41
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "enabled" : true,
-            "value" : 0.45
-          }
-        }
-      ]
-    },
-    {
-      "blend-mode-specializations" : [
-        {
-          "value" : "normal"
-        },
-        {
-          "appearance" : "dark",
-          "value" : "hard-light"
-        }
-      ],
-      "blur-material-specializations" : [
-        {
-          "value" : 0.61
-        },
-        {
-          "appearance" : "dark",
-          "value" : 0
-        }
-      ],
-      "hidden" : false,
-      "layers" : [
-        {
-          "image-name" : "ChatGPT Image 2026년 7월 28일 오후 08_58_26.png",
-          "name" : "ChatGPT Image 2026년 7월 28일 오후 08_58_26",
-          "position" : {
-            "scale" : 1.66,
-            "translation-in-points" : [
-              21.870117019267013,
-              44.28498010701094
-            ]
-          }
-        }
-      ],
-      "opacity-specializations" : [
-        {
-          "appearance" : "dark",
-          "value" : 0.46
-        }
-      ],
-      "position" : {
-        "scale" : 0.81,
-        "translation-in-points" : [
-          0,
-          0
-        ]
-      },
-      "refractivity-specializations" : [
-        {
-          "value" : {
-            "depth" : 0.5325390625,
-            "enabled" : true,
-            "strength" : 0.49796875
-          }
-        },
-        {
-          "appearance" : "dark",
-          "value" : {
-            "depth" : 0.343515625,
-            "enabled" : true,
-            "strength" : 0.3149609375
-          }
-        }
-      ],
-      "shadow-specializations" : [
-        {
-          "value" : {
-            "kind" : "neutral",
-            "opacity" : 1.08
-          }
-        },
-        {
-          "appearance" : "dark",
-          "value" : {
-            "kind" : "layer-color",
-            "opacity" : 0.32
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "kind" : "neutral",
-            "opacity" : 3.84
-          }
-        }
-      ],
-      "translucency-specializations" : [
-        {
-          "value" : {
-            "enabled" : true,
-            "value" : 0.58
-          }
-        },
-        {
-          "appearance" : "dark",
-          "value" : {
-            "enabled" : true,
-            "value" : 1
-          }
-        },
-        {
-          "appearance" : "tinted",
-          "value" : {
-            "enabled" : true,
-            "value" : 1
+            "value" : 0.55
           }
         }
       ]

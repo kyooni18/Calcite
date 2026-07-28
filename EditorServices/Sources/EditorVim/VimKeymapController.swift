@@ -28,19 +28,89 @@ public struct VimKeyHandlingResult: Sendable {
 
 /// Converts one-key-at-a-time editor input into complete Vim invocations.
 ///
-/// The controller owns transient keyboard state. Built-in commands and user mappings
-/// share one typed token queue, so ambiguous mappings, native Vim prefixes, physical
-/// key positions, and committed text are resolved through one path.
+/// The controller translates host input into engine events. VimEngine owns the
+/// complete window-local input, command-line, mapping, composition, and mode state.
 public final class VimKeymapController: @unchecked Sendable {
-  public let engine: VimEngine
+  let sessionEngine: VimEngine
+  let windowID: VimWindowID
+
+  /// Projection for the buffer currently displayed by this Vim window.
+  /// The projection owns no mutable state; switching buffers changes only which
+  /// engine-owned view it addresses.
+  @_spi(Calcite)
+  public var engine: VimEngineView {
+    lock.withLock {
+      if let scoped = sessionEngine.scopedViewProjection() { return scoped }
+      if let viewID = sessionEngine.currentSessionViewID(for: windowID) {
+        return sessionEngine.viewProjection(viewID)
+      }
+      return sessionEngine.viewProjection(sessionEngine.defaultViewID)
+    }
+  }
 
   private let lock = NSRecursiveLock()
-  private var storedPendingNotation = ""
-  private var storedPrompt: String?
-  private var storedInputPolicy: VimCommandKeyboardPolicy = .automatic
-  private var storedLanguageMap: [Character: Character] = [:]
-  private var storedMessage: VimMessage?
-  private var storedConfigurationSignature: String?
+
+  private var windowState: VimWindowStateStorage { engine.windowStateStorage }
+
+  private var storedPendingNotation: String {
+    get { windowState.pendingNotation }
+    set { windowState.pendingNotation = newValue }
+  }
+  private var storedPrompt: String? {
+    get { windowState.prompt }
+    set { windowState.prompt = newValue }
+  }
+  private var storedInputPolicy: VimCommandKeyboardPolicy {
+    get { windowState.inputPolicy }
+    set { windowState.inputPolicy = newValue }
+  }
+  private var storedLanguageMap: [Character: Character] {
+    get { windowState.languageMap }
+    set { windowState.languageMap = newValue }
+  }
+  private var storedMessage: VimMessage? {
+    get {
+      if let expiration = windowState.messageExpiration, expiration <= Date() {
+        windowState.message = nil
+        windowState.messageExpiration = nil
+      }
+      return windowState.message
+    }
+    set {
+      windowState.messageTimeoutTask?.cancel()
+      windowState.messageTimeoutTask = nil
+      windowState.message = newValue
+      guard let newValue else {
+        windowState.messageExpiration = nil
+        return
+      }
+      switch newValue.lifetime {
+      case .timed(let milliseconds):
+        let delay = max(0, milliseconds)
+        windowState.messageExpiration = Date().addingTimeInterval(Double(delay) / 1_000)
+        let targetView = engine
+        let targetState = targetView.windowStateStorage
+        targetState.messageTimeoutTask = Task { [weak self] in
+          try? await Task.sleep(for: .milliseconds(delay))
+          guard let self, !Task.isCancelled else { return }
+          let handler = self.lock.withLock { () -> (@MainActor () -> Void)? in
+            guard targetState.message == newValue else { return nil }
+            targetState.message = nil
+            targetState.messageExpiration = nil
+            targetState.messageTimeoutTask = nil
+            return targetState.stateChangeHandler
+          }
+          if let handler { await MainActor.run { handler() } }
+        }
+      case .persistent, .untilNextInput:
+        windowState.messageExpiration = nil
+      }
+    }
+  }
+  private var storedConfigurationSignature: String? {
+    get { windowState.configurationSignature }
+    set { windowState.configurationSignature = newValue }
+  }
 
   public private(set) var pendingNotation: String {
     get { lock.withLock { storedPendingNotation } }
@@ -81,54 +151,98 @@ public final class VimKeymapController: @unchecked Sendable {
   @_spi(Calcite)
   public var interactionSnapshot: VimInteractionSnapshot {
     lock.withLock {
-      engine.lock.withLock { interactionSnapshotUnlocked() }
+      engine.withLock { interactionSnapshotUnlocked() }
     }
   }
 
   @_spi(Calcite)
   public var historySnapshot: VimHistorySnapshot {
-    lock.withLock { VimHistorySnapshot(commands: commandHistory, searches: searchHistory) }
+    lock.withLock {
+      VimHistorySnapshot(
+        commands: engine.globalStateStorage.history.commands,
+        searches: engine.globalStateStorage.history.searches
+      )
+    }
   }
 
   @_spi(Calcite)
   public func restoreHistory(_ snapshot: VimHistorySnapshot) {
     lock.withLock {
-      historyStorage.merge(snapshot)
+      engine.globalStateStorage.history.merge(snapshot)
       historyIndex = nil
       historySearchPrefix = nil
     }
   }
 
-  private enum PromptKind {
-    case command
-    case search(forward: Bool)
+  private var promptKind: VimPromptKind? {
+    get { windowState.promptKind }
+    set { windowState.promptKind = newValue }
   }
-
-  private var promptKind: PromptKind?
-  private var promptBuffer: [Character] = []
-  private var promptCursor = 0
-  private let historyStorage: VimCommandLineHistoryStorage
+  private var promptBuffer: [Character] {
+    get { windowState.promptBuffer }
+    set { windowState.promptBuffer = newValue }
+  }
+  private var promptCursor: Int {
+    get { windowState.promptCursor }
+    set { windowState.promptCursor = newValue }
+  }
   private var commandHistory: [String] {
-    get { historyStorage.commands }
-    set { historyStorage.commands = newValue }
+    get { engine.globalStateStorage.history.commands }
+    set { engine.globalStateStorage.history.commands = newValue }
   }
   private var searchHistory: [String] {
-    get { historyStorage.searches }
-    set { historyStorage.searches = newValue }
+    get { engine.globalStateStorage.history.searches }
+    set { engine.globalStateStorage.history.searches = newValue }
   }
-  private var historyIndex: Int?
-  private var historySearchPrefix: String?
-  private var compositionIsActive = false
-  private var compositionText = ""
-  private var compositionSelection = 0..<0
+  private var historyIndex: Int? {
+    get { windowState.historyIndex }
+    set { windowState.historyIndex = newValue }
+  }
+  private var historySearchPrefix: String? {
+    get { windowState.historySearchPrefix }
+    set { windowState.historySearchPrefix = newValue }
+  }
+  private var compositionIsActive: Bool {
+    get { windowState.compositionIsActive }
+    set { windowState.compositionIsActive = newValue }
+  }
+  private var compositionText: String {
+    get { windowState.compositionText }
+    set { windowState.compositionText = newValue }
+  }
+  private var compositionSelection: Range<Int> {
+    get { windowState.compositionSelection }
+    set { windowState.compositionSelection = newValue }
+  }
 
-  private var mappingTries: [VimMappingKey: VimMappingTrie] = [:]
-  private var storedMappingConflicts: [VimMappingConflict] = []
-  private var pendingTokens: [VimInputToken] = []
-  private var pendingInputDomain: VimMappingInputDomain?
-  private var commandTokens: [VimInputToken] = []
-  private var commandParser = VimCommandParser()
-  private var mappingDepth = 0
+  private var mappingTries: [VimMappingKey: VimMappingTrie] {
+    get { windowState.mappingTries }
+    set { windowState.mappingTries = newValue }
+  }
+  private var storedMappingConflicts: [VimMappingConflict] {
+    get { windowState.mappingConflicts }
+    set { windowState.mappingConflicts = newValue }
+  }
+  private var pendingTokens: [VimInputToken] {
+    get { windowState.pendingTokens }
+    set { windowState.pendingTokens = newValue }
+  }
+  private var pendingInputDomain: VimMappingInputDomain? {
+    get { windowState.pendingInputDomain }
+    set { windowState.pendingInputDomain = newValue }
+  }
+  private var commandTokens: [VimInputToken] {
+    get { windowState.commandTokens }
+    set { windowState.commandTokens = newValue }
+  }
+  private var commandParser: VimCommandParser {
+    get { windowState.commandParser }
+    set { windowState.commandParser = newValue }
+  }
+  private var mappingDepth: Int {
+    get { windowState.mappingDepth }
+    set { windowState.mappingDepth = newValue }
+  }
   private let mappingRecursionLimit = 100
 
   public convenience init(
@@ -136,20 +250,20 @@ public final class VimKeymapController: @unchecked Sendable {
     mappings: [VimKeyMapping] = []
   ) {
     self.init(
-      engine: engine,
-      mappings: mappings,
-      historyStorage: engine.globalStateStorage.history
+      sessionEngine: engine,
+      windowID: engine.defaultWindowID,
+      mappings: mappings
     )
   }
 
   init(
-    engine: VimEngine,
-    mappings: [VimKeyMapping] = [],
-    historyStorage: VimCommandLineHistoryStorage
+    sessionEngine: VimEngine,
+    windowID: VimWindowID,
+    mappings: [VimKeyMapping] = []
   ) {
-    self.engine = engine
-    self.historyStorage = historyStorage
-    setMappings(mappings)
+    self.sessionEngine = sessionEngine
+    self.windowID = windowID
+    if !mappings.isEmpty { setMappings(mappings) }
   }
 
   public func synchronize(text: String, cursor: Int? = nil) {
@@ -310,10 +424,81 @@ public final class VimKeymapController: @unchecked Sendable {
     lock.withLock { cancelPromptUnlocked() }
   }
 
+  @_spi(Calcite)
+  public func setStateChangeHandler(_ handler: (@MainActor () -> Void)?) {
+    lock.withLock { windowState.stateChangeHandler = handler }
+  }
+
+  @MainActor
+  private func notifyStateChange() {
+    let handler = lock.withLock { windowState.stateChangeHandler }
+    handler?()
+  }
+
+  @_spi(Calcite)
+  public func present(message: VimMessage?) {
+    lock.withLock { storedMessage = message }
+    Task { @MainActor [weak self] in self?.notifyStateChange() }
+  }
+
+  @_spi(Calcite)
+  public func cancelMappingTimeout() {
+    lock.withLock {
+      windowState.mappingTimeoutTask?.cancel()
+      windowState.mappingTimeoutTask = nil
+    }
+  }
+
+  @_spi(Calcite)
+  public func scheduleMappingTimeout(
+    milliseconds: Int,
+    notify: @escaping @MainActor () -> Void
+  ) {
+    lock.withLock {
+      windowState.mappingTimeoutTask?.cancel()
+      let targetView = engine
+      let targetState = targetView.windowStateStorage
+      targetState.mappingTimeoutTask = Task { [weak self] in
+        try? await Task.sleep(for: .milliseconds(max(0, milliseconds)))
+        guard let self, !Task.isCancelled else { return }
+        do {
+          let result = try targetView.withLock {
+            try self.handle(event: .mappingTimeout)
+          }
+          self.lock.withLock {
+            targetState.pendingAsynchronousResults.append(result)
+            targetState.mappingTimeoutTask = nil
+          }
+        } catch {
+          targetView.withLock {
+            self.lock.withLock {
+              targetState.mappingTimeoutTask = nil
+              self.storedMessage = VimMessage(
+                text: String(describing: error),
+                code: "VIM_MAPPING_TIMEOUT",
+                severity: .error,
+                lifetime: .untilNextInput
+              )
+            }
+          }
+        }
+        await notify()
+      }
+    }
+  }
+
+  @_spi(Calcite)
+  public func consumePendingAsynchronousResults() -> [VimKeyHandlingResult] {
+    lock.withLock {
+      defer { windowState.pendingAsynchronousResults.removeAll(keepingCapacity: true) }
+      return windowState.pendingAsynchronousResults
+    }
+  }
+
   @discardableResult
   public func handle(token: String) throws -> VimKeyHandlingResult {
     try lock.withLock {
-      try engine.lock.withLock {
+      try engine.withLock {
         expireMessageForNextInputUnlocked()
         let result = try engine.executeKeyHandlingTransaction {
           try handleUnlocked(token: VimInputToken(notationToken: token))
@@ -328,7 +513,7 @@ public final class VimKeymapController: @unchecked Sendable {
   @discardableResult
   public func handle(event: VimInputEvent) throws -> VimKeyHandlingResult {
     try lock.withLock {
-      try engine.lock.withLock {
+      try engine.withLock {
         expireMessageForNextInputUnlocked()
         let result = try engine.executeKeyHandlingTransaction {
           try handleUnlocked(event: event)
@@ -652,7 +837,7 @@ public final class VimKeymapController: @unchecked Sendable {
     }
   }
 
-  private func beginPrompt(_ kind: PromptKind, prefix: String) {
+  private func beginPrompt(_ kind: VimPromptKind, prefix: String) {
     resetPendingInputUnlocked()
     promptKind = kind
     let initial = prefix == ":'<,'>" ? "'<,'>" : ""
@@ -766,7 +951,7 @@ public final class VimKeymapController: @unchecked Sendable {
     }
   }
 
-  private func appendHistory(_ value: String, kind: PromptKind) {
+  private func appendHistory(_ value: String, kind: VimPromptKind) {
     switch kind {
     case .command:
       if commandHistory.last != value { commandHistory.append(value) }
@@ -777,7 +962,7 @@ public final class VimKeymapController: @unchecked Sendable {
     }
   }
 
-  private func recallHistory(kind: PromptKind, delta: Int) {
+  private func recallHistory(kind: VimPromptKind, delta: Int) {
     let history: [String]
     switch kind {
     case .command: history = commandHistory
@@ -813,7 +998,7 @@ public final class VimKeymapController: @unchecked Sendable {
     historySearchPrefix = nil
   }
 
-  private func updatePromptDisplay(_ kind: PromptKind) {
+  private func updatePromptDisplay(_ kind: VimPromptKind) {
     let prefix: String
     switch kind {
     case .command: prefix = ":"

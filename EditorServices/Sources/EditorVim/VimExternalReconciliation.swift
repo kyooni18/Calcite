@@ -92,10 +92,12 @@ extension VimEngine {
           lifetime: .timed(milliseconds: 2800)
         )
         publishMessage(message)
+        commitActiveBufferText(before: before.text, after: text)
         return .cancelledConflict(message)
       }
 
       normalizeCursorForMode()
+      commitActiveBufferText(before: before.text, after: text)
       return .preserved
     }
   }

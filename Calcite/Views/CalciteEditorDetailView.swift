@@ -1,5 +1,23 @@
 import SwiftUI
 
+
+nonisolated enum CalciteVimSurfaceResidencyPolicy {
+  static func updatedDocumentIDs(
+    current: [UUID],
+    active: UUID,
+    available: Set<UUID>,
+    limit: Int
+  ) -> [UUID] {
+    guard limit > 0, available.contains(active) else { return [] }
+    var updated = current.filter { available.contains($0) && $0 != active }
+    updated.insert(active, at: 0)
+    if updated.count > limit {
+      updated.removeLast(updated.count - limit)
+    }
+    return updated
+  }
+}
+
 /// Displays one backend-owned editor session inside a sectional editor tab.
 ///
 /// Section splitting is handled exclusively by `MainSectionalView`; this view never creates an
@@ -95,9 +113,10 @@ struct CalciteEditorDetailView: View {
   }
 }
 
-/// Retains one native AppKit editor surface per open document in this editor session.
-/// Switching tabs changes visibility and focus instead of rebinding one `NSTextView` to another
-/// document, preserving Vim, gutter, layout, selection, and scroll state independently.
+/// Keeps a bounded MRU set of native AppKit surfaces in Calcite Vim mode. Vim
+/// state is restored from the session engine, so evicting a surface no longer
+/// discards cursor, mode, pending input, selection, viewport, or undo state. The
+/// default editor retains its surfaces because AppKit still owns its undo state.
 @MainActor
 private struct CalciteEditorSessionContent: View {
   @ObservedObject var backend: CalciteBackend
@@ -105,6 +124,9 @@ private struct CalciteEditorSessionContent: View {
   @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
   @AppStorage(EditorInterfacePreferences.interfaceKey)
   private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
+  @State private var residentDocumentIDs: [UUID] = []
+
+  private let nativeSurfaceResidencyLimit = 3
 
   @ViewBuilder
   var body: some View {
@@ -114,7 +136,7 @@ private struct CalciteEditorSessionContent: View {
       CalciteEditorEmptyState(backend: backend)
     } else {
       ZStack {
-        ForEach(orderedDocuments) { document in
+        ForEach(surfaceDocuments) { document in
           let isActiveDocument = document.id == editorSession.documentID
           CalciteEditorView(
             backend: backend,
@@ -132,6 +154,10 @@ private struct CalciteEditorSessionContent: View {
         }
       }
       .clipped()
+      .onAppear(perform: updateNativeSurfaceResidency)
+      .onChange(of: editorInterfaceRaw) { _, _ in updateNativeSurfaceResidency() }
+      .onChange(of: editorSession.documentID) { _, _ in updateNativeSurfaceResidency() }
+      .onChange(of: documentIDs) { _, _ in updateNativeSurfaceResidency() }
     }
   }
 
@@ -151,18 +177,25 @@ private struct CalciteEditorSessionContent: View {
     }
   }
 
-  private var orderedDocuments: [EditorTab] {
-    guard
-      let activeIndex = backend.documents.firstIndex(where: {
-        $0.id == editorSession.documentID
-      })
-    else {
-      return backend.documents
+  private var documentIDs: [UUID] { backend.documents.map(\.id) }
+
+  private var surfaceDocuments: [EditorTab] {
+    guard editorInterface.usesCalciteVim else { return backend.documents }
+    let byID = Dictionary(uniqueKeysWithValues: backend.documents.map { ($0.id, $0) })
+    return residentDocumentIDs.compactMap { byID[$0] }
+  }
+
+  private func updateNativeSurfaceResidency() {
+    guard editorInterface.usesCalciteVim else {
+      residentDocumentIDs.removeAll(keepingCapacity: true)
+      return
     }
-    var documents = backend.documents
-    let active = documents.remove(at: activeIndex)
-    documents.insert(active, at: 0)
-    return documents
+    residentDocumentIDs = CalciteVimSurfaceResidencyPolicy.updatedDocumentIDs(
+      current: residentDocumentIDs,
+      active: editorSession.documentID,
+      available: Set(documentIDs),
+      limit: nativeSurfaceResidencyLimit
+    )
   }
 
   private var editorInterface: EditorInterface {

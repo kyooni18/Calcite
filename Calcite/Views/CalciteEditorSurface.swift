@@ -10,6 +10,7 @@ struct CalciteEditorSurface: View {
   let isActiveDocument: Bool
   let onActivate: () -> Void
   @State private var zoomScale: CGFloat = 1
+  @State private var vimPresentationRevision: UInt64 = 0
   @State private var showsFind = false
   @State private var showsReplace = false
   @State private var findQuery = ""
@@ -39,6 +40,8 @@ struct CalciteEditorSurface: View {
         selectedRange: surfaceSelectedRange,
         profile: profile,
         editorMode: editorMode,
+        vimController: vimController,
+        vimPresentationRevision: vimPresentationRevision,
         onSelectInputMode: onSelectInputMode
       )
     }
@@ -64,7 +67,7 @@ struct CalciteEditorSurface: View {
     case .zoomOut:
       updateZoom(by: -0.1)
     case .resetZoom:
-      zoomScale = 1
+      setZoom(1)
     }
   }
 
@@ -86,7 +89,6 @@ struct CalciteEditorSurface: View {
         breakpoints: tab.breakpoints,
         selectedRange: surfaceSelectedRange,
         hasCompletions: !tab.completions.isEmpty,
-        vimHistory: tab.vimHistory,
         documentURL: tab.url,
         documentID: tab.id,
         editorSessionID: editorSession.id,
@@ -144,17 +146,14 @@ struct CalciteEditorSurface: View {
           showsFind = true
           showsReplace = replace
         },
-        zoomScale: zoomScale,
-        onZoomChange: { delta in
-          zoomScale = min(2, max(0.5, zoomScale + delta))
+        zoomScale: effectiveZoomScale,
+        onZoomChange: { updateZoom(by: $0) },
+        onVimStateChange: {
+          vimPresentationRevision &+= 1
+          if let snapshot = vimController?.historySnapshot {
+            onVimHistoryChange?(snapshot)
+          }
         },
-        onVimModeChange: tab.updateVimMode,
-        onVimPromptChange: tab.updateVimPrompt,
-        onVimInteractionChange: { snapshot in
-          tab.updateVimInteraction(snapshot)
-          onVimHistoryChange?(snapshot.history)
-        },
-        onVimInputSourceChange: tab.updateVimInputSourceIdentifier,
         onCaretRectChange: { completionAnchor = $0 }
       )
 
@@ -218,7 +217,18 @@ struct CalciteEditorSurface: View {
   }
 
   private var surfaceSelectedRange: NSRange {
-    editorSession.selection(for: tab)
+    guard profile.vim.enabled, let vimController else {
+      return editorSession.selection(for: tab)
+    }
+    return CalciteVimSelectionPresenter.presentation(
+      for: vimController.engine.state,
+      selectionSet: vimController.engine.selectionSet
+    ).primaryRange
+  }
+
+  private var effectiveZoomScale: CGFloat {
+    guard profile.vim.enabled, let vimController else { return zoomScale }
+    return CGFloat(vimController.engine.windowPresentationState.zoomScale)
   }
 
   private func replace(range: NSRange, with value: String) {
@@ -238,7 +248,21 @@ struct CalciteEditorSurface: View {
   }
 
   private func updateZoom(by delta: CGFloat) {
-    zoomScale = min(2, max(0.5, zoomScale + delta))
+    setZoom(effectiveZoomScale + delta)
+  }
+
+  private func updateZoom(_ delta: CGFloat) {
+    updateZoom(by: delta)
+  }
+
+  private func setZoom(_ value: CGFloat) {
+    let clamped = min(2, max(0.5, value))
+    if profile.vim.enabled, let vimController {
+      vimController.engine.updateWindowPresentation(zoomScale: Double(clamped))
+      vimPresentationRevision &+= 1
+    } else {
+      zoomScale = clamped
+    }
   }
 
   private func replaceAll() {
@@ -561,7 +585,6 @@ struct CodeTextEditor: NSViewRepresentable {
   let breakpoints: Set<Int>
   let selectedRange: NSRange
   let hasCompletions: Bool
-  let vimHistory: VimHistorySnapshot
   let documentURL: URL?
   let documentID: UUID?
   let editorSessionID: UUID?
@@ -587,10 +610,7 @@ struct CodeTextEditor: NSViewRepresentable {
   let onShowFind: (Bool) -> Void
   let zoomScale: CGFloat
   let onZoomChange: (CGFloat) -> Void
-  let onVimModeChange: (VimMode) -> Void
-  let onVimPromptChange: (String?) -> Void
-  let onVimInteractionChange: (VimInteractionSnapshot) -> Void
-  let onVimInputSourceChange: (String?) -> Void
+  let onVimStateChange: () -> Void
   let onCaretRectChange: (CGRect) -> Void
 
   func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -955,7 +975,6 @@ struct CodeTextEditor: NSViewRepresentable {
     private var bindingGeneration: UInt64 = 0
     private var wasActiveSurface = false
     private let vimGeometryProvider = CalciteVimGeometryProvider()
-    private var vimMappingTimeoutTask: Task<Void, Never>?
     private struct VimDocumentComposition {
       var baseText: String
       var baseSelection: NSRange
@@ -979,12 +998,7 @@ struct CodeTextEditor: NSViewRepresentable {
     private var lastAppliedVimNativeRanges: [NSRange]?
     private var representableUpdateDepth = 0
     private var deferredSelection: NSRange?
-    private var deferredVimMode: VimMode?
-    private var deferredVimPrompt: String?
-    private var hasDeferredVimPrompt = false
-    private var deferredVimInteraction: VimInteractionSnapshot?
-    private var deferredVimInputSource: String?
-    private var hasDeferredVimInputSource = false
+    private var hasDeferredVimStateChange = false
     private var publicationFlushTask: Task<Void, Never>?
     private var presentationState: PresentationState?
     private var styledSelection: NSRange?
@@ -1041,6 +1055,9 @@ struct CodeTextEditor: NSViewRepresentable {
       guard notification.object as? NSClipView === observedClipView,
         let textView = observedTextView
       else { return }
+      if parent.isActiveSurface, parent.profile.vim.enabled, let controller = vimController {
+        updateVimViewport(controller, in: textView)
+      }
       scheduleCaretPublication(for: textView)
     }
 
@@ -1200,9 +1217,9 @@ struct CodeTextEditor: NSViewRepresentable {
         pendingNativeSelectionRange = nil
         lastRequestedVimNativeRanges = nil
         lastAppliedVimNativeRanges = nil
-        vimMappingTimeoutTask?.cancel()
-        vimMappingTimeoutTask = nil
+        vimController?.cancelMappingTimeout()
         if let controller = vimController {
+          controller.setStateChangeHandler(nil)
           cancelVimComposition(in: textView, controller: controller)
         }
         vimController = nil
@@ -1258,7 +1275,6 @@ struct CodeTextEditor: NSViewRepresentable {
           tabWidth: parent.profile.behavior.tabWidth
         )
         let controller = VimKeymapController(engine: engine)
-        controller.restoreHistory(parent.vimHistory)
         vimController = controller
         attachedVimControllerID = ObjectIdentifier(controller)
         attachedVimDocumentID = parent.documentID
@@ -1268,6 +1284,14 @@ struct CodeTextEditor: NSViewRepresentable {
       }
 
       guard let controller = vimController else { return }
+      guard parent.isActiveSurface else {
+        surfaceTransition = .idle
+        return
+      }
+      controller.setStateChangeHandler { @MainActor [weak self] in
+        guard let self, self.parent.isActiveSurface else { return }
+        self.parent.onVimStateChange()
+      }
       _ = controller.applyConfiguration(
         signature: signature,
         leader: profile.normalizedLeader,
@@ -1329,6 +1353,8 @@ struct CodeTextEditor: NSViewRepresentable {
       synchronizedVimTextRevision = parent.textRevision
       vimAttachmentPhase = .active
       surfaceTransition = .idle
+      restoreVimWindowPresentation(controller, in: textView)
+      applyPendingVimAsynchronousResults(controller, to: textView)
       publishSelection(presentation.primaryRange)
     }
 
@@ -1368,8 +1394,7 @@ struct CodeTextEditor: NSViewRepresentable {
         return true
       } catch {
         NSSound.beep()
-        vimMappingTimeoutTask?.cancel()
-        vimMappingTimeoutTask = nil
+        controller.cancelMappingTimeout()
         controller.resetPendingInput()
         controller.cancelPrompt()
         publishVimPrompt(nil)
@@ -1701,24 +1726,32 @@ struct CodeTextEditor: NSViewRepresentable {
       controller: VimKeymapController,
       textView: NSTextView
     ) {
-      vimMappingTimeoutTask?.cancel()
-      vimMappingTimeoutTask = nil
+      controller.cancelMappingTimeout()
       guard awaitingMoreInput else { return }
 
-      vimMappingTimeoutTask = Task { @MainActor [weak self, weak textView] in
+      controller.scheduleMappingTimeout(
+        milliseconds: parent.profile.vim.mappingTimeoutMilliseconds
+      ) { @MainActor [weak self, weak textView] in
         guard let self else { return }
-        let milliseconds = max(0, self.parent.profile.vim.mappingTimeoutMilliseconds)
-        try? await Task.sleep(for: .milliseconds(milliseconds))
-        guard !Task.isCancelled, let textView, textView.superview != nil else { return }
-        do {
-          let result = try controller.handle(event: .mappingTimeout)
-          self.applyVimHandlingResult(result, controller: controller, to: textView)
-        } catch {
-          NSSound.beep()
-          self.publishVimError(error, controller: controller, textView: textView)
+        guard self.parent.isActiveSurface,
+          let textView, textView.superview != nil
+        else {
+          self.publishVimStateChange()
+          return
         }
-        self.vimMappingTimeoutTask = nil
+        self.applyPendingVimAsynchronousResults(controller, to: textView)
       }
+    }
+
+    private func applyPendingVimAsynchronousResults(
+      _ controller: VimKeymapController,
+      to textView: NSTextView
+    ) {
+      let results = controller.consumePendingAsynchronousResults()
+      for result in results {
+        applyVimHandlingResult(result, controller: controller, to: textView)
+      }
+      publishVimInteraction(controller.interactionSnapshot)
     }
 
     private static func mergedVimExecution(
@@ -1965,37 +1998,24 @@ struct CodeTextEditor: NSViewRepresentable {
       if hasPublishedVimPrompt, lastPublishedVimPrompt == prompt { return }
       hasPublishedVimPrompt = true
       lastPublishedVimPrompt = prompt
-      if representableUpdateDepth > 0 {
-        deferredVimPrompt = prompt
-        hasDeferredVimPrompt = true
-        scheduleDeferredPublicationsIfNeeded()
-      } else {
-        parent.onVimPromptChange(prompt)
-      }
+      publishVimStateChange()
     }
 
     private func publishVimInteraction(_ snapshot: VimInteractionSnapshot) {
       guard lastPublishedVimInteraction != snapshot else { return }
       lastPublishedVimInteraction = snapshot
-      if representableUpdateDepth > 0 {
-        deferredVimInteraction = snapshot
-        scheduleDeferredPublicationsIfNeeded()
-      } else {
-        parent.onVimInteractionChange(snapshot)
-      }
+      publishVimStateChange()
     }
 
     private func publishVimInputSource(_ identifier: String?) {
+      vimController?.engine.updateWindowPresentation(
+        inputSourceIdentifier: identifier,
+        updatesInputSource: true
+      )
       if hasPublishedVimInputSource, lastPublishedVimInputSource == identifier { return }
       hasPublishedVimInputSource = true
       lastPublishedVimInputSource = identifier
-      if representableUpdateDepth > 0 {
-        deferredVimInputSource = identifier
-        hasDeferredVimInputSource = true
-        scheduleDeferredPublicationsIfNeeded()
-      } else {
-        parent.onVimInputSourceChange(identifier)
-      }
+      publishVimStateChange()
     }
 
     private func publishVimError(
@@ -2003,9 +2023,8 @@ struct CodeTextEditor: NSViewRepresentable {
       controller: VimKeymapController,
       textView: NSTextView
     ) {
-      var snapshot = controller.interactionSnapshot
-      snapshot.message = CalciteVimMessagePresenter.message(for: error)
-      publishVimInteraction(snapshot)
+      controller.present(message: CalciteVimMessagePresenter.message(for: error))
+      publishVimInteraction(controller.interactionSnapshot)
       publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
     }
 
@@ -2032,11 +2051,15 @@ struct CodeTextEditor: NSViewRepresentable {
     private func publishVimMode(_ mode: VimMode) {
       guard lastPublishedVimMode != mode else { return }
       lastPublishedVimMode = mode
+      publishVimStateChange()
+    }
+
+    private func publishVimStateChange() {
       if representableUpdateDepth > 0 {
-        deferredVimMode = mode
+        hasDeferredVimStateChange = true
         scheduleDeferredPublicationsIfNeeded()
       } else {
-        parent.onVimModeChange(mode)
+        parent.onVimStateChange()
       }
     }
 
@@ -2053,18 +2076,12 @@ struct CodeTextEditor: NSViewRepresentable {
 
     private func clearDeferredPublications() {
       deferredSelection = nil
-      deferredVimMode = nil
-      deferredVimPrompt = nil
-      hasDeferredVimPrompt = false
-      deferredVimInteraction = nil
-      deferredVimInputSource = nil
-      hasDeferredVimInputSource = false
+      hasDeferredVimStateChange = false
     }
 
     private func scheduleDeferredPublicationsIfNeeded() {
       guard publicationFlushTask == nil,
-        deferredSelection != nil || deferredVimMode != nil || hasDeferredVimPrompt
-          || deferredVimInteraction != nil || hasDeferredVimInputSource
+        deferredSelection != nil || hasDeferredVimStateChange
       else { return }
 
       let generation = bindingGeneration
@@ -2082,20 +2099,12 @@ struct CodeTextEditor: NSViewRepresentable {
         }
 
         let selection = self.deferredSelection
-        let mode = self.deferredVimMode
-        let prompt = self.deferredVimPrompt
-        let publishesPrompt = self.hasDeferredVimPrompt
-        let interaction = self.deferredVimInteraction
-        let inputSource = self.deferredVimInputSource
-        let publishesInputSource = self.hasDeferredVimInputSource
+        let publishesVimState = self.hasDeferredVimStateChange
         self.clearDeferredPublications()
         self.publicationFlushTask = nil
 
         if let selection { self.parent.onSelectionChange(selection) }
-        if let mode { self.parent.onVimModeChange(mode) }
-        if publishesPrompt { self.parent.onVimPromptChange(prompt) }
-        if let interaction { self.parent.onVimInteractionChange(interaction) }
-        if publishesInputSource { self.parent.onVimInputSourceChange(inputSource) }
+        if publishesVimState { self.parent.onVimStateChange() }
       }
     }
 
@@ -2103,8 +2112,40 @@ struct CodeTextEditor: NSViewRepresentable {
       _ controller: VimKeymapController,
       in textView: NSTextView
     ) {
-      guard let range = CalciteVimViewportProvider.visibleUTF16Range(in: textView) else { return }
-      controller.engine.updateViewport(visibleUTF16Range: range)
+      if let range = CalciteVimViewportProvider.visibleUTF16Range(in: textView) {
+        controller.engine.updateViewport(visibleUTF16Range: range)
+      }
+      if let clipView = textView.enclosingScrollView?.contentView {
+        controller.engine.updateWindowPresentation(
+          horizontalScrollOffset: Double(clipView.bounds.origin.x),
+          verticalScrollOffset: Double(clipView.bounds.origin.y)
+        )
+      }
+    }
+
+    private func restoreVimWindowPresentation(
+      _ controller: VimKeymapController,
+      in textView: NSTextView
+    ) {
+      guard let scrollView = textView.enclosingScrollView else { return }
+      let state = controller.engine.windowPresentationState
+      Task { @MainActor [weak self, weak textView, weak scrollView] in
+        await Task.yield()
+        guard let self, self.parent.isActiveSurface,
+          let textView, let scrollView, textView.superview != nil
+        else { return }
+        let clipView = scrollView.contentView
+        let requested = NSRect(
+          x: CGFloat(state.horizontalScrollOffset),
+          y: CGFloat(state.verticalScrollOffset),
+          width: clipView.bounds.width,
+          height: clipView.bounds.height
+        )
+        let constrained = clipView.constrainBoundsRect(requested)
+        clipView.scroll(to: constrained.origin)
+        scrollView.reflectScrolledClipView(clipView)
+        self.updateVimViewport(controller, in: textView)
+      }
     }
 
     private func applyVimSelectionPresentation(
@@ -2361,8 +2402,31 @@ struct CodeTextEditor: NSViewRepresentable {
           selection: primarySelection,
           to: controller.engine
         )
+        applyPendingVimViewportRequest(controller, in: textView)
         publishVimInteraction(controller.interactionSnapshot)
       }
+    }
+
+    private func applyPendingVimViewportRequest(
+      _ controller: VimKeymapController,
+      in textView: NSTextView
+    ) {
+      let lines = controller.engine.consumeViewportScrollRequest()
+      guard lines != 0, let scrollView = textView.enclosingScrollView else { return }
+      let lineHeight = textView.layoutManager.map {
+        $0.defaultLineHeight(for: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular))
+      } ?? 16
+      let clipView = scrollView.contentView
+      let requested = NSRect(
+        x: clipView.bounds.origin.x,
+        y: clipView.bounds.origin.y + CGFloat(lines) * lineHeight,
+        width: clipView.bounds.width,
+        height: clipView.bounds.height
+      )
+      let constrained = clipView.constrainBoundsRect(requested)
+      clipView.scroll(to: constrained.origin)
+      scrollView.reflectScrolledClipView(clipView)
+      updateVimViewport(controller, in: textView)
     }
 
     private func resolvedTransaction(

@@ -76,8 +76,9 @@ struct CalciteEditorView: View {
       ].joined(separator: "|")
     }
 
-    // Stage 15 keeps one native AppKit surface per (editor session, document).
-    // A tab switch only changes which retained surface is visible.
+    // Stage 17 keeps Vim state in the session engine and bounds native AppKit
+    // surface residency. This identity only selects the projected document view;
+    // an evicted surface can be rebuilt without becoming the state authority.
     return [editorSession.id.uuidString, tab.id.uuidString, "native-editor"].joined(separator: "|")
   }
 
@@ -116,8 +117,7 @@ struct CalciteEditorView: View {
         leader: profile.vim.normalizedLeader,
         localLeader: profile.vim.normalizedLeader,
         tabWidth: profile.behavior.tabWidth,
-        history: tab.vimHistory,
-        makeCurrent: isActiveDocument
+        attachment: isActiveDocument ? .activate : .retain
       )
     } else {
       vimController = nil

@@ -28,10 +28,10 @@ final class VimStage15DocumentSurfaceTests: XCTestCase {
       leader: "\\",
       localLeader: "\\",
       tabWidth: 2,
-      makeCurrent: false
+      attachment: .retain
     )
 
-    XCTAssertNotIdentical(active, inactive)
+    XCTAssertIdentical(active, inactive)
     XCTAssertEqual(coordinator.currentBuffer(for: window), activeBuffer)
     XCTAssertNil(coordinator.alternateBuffer(for: window))
     XCTAssertTrue(
@@ -64,7 +64,7 @@ final class VimStage15DocumentSurfaceTests: XCTestCase {
       leader: "\\",
       localLeader: "\\",
       tabWidth: 2,
-      makeCurrent: false
+      attachment: .retain
     )
 
     let activated = coordinator.controller(
@@ -76,7 +76,7 @@ final class VimStage15DocumentSurfaceTests: XCTestCase {
       leader: "\\",
       localLeader: "\\",
       tabWidth: 2,
-      makeCurrent: true
+      attachment: .activate
     )
 
     XCTAssertTrue(activated === retained)
