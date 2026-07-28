@@ -31,13 +31,11 @@ struct CalciteEditorDetailView: View {
 
   var body: some View {
     Group {
-      if let editor = resolvedEditorSession, let document = editor.document {
-        CalciteEditorView(
+      if let editor = resolvedEditorSession {
+        CalciteEditorSessionContent(
           backend: backend,
           windowSession: windowSession,
-          editorSession: editor,
-          tab: document,
-          activate: { windowSession.activateEditorSession(editor.id) }
+          editorSession: editor
         )
       } else {
         CalciteEditorEmptyState(backend: backend)
@@ -94,5 +92,80 @@ struct CalciteEditorDetailView: View {
     }
     editorSessionID = id
     editorSessionDidChange?(id)
+  }
+}
+
+/// Retains one native AppKit editor surface per open document in this editor session.
+/// Switching tabs changes visibility and focus instead of rebinding one `NSTextView` to another
+/// document, preserving Vim, gutter, layout, selection, and scroll state independently.
+@MainActor
+private struct CalciteEditorSessionContent: View {
+  @ObservedObject var backend: CalciteBackend
+  @ObservedObject var windowSession: CalciteBackendWindowSession
+  @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
+  @AppStorage(EditorInterfacePreferences.interfaceKey)
+  private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
+
+  @ViewBuilder
+  var body: some View {
+    if editorInterface.usesTerminalEditor {
+      currentDocumentSurface
+    } else if backend.documents.isEmpty {
+      CalciteEditorEmptyState(backend: backend)
+    } else {
+      ZStack {
+        ForEach(orderedDocuments) { document in
+          let isActiveDocument = document.id == editorSession.documentID
+          CalciteEditorView(
+            backend: backend,
+            windowSession: windowSession,
+            editorSession: editorSession,
+            tab: document,
+            isActiveDocument: isActiveDocument,
+            activate: { windowSession.activateEditorSession(editorSession.id) }
+          )
+          .id("\(editorSession.id.uuidString)|\(document.id.uuidString)|native-surface")
+          .opacity(isActiveDocument ? 1 : 0)
+          .allowsHitTesting(isActiveDocument)
+          .accessibilityHidden(!isActiveDocument)
+          .zIndex(isActiveDocument ? 1 : 0)
+        }
+      }
+      .clipped()
+    }
+  }
+
+  @ViewBuilder
+  private var currentDocumentSurface: some View {
+    if let document = editorSession.document {
+      CalciteEditorView(
+        backend: backend,
+        windowSession: windowSession,
+        editorSession: editorSession,
+        tab: document,
+        isActiveDocument: true,
+        activate: { windowSession.activateEditorSession(editorSession.id) }
+      )
+    } else {
+      CalciteEditorEmptyState(backend: backend)
+    }
+  }
+
+  private var orderedDocuments: [EditorTab] {
+    guard
+      let activeIndex = backend.documents.firstIndex(where: {
+        $0.id == editorSession.documentID
+      })
+    else {
+      return backend.documents
+    }
+    var documents = backend.documents
+    let active = documents.remove(at: activeIndex)
+    documents.insert(active, at: 0)
+    return documents
+  }
+
+  private var editorInterface: EditorInterface {
+    EditorInterface(rawValue: editorInterfaceRaw) ?? .builtIn
   }
 }

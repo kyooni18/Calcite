@@ -13,18 +13,25 @@ final class CalciteVimDocumentSynchronizer {
 
   private(set) var synchronizedText: String
   private(set) var renderedRevision: UInt64
+  private(set) var renderedDocumentID: UUID?
   private(set) var expectedLocalRevision: UInt64?
   private(set) var vimRevision: UInt64?
   private(set) var lastTransactionID: VimEditTransactionID?
 
-  init(text: String, revision: UInt64) {
+  init(text: String, revision: UInt64, documentID: UUID? = nil) {
     self.synchronizedText = text
     self.renderedRevision = revision
+    self.renderedDocumentID = documentID
   }
 
-  func classify(text: String, revision: UInt64) -> IncomingSnapshot {
-    guard revision != renderedRevision else { return .unchanged }
-    if expectedLocalRevision == revision, text == synchronizedText {
+  func classify(text: String, revision: UInt64, documentID: UUID? = nil) -> IncomingSnapshot {
+    guard revision != renderedRevision || documentID != renderedDocumentID else {
+      return .unchanged
+    }
+    if documentID == renderedDocumentID,
+      expectedLocalRevision == revision,
+      text == synchronizedText
+    {
       return .acknowledgedLocal
     }
     return .external
@@ -43,15 +50,17 @@ final class CalciteVimDocumentSynchronizer {
     return target
   }
 
-  func acknowledge(text: String, revision: UInt64) {
+  func acknowledge(text: String, revision: UInt64, documentID: UUID? = nil) {
     synchronizedText = text
     renderedRevision = revision
+    renderedDocumentID = documentID
     if expectedLocalRevision == revision { expectedLocalRevision = nil }
   }
 
-  func acceptExternal(text: String, revision: UInt64) {
+  func acceptExternal(text: String, revision: UInt64, documentID: UUID? = nil) {
     synchronizedText = text
     renderedRevision = revision
+    renderedDocumentID = documentID
     expectedLocalRevision = nil
     vimRevision = nil
     lastTransactionID = nil

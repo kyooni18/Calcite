@@ -142,7 +142,8 @@ public final class VimSessionCoordinator: @unchecked Sendable {
     localLeader: String,
     tabWidth: Int,
     history: VimHistorySnapshot = VimHistorySnapshot(),
-    tabPageID: VimTabPageID? = nil
+    tabPageID: VimTabPageID? = nil,
+    makeCurrent: Bool = true
   ) -> VimKeymapController {
     lock.withLock {
       globalState.leader = leader
@@ -163,7 +164,7 @@ public final class VimSessionCoordinator: @unchecked Sendable {
           tabPageID: tabPageID,
           controllers: [:]
         )
-      if record.currentBuffer != bufferID {
+      if makeCurrent, record.currentBuffer != bufferID {
         record.alternateBuffer = record.currentBuffer
         record.currentBuffer = bufferID
       }
@@ -192,6 +193,16 @@ public final class VimSessionCoordinator: @unchecked Sendable {
       windows[windowID] = record
       return controller
     }
+  }
+
+  /// Returns an already-created controller without changing the window's
+  /// current/alternate buffer relationship or creating new state.
+  @_spi(Calcite)
+  public func existingController(
+    for windowID: VimWindowID,
+    displaying bufferID: VimBufferID
+  ) -> VimKeymapController? {
+    lock.withLock { windows[windowID]?.controllers[bufferID] }
   }
 
   public func currentBuffer(for windowID: VimWindowID) -> VimBufferID? {

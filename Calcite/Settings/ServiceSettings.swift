@@ -902,6 +902,7 @@ private struct ThemeEditorPreview: View {
         documentURL: nil,
         documentID: nil,
         editorSessionID: nil,
+        isActiveSurface: true,
         tabPageID: nil,
         sharedVimController: nil,
         onWillEdit: {},

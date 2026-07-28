@@ -9,6 +9,7 @@ struct CalciteEditorView: View {
   @ObservedObject var windowSession: CalciteBackendWindowSession
   @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
   @ObservedObject var tab: EditorTab
+  let isActiveDocument: Bool
   let activate: () -> Void
   @AppStorage(EditorInterfacePreferences.interfaceKey)
   private var editorInterfaceRaw = EditorInterface.builtIn.rawValue
@@ -32,30 +33,52 @@ struct CalciteEditorView: View {
             activate()
             windowSession.commandNavigateSection(direction: direction)
           },
-          navigateTab: windowSession.commandNavigateTab(forward:),
-          selectTab: windowSession.commandSelectTab(number:),
+          navigateTab: { forward in
+            windowSession.commandNavigateTab(
+              forward: forward,
+              originatingEditorSessionID: editorSession.id
+            )
+          },
+          selectTab: { number in
+            windowSession.commandSelectTab(
+              number: number,
+              originatingEditorSessionID: editorSession.id
+            )
+          },
           handleHostCommand: { backend.handleVimHostRequest(.custom($0)) }
         )
       } else {
         builtInEditor
       }
     }
-    .id(
-      [
+    .id(surfaceIdentity)
+    .onChange(of: tab.selectedRange) { _, range in
+      guard !editorInterface.usesCalciteVim else { return }
+      guard isActiveDocument, windowSession.activeEditorSessionID == editorSession.id else {
+        return
+      }
+      editorSession.updateSelection(range, for: tab)
+    }
+    .onAppear(perform: preloadTerminalEditors)
+    .onChange(of: editorInterfaceRaw) { _, _ in preloadTerminalEditors() }
+    .onChange(of: documentIDs) { _, _ in preloadTerminalEditors() }
+  }
+
+  private var surfaceIdentity: String {
+    if editorInterface.usesTerminalEditor {
+      return [
         editorSession.id.uuidString,
+        tab.id.uuidString,
         editorInterface.rawValue,
         neovimLaunchCommand,
         vimLaunchCommand,
         terminalLeader,
       ].joined(separator: "|")
-    )
-    .onChange(of: tab.selectedRange) { _, range in
-      guard windowSession.activeEditorSessionID == editorSession.id else { return }
-      editorSession.updateSelection(range)
     }
-    .onAppear(perform: preloadTerminalEditors)
-    .onChange(of: editorInterfaceRaw) { _, _ in preloadTerminalEditors() }
-    .onChange(of: documentIDs) { _, _ in preloadTerminalEditors() }
+
+    // Stage 15 keeps one native AppKit surface per (editor session, document).
+    // A tab switch only changes which retained surface is visible.
+    return [editorSession.id.uuidString, tab.id.uuidString, "native-editor"].joined(separator: "|")
   }
 
   private var editorInterface: EditorInterface {
@@ -88,12 +111,13 @@ struct CalciteEditorView: View {
         for: VimWindowID(editorSession.id),
         displaying: VimBufferID(tab.id),
         text: tab.text,
-        cursor: editorSession.selectedRange.location,
+        cursor: editorSession.selection(for: tab).location,
         name: tab.url.path,
         leader: profile.vim.normalizedLeader,
         localLeader: profile.vim.normalizedLeader,
         tabWidth: profile.behavior.tabWidth,
-        history: tab.vimHistory
+        history: tab.vimHistory,
+        makeCurrent: isActiveDocument
       )
     } else {
       vimController = nil
@@ -101,6 +125,7 @@ struct CalciteEditorView: View {
     return CalciteEditorSurface(
       tab: tab,
       editorSession: editorSession,
+      isActiveDocument: isActiveDocument,
       onActivate: activate,
       liveMarkdownStyling: windowSession.usesLiveMarkdownEditor,
       showsMarkdownSyntax: windowSession.showsMarkdownSyntax,

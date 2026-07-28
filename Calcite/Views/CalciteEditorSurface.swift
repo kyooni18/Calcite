@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct CalciteEditorSurface: View {
   @ObservedObject var tab: EditorTab
   @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
+  let isActiveDocument: Bool
   let onActivate: () -> Void
   @State private var zoomScale: CGFloat = 1
   @State private var showsFind = false
@@ -35,7 +36,7 @@ struct CalciteEditorSurface: View {
 
       CalciteEditorStatusBar(
         tab: tab,
-        selectedRange: editorSession.selectedRange,
+        selectedRange: surfaceSelectedRange,
         profile: profile,
         editorMode: editorMode,
         onSelectInputMode: onSelectInputMode
@@ -83,18 +84,20 @@ struct CalciteEditorSurface: View {
         diagnostics: profile.behavior.showDiagnostics ? tab.diagnostics : [],
         showsInlineDiagnosticMessages: profile.behavior.showInlineDiagnosticMessages,
         breakpoints: tab.breakpoints,
-        selectedRange: editorSession.selectedRange,
+        selectedRange: surfaceSelectedRange,
         hasCompletions: !tab.completions.isEmpty,
         vimHistory: tab.vimHistory,
         documentURL: tab.url,
         documentID: tab.id,
         editorSessionID: editorSession.id,
+        isActiveSurface: isActiveDocument,
         tabPageID: nil,
         sharedVimController: vimController,
         onWillEdit: tab.markModified,
         onEdit: { range, replacement, resultingText, selectionAfter in
+          guard isActiveDocument else { return }
           onActivate()
-          editorSession.updateSelection(selectionAfter)
+          editorSession.updateSelection(selectionAfter, for: tab)
           tab.submitEdit(
             range: range,
             replacement: replacement,
@@ -104,8 +107,9 @@ struct CalciteEditorSurface: View {
           )
         },
         onVimEdit: { transaction, selectionAfter in
+          guard isActiveDocument else { return }
           onActivate()
-          editorSession.updateSelection(selectionAfter)
+          editorSession.updateSelection(selectionAfter, for: tab)
           tab.submitVimTransaction(
             transaction,
             selectionAfter: selectionAfter,
@@ -113,13 +117,15 @@ struct CalciteEditorSurface: View {
           )
         },
         onSelectionChange: { range in
+          guard isActiveDocument else { return }
           onActivate()
-          editorSession.updateSelection(range)
+          editorSession.updateSelection(range, for: tab)
         },
         onToggleBreakpoint: { line in
+          guard isActiveDocument else { return }
           onActivate()
           let selection = selectedRange(forLine: line, in: tab.text)
-          editorSession.updateSelection(selection)
+          editorSession.updateSelection(selection, for: tab)
           tab.updateSelection(selection)
           tab.toggleBreakpointAtCurrentLine()
         },
@@ -193,14 +199,14 @@ struct CalciteEditorSurface: View {
         EditorFindReplaceBar(
           text: tab.text,
           textRevision: tab.textRevision,
-          selection: editorSession.selectedRange,
+          selection: surfaceSelectedRange,
           query: $findQuery,
           replacement: $replacement,
           showsReplace: $showsReplace,
           close: dismissFindReplace,
           select: { range in
             onActivate()
-            editorSession.updateSelection(range)
+            editorSession.updateSelection(range, for: tab)
           },
           replaceCurrent: { range in replace(range: range, with: replacement) },
           replaceAll: replaceAll
@@ -211,12 +217,16 @@ struct CalciteEditorSurface: View {
     }
   }
 
+  private var surfaceSelectedRange: NSRange {
+    editorSession.selection(for: tab)
+  }
+
   private func replace(range: NSRange, with value: String) {
     let source = tab.text as NSString
     let text = source.replacingCharacters(in: range, with: value)
     let selection = NSRange(location: range.location, length: (value as NSString).length)
     onActivate()
-    editorSession.updateSelection(selection)
+    editorSession.updateSelection(selection, for: tab)
     tab.submitEdit(
       range: range, replacement: value, resultingText: text, selectionAfter: selection,
       suggestionDelay: profile.behavior.suggestionDelay)
@@ -237,7 +247,7 @@ struct CalciteEditorSurface: View {
     guard text != tab.text else { return }
     tab.submitEdit(
       range: NSRange(location: 0, length: (tab.text as NSString).length), replacement: text,
-      resultingText: text, selectionAfter: editorSession.selectedRange,
+      resultingText: text, selectionAfter: surfaceSelectedRange,
       suggestionDelay: profile.behavior.suggestionDelay)
   }
 
@@ -555,6 +565,7 @@ struct CodeTextEditor: NSViewRepresentable {
   let documentURL: URL?
   let documentID: UUID?
   let editorSessionID: UUID?
+  let isActiveSurface: Bool
   let tabPageID: UUID?
   let sharedVimController: VimKeymapController?
   let onWillEdit: () -> Void
@@ -640,6 +651,10 @@ struct CodeTextEditor: NSViewRepresentable {
     textView.contentDidChangeHandler = { [weak coordinator = context.coordinator] textView in
       coordinator?.handleObservedTextChange(in: textView)
     }
+    textView.nativePointerSelectionHandler = {
+      [weak coordinator = context.coordinator] range, textView in
+      coordinator?.handleNativePointerSelection(range, in: textView)
+    }
     textView.isEditable = true
     textView.isSelectable = true
     textView.isRichText = false
@@ -661,6 +676,11 @@ struct CodeTextEditor: NSViewRepresentable {
     textView.isContinuousSpellCheckingEnabled = false
     textView.smartInsertDeleteEnabled = false
     textView.string = text
+    let initialSelection = safeSelection(for: text)
+    context.coordinator.isApplyingExternalUpdate = true
+    textView.setSelectedRange(initialSelection)
+    context.coordinator.lastPublishedSelection = initialSelection
+    context.coordinator.isApplyingExternalUpdate = false
 
     scrollView.documentView = textView
     context.coordinator.observe(textView: textView, clipView: scrollView.contentView)
@@ -678,12 +698,18 @@ struct CodeTextEditor: NSViewRepresentable {
 
     context.coordinator.configureVim(for: textView)
     context.coordinator.applyPresentationIfNeeded(to: textView)
+    context.coordinator.updateSurfaceActivation(in: textView)
     context.coordinator.scheduleCaretPublication(for: textView)
     scrollView.requestDocumentSizeSync()
     return scrollView
   }
 
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
+    let bindingChanged = context.coordinator.prepareForRepresentableUpdate(
+      documentID: documentID,
+      controller: sharedVimController,
+      selectedRange: selectedRange
+    )
     context.coordinator.parent = self
     context.coordinator.beginRepresentableUpdate()
     defer { context.coordinator.endRepresentableUpdate() }
@@ -711,25 +737,36 @@ struct CodeTextEditor: NSViewRepresentable {
       codeTextView.showQuickHelpHandler = onShowQuickHelp
       codeTextView.showFindHandler = onShowFind
       codeTextView.zoomHandler = context.coordinator.handleZoom
+      codeTextView.nativePointerSelectionHandler = {
+        [weak coordinator = context.coordinator] range, textView in
+        coordinator?.handleNativePointerSelection(range, in: textView)
+      }
     }
 
-    if context.coordinator.renderedTextRevision != textRevision {
+    let hasExternalSelectionRequest =
+      !bindingChanged && context.coordinator.observeParentSelection(selectedRange)
+
+    if context.coordinator.renderedTextRevision != textRevision
+      || context.coordinator.renderedDocumentID != documentID
+    {
       let incoming = context.coordinator.documentSynchronizer.classify(
         text: text,
-        revision: textRevision
+        revision: textRevision,
+        documentID: documentID
       )
       let originatedInTextView = incoming == .acknowledgedLocal
       if !originatedInTextView {
         let preservedSelection = textView.selectedRange()
         let requestedSelection = safeSelection(for: text)
-        let hasExternalSelectionRequest =
-          context.coordinator.lastPublishedSelection != selectedRange
 
+        if hasExternalSelectionRequest {
+          context.coordinator.noteExternalSelectionRequest(requestedSelection)
+        }
         context.coordinator.isApplyingExternalUpdate = true
         textView.string = text
         context.coordinator.synchronizedText = text
         let selection =
-          hasExternalSelectionRequest
+          bindingChanged || hasExternalSelectionRequest
           ? requestedSelection
           : clampedSelection(preservedSelection, for: text)
         textView.setSelectedRange(selection)
@@ -740,18 +777,19 @@ struct CodeTextEditor: NSViewRepresentable {
       if originatedInTextView {
         context.coordinator.documentSynchronizer.acknowledge(
           text: text,
-          revision: textRevision
+          revision: textRevision,
+          documentID: documentID
         )
       } else {
         context.coordinator.documentSynchronizer.acceptExternal(
           text: text,
-          revision: textRevision
+          revision: textRevision,
+          documentID: documentID
         )
       }
-    } else if context.coordinator.lastPublishedSelection != selectedRange,
-      textView.selectedRange() != selectedRange
-    {
+    } else if hasExternalSelectionRequest, textView.selectedRange() != selectedRange {
       let requestedSelection = safeSelection(for: text)
+      context.coordinator.noteExternalSelectionRequest(requestedSelection)
       context.coordinator.isApplyingExternalUpdate = true
       textView.setSelectedRange(requestedSelection)
       (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
@@ -772,6 +810,7 @@ struct CodeTextEditor: NSViewRepresentable {
         breakpoints: breakpoints
       )
     }
+    context.coordinator.updateSurfaceActivation(in: textView)
     context.coordinator.scheduleCaretPublication(for: textView)
   }
 
@@ -883,6 +922,9 @@ struct CodeTextEditor: NSViewRepresentable {
       get { documentSynchronizer.renderedRevision }
       set { documentSynchronizer.updateRenderedRevision(newValue) }
     }
+    fileprivate var renderedDocumentID: UUID? {
+      documentSynchronizer.renderedDocumentID
+    }
     fileprivate var expectedLocalTextRevision: UInt64? {
       get { documentSynchronizer.expectedLocalRevision }
       set { documentSynchronizer.updateExpectedLocalRevision(newValue) }
@@ -892,9 +934,28 @@ struct CodeTextEditor: NSViewRepresentable {
       set { documentSynchronizer.updateVimRevision(newValue) }
     }
     private var vimController: VimKeymapController?
+    private enum VimSurfaceAttachmentPhase: Equatable {
+      case unattached
+      case restoringController
+      case active
+    }
+
+    private enum VimSurfaceTransition: Equatable {
+      case loadingDocument
+      case restoringVimState
+      case idle
+    }
+
+    private var vimAttachmentPhase: VimSurfaceAttachmentPhase = .unattached
+    private var surfaceTransition: VimSurfaceTransition = .loadingDocument
+    private var attachedVimControllerID: ObjectIdentifier?
+    private var attachedVimDocumentID: UUID?
+    private var boundDocumentID: UUID?
+    private var boundVimControllerID: ObjectIdentifier?
+    private var bindingGeneration: UInt64 = 0
+    private var wasActiveSurface = false
     private let vimGeometryProvider = CalciteVimGeometryProvider()
     private var vimMappingTimeoutTask: Task<Void, Never>?
-    private var vimConfigurationSignature = ""
     private struct VimDocumentComposition {
       var baseText: String
       var baseSelection: NSRange
@@ -910,6 +971,12 @@ struct CodeTextEditor: NSViewRepresentable {
     private var lastPublishedVimInputSource: String?
     private var hasPublishedVimInputSource = false
     fileprivate var lastPublishedSelection: NSRange?
+    private var lastObservedParentSelection: NSRange?
+    private var hasPendingNativeSelectionChange = false
+    private var pendingNativeSelectionSource: VimHostCursorMoveSource?
+    private var pendingNativeSelectionRange: NSRange?
+    private var lastRequestedVimNativeRanges: [NSRange]?
+    private var lastAppliedVimNativeRanges: [NSRange]?
     private var representableUpdateDepth = 0
     private var deferredSelection: NSRange?
     private var deferredVimMode: VimMode?
@@ -918,7 +985,7 @@ struct CodeTextEditor: NSViewRepresentable {
     private var deferredVimInteraction: VimInteractionSnapshot?
     private var deferredVimInputSource: String?
     private var hasDeferredVimInputSource = false
-    private var publicationFlushScheduled = false
+    private var publicationFlushTask: Task<Void, Never>?
     private var presentationState: PresentationState?
     private var styledSelection: NSRange?
     private weak var observedTextView: NSTextView?
@@ -938,14 +1005,21 @@ struct CodeTextEditor: NSViewRepresentable {
 
     init(parent: CodeTextEditor) {
       self.parent = parent
+      self.lastObservedParentSelection = parent.selectedRange
+      self.lastPublishedSelection = parent.selectedRange
       self.documentSynchronizer = CalciteVimDocumentSynchronizer(
         text: parent.text,
-        revision: parent.textRevision
+        revision: parent.textRevision,
+        documentID: parent.documentID
       )
+      self.boundDocumentID = parent.documentID
+      self.boundVimControllerID = parent.sharedVimController.map(ObjectIdentifier.init)
+      self.wasActiveSurface = false
     }
 
     isolated deinit {
       caretPublicationTask?.cancel()
+      publicationFlushTask?.cancel()
       NotificationCenter.default.removeObserver(self)
     }
 
@@ -970,6 +1044,27 @@ struct CodeTextEditor: NSViewRepresentable {
       scheduleCaretPublication(for: textView)
     }
 
+    func updateSurfaceActivation(in textView: NSTextView) {
+      let becameActive = parent.isActiveSurface && !wasActiveSurface
+      wasActiveSurface = parent.isActiveSurface
+
+      guard becameActive else { return }
+      if parent.profile.vim.enabled {
+        configureVim(for: textView)
+      }
+      scheduleCaretPublication(for: textView)
+      textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+
+      Task { @MainActor [weak textView, weak self] in
+        await Task.yield()
+        guard let self, self.parent.isActiveSurface,
+          let textView, let window = textView.window,
+          textView.superview != nil
+        else { return }
+        window.makeFirstResponder(textView)
+      }
+    }
+
     func beginRepresentableUpdate() {
       representableUpdateDepth += 1
     }
@@ -977,6 +1072,62 @@ struct CodeTextEditor: NSViewRepresentable {
     func endRepresentableUpdate() {
       representableUpdateDepth = max(0, representableUpdateDepth - 1)
       if representableUpdateDepth == 0 { scheduleDeferredPublicationsIfNeeded() }
+    }
+
+    /// Starts a document/controller handoff before the representable adopts its
+    /// new SwiftUI value. Any delayed publication from the previous document is
+    /// discarded so it cannot update the newly selected tab.
+    @discardableResult
+    func prepareForRepresentableUpdate(
+      documentID: UUID?,
+      controller: VimKeymapController?,
+      selectedRange: NSRange
+    ) -> Bool {
+      let controllerID = controller.map(ObjectIdentifier.init)
+      guard boundDocumentID != documentID || boundVimControllerID != controllerID else {
+        return false
+      }
+
+      bindingGeneration &+= 1
+      publicationFlushTask?.cancel()
+      publicationFlushTask = nil
+      clearDeferredPublications()
+
+      boundDocumentID = documentID
+      boundVimControllerID = controllerID
+      surfaceTransition = .loadingDocument
+      vimAttachmentPhase = .unattached
+      attachedVimControllerID = nil
+      attachedVimDocumentID = nil
+      synchronizedVimTextRevision = nil
+      hasPendingNativeSelectionChange = false
+      pendingNativeSelectionSource = nil
+      pendingNativeSelectionRange = nil
+      lastRequestedVimNativeRanges = nil
+      lastAppliedVimNativeRanges = nil
+      pendingPresentationRange = nil
+      presentationState = nil
+      styledSelection = nil
+      lastObservedParentSelection = selectedRange
+      lastPublishedSelection = nil
+      return true
+    }
+
+    /// Returns true only for a selection mutation that originated outside this text view.
+    /// SwiftUI echoes selections published by Vim back through `updateNSView`; treating that
+    /// acknowledgement as a new native cursor move would cancel Visual and Visual Block mode.
+    func observeParentSelection(_ selection: NSRange) -> Bool {
+      defer { lastObservedParentSelection = selection }
+      guard let previous = lastObservedParentSelection, previous != selection else {
+        return false
+      }
+      return selection != lastPublishedSelection
+    }
+
+    func noteExternalSelectionRequest(_ range: NSRange) {
+      hasPendingNativeSelectionChange = true
+      pendingNativeSelectionSource = .parentRequest
+      pendingNativeSelectionRange = range
     }
 
     func applyPresentationIfNeeded(to textView: NSTextView) {
@@ -1044,19 +1195,27 @@ struct CodeTextEditor: NSViewRepresentable {
     func configureVim(for textView: NSTextView) {
       let profile = parent.profile.vim
       guard profile.enabled else {
+        hasPendingNativeSelectionChange = false
+        pendingNativeSelectionSource = nil
+        pendingNativeSelectionRange = nil
+        lastRequestedVimNativeRanges = nil
+        lastAppliedVimNativeRanges = nil
         vimMappingTimeoutTask?.cancel()
         vimMappingTimeoutTask = nil
         if let controller = vimController {
           cancelVimComposition(in: textView, controller: controller)
         }
         vimController = nil
+        vimAttachmentPhase = .unattached
+        attachedVimControllerID = nil
+        attachedVimDocumentID = nil
         synchronizedVimTextRevision = nil
-        vimConfigurationSignature = ""
         updateVimCursorStyle(for: .insert, in: textView, isEnabled: false)
         publishVimMode(.insert)
         publishVimPrompt(nil)
         publishVimInteraction(VimInteractionSnapshot(mode: .insert))
         publishVimInputSource(nil)
+        surfaceTransition = .idle
         return
       }
 
@@ -1068,15 +1227,29 @@ struct CodeTextEditor: NSViewRepresentable {
         tabWidth: parent.profile.behavior.tabWidth,
         mappings: mappings
       )
-      if let shared = parent.sharedVimController, vimController !== shared {
-        if let controller = vimController {
-          cancelVimComposition(in: textView, controller: controller)
+
+      if let shared = parent.sharedVimController {
+        let controllerID = ObjectIdentifier(shared)
+        if vimController !== shared
+          || attachedVimControllerID != controllerID
+          || attachedVimDocumentID != parent.documentID
+        {
+          if let controller = vimController, controller !== shared {
+            cancelVimComposition(in: textView, controller: controller)
+          }
+          vimController = shared
+          attachedVimControllerID = controllerID
+          attachedVimDocumentID = parent.documentID
+          vimAttachmentPhase = .restoringController
+          surfaceTransition = .restoringVimState
+          synchronizedVimTextRevision = nil
+          hasPendingNativeSelectionChange = false
+          pendingNativeSelectionSource = nil
+          pendingNativeSelectionRange = nil
+          lastRequestedVimNativeRanges = nil
+          lastAppliedVimNativeRanges = nil
         }
-        vimController = shared
-        synchronizedVimTextRevision = nil
-        vimConfigurationSignature = ""
-      }
-      if vimController == nil {
+      } else if vimController == nil {
         let engine = VimEngine(
           text: textView.string,
           cursor: textView.selectedRange().location,
@@ -1086,55 +1259,81 @@ struct CodeTextEditor: NSViewRepresentable {
         )
         let controller = VimKeymapController(engine: engine)
         controller.restoreHistory(parent.vimHistory)
-        controller.setMappings(mappings)
-        controller.inputPolicy = inputPolicy
-        controller.setLanguageMap(languageMap)
         vimController = controller
-        synchronizedVimTextRevision = parent.textRevision
-        if profile.startInInsertMode {
-          _ = try? engine.execute(.action(.enterInsert))
-        }
-      } else if signature != vimConfigurationSignature {
-        vimController?.engine.leader = profile.normalizedLeader
-        vimController?.engine.localLeader = profile.normalizedLeader
-        vimController?.engine.tabWidth = max(1, parent.profile.behavior.tabWidth)
-        vimController?.inputPolicy = inputPolicy
-        vimController?.setLanguageMap(languageMap)
-        vimController?.setMappings(mappings)
+        attachedVimControllerID = ObjectIdentifier(controller)
+        attachedVimDocumentID = parent.documentID
+        vimAttachmentPhase = .restoringController
+        surfaceTransition = .restoringVimState
+        synchronizedVimTextRevision = nil
       }
-      vimConfigurationSignature = signature
 
-      if let controller = vimController {
-        vimGeometryProvider.textView = textView
-        controller.engine.installVisualGeometryProvider(vimGeometryProvider)
+      guard let controller = vimController else { return }
+      _ = controller.applyConfiguration(
+        signature: signature,
+        leader: profile.normalizedLeader,
+        localLeader: profile.normalizedLeader,
+        tabWidth: parent.profile.behavior.tabWidth,
+        startInInsertMode: profile.startInInsertMode,
+        inputPolicy: inputPolicy,
+        languageMap: languageMap,
+        mappings: mappings
+      )
+
+      vimGeometryProvider.textView = textView
+      controller.engine.installVisualGeometryProvider(vimGeometryProvider)
+
+      if vimAttachmentPhase == .restoringController {
+        restoreAttachedVimController(controller, in: textView)
+      } else {
         synchronizeVimControllerIfNeeded(controller, with: textView)
-        let state = controller.engine.state
-        let selections = CalciteVimSelectionPresenter.ranges(
-          for: state,
-          selectionSet: controller.engine.selectionSet
-        )
-        let currentRanges = textView.selectedRanges.map(\.rangeValue)
-        if currentRanges != selections {
-          isApplyingExternalUpdate = true
-          textView.setSelectedRanges(
-            selections.map { NSValue(range: $0) },
-            affinity: .downstream,
-            stillSelecting: false
-          )
-          isApplyingExternalUpdate = false
-          (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
-        }
-        let mode = state.mode
-        updateVimCursorStyle(for: mode, in: textView)
-        publishVimMode(mode)
-        publishVimPrompt(controller.prompt)
-        publishVimInteraction(controller.interactionSnapshot)
-        publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
       }
+
+      let state = controller.engine.state
+      let selectionPresentation = CalciteVimSelectionPresenter.presentation(
+        for: state,
+        selectionSet: controller.engine.selectionSet
+      )
+      let currentRanges = textView.selectedRanges.map(\.rangeValue)
+      if !vimOwnsNativeSelection(currentRanges, presentation: selectionPresentation) {
+        applyVimSelectionPresentation(
+          selectionPresentation,
+          to: textView,
+          scrollToPrimary: false
+        )
+      }
+      updateVimCursorStyle(for: state.mode, in: textView)
+      publishVimMode(state.mode)
+      publishVimPrompt(controller.prompt)
+      publishVimInteraction(controller.interactionSnapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
+    }
+
+    private func restoreAttachedVimController(
+      _ controller: VimKeymapController,
+      in textView: NSTextView
+    ) {
+      guard vimAttachmentPhase == .restoringController else { return }
+
+      // The cached `(window, buffer)` controller is authoritative during
+      // attachment. Reconcile only document text; never feed the newly created
+      // NSTextView's inherited selection back into Vim.
+      if controller.engine.state.text != textView.string {
+        _ = controller.reconcileExternalText(textView.string, cursor: nil)
+      }
+
+      let presentation = CalciteVimSelectionPresenter.presentation(
+        for: controller.engine.state,
+        selectionSet: controller.engine.selectionSet
+      )
+      applyVimSelectionPresentation(presentation, to: textView, scrollToPrimary: false)
+      synchronizedVimTextRevision = parent.textRevision
+      vimAttachmentPhase = .active
+      surfaceTransition = .idle
+      publishSelection(presentation.primaryRange)
     }
 
     func handleKeyEvent(_ event: NSEvent, in textView: NSTextView) -> Bool {
-      guard parent.profile.vim.enabled else { return false }
+      guard parent.isActiveSurface, parent.profile.vim.enabled else { return false }
       let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       if flags.contains(.command) { return false }
       configureVim(for: textView)
@@ -1185,7 +1384,9 @@ struct CodeTextEditor: NSViewRepresentable {
       replacementRange: NSRange,
       in textView: NSTextView
     ) -> Bool {
-      guard parent.profile.vim.enabled, !isApplyingExternalUpdate else { return false }
+      guard parent.isActiveSurface, parent.profile.vim.enabled, !isApplyingExternalUpdate else {
+        return false
+      }
       configureVim(for: textView)
       guard let controller = vimController,
         let composingText = Self.inputString(from: value)
@@ -1254,7 +1455,9 @@ struct CodeTextEditor: NSViewRepresentable {
     }
 
     func handleUnmarkText(in textView: NSTextView) -> Bool {
-      guard parent.profile.vim.enabled, !isApplyingExternalUpdate else { return false }
+      guard parent.isActiveSurface, parent.profile.vim.enabled, !isApplyingExternalUpdate else {
+        return false
+      }
       configureVim(for: textView)
       guard let controller = vimController, controller.isComposingText else { return false }
 
@@ -1277,7 +1480,9 @@ struct CodeTextEditor: NSViewRepresentable {
       replacementRange: NSRange,
       in textView: NSTextView
     ) -> Bool {
-      guard parent.profile.vim.enabled, !isApplyingExternalUpdate else { return false }
+      guard parent.isActiveSurface, parent.profile.vim.enabled, !isApplyingExternalUpdate else {
+        return false
+      }
       configureVim(for: textView)
       guard let controller = vimController,
         let committedText = Self.inputString(from: value),
@@ -1538,9 +1743,10 @@ struct CodeTextEditor: NSViewRepresentable {
       // SwiftUI to update the representable and may briefly move focus away
       // from the editor. Restore it on the next run-loop turn, after those
       // updates have had a chance to finish.
-      Task { @MainActor [weak textView] in
+      Task { @MainActor [weak self, weak textView] in
         await Task.yield()
-        guard let textView, let window = textView.window,
+        guard let self, self.parent.isActiveSurface,
+          let textView, let window = textView.window,
           textView.superview != nil
         else { return }
         window.makeFirstResponder(textView)
@@ -1552,6 +1758,7 @@ struct CodeTextEditor: NSViewRepresentable {
       shouldChangeTextIn affectedCharRange: NSRange,
       replacementString: String?
     ) -> Bool {
+      guard parent.isActiveSurface else { return false }
       guard !isApplyingExternalUpdate else { return true }
       let replacement = replacementString ?? ""
       if handleTypingUtility(
@@ -1572,7 +1779,7 @@ struct CodeTextEditor: NSViewRepresentable {
     }
 
     func handleObservedTextChange(in textView: NSTextView) {
-      guard !isApplyingExternalUpdate else { return }
+      guard parent.isActiveSurface, !isApplyingExternalUpdate else { return }
       guard vimDocumentComposition == nil else {
         pendingEdit = nil
         return
@@ -1618,17 +1825,102 @@ struct CodeTextEditor: NSViewRepresentable {
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-      guard !isApplyingExternalUpdate,
+      guard parent.isActiveSurface,
+        !isApplyingExternalUpdate,
+        surfaceTransition == .idle,
         vimDocumentComposition == nil,
         let textView = notification.object as? NSTextView
       else { return }
+      if parent.profile.vim.enabled {
+        let currentRanges = textView.selectedRanges.map(\.rangeValue)
+        let isPointerSelection =
+          (textView as? CodeEditorTextView)?.isProcessingPointerSelection == true
+        if let requestedRanges = lastRequestedVimNativeRanges,
+          nativeSelectionIsNormalization(currentRanges, of: requestedRanges)
+        {
+          hasPendingNativeSelectionChange = false
+          pendingNativeSelectionSource = nil
+          pendingNativeSelectionRange = nil
+          lastAppliedVimNativeRanges = currentRanges
+        } else if currentRanges == lastAppliedVimNativeRanges {
+          hasPendingNativeSelectionChange = false
+          pendingNativeSelectionSource = nil
+          pendingNativeSelectionRange = nil
+        } else {
+          hasPendingNativeSelectionChange = true
+          pendingNativeSelectionSource = isPointerSelection ? .pointer : .keyboard
+          pendingNativeSelectionRange = textView.selectedRange()
+          lastRequestedVimNativeRanges = nil
+          lastAppliedVimNativeRanges = nil
+        }
+        // `NSTextView.mouseDown` may emit several intermediate selection
+        // notifications while hit-testing or dragging. The text view invokes
+        // `handleNativePointerSelection` after `super.mouseDown` completes.
+        if !isPointerSelection {
+          synchronizeVimCursorAfterSelectionChange(in: textView)
+        }
+      }
       if let codeTextView = textView as? CodeEditorTextView {
         codeTextView.refreshCustomInsertionPoint()
         codeTextView.window?.invalidateCursorRects(for: codeTextView)
       }
-      publishSelection(textView.selectedRange())
+      if (textView as? CodeEditorTextView)?.isProcessingPointerSelection != true {
+        publishSelection(textView.selectedRange())
+      }
       textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
       scheduleCaretPublication(for: textView)
+    }
+
+    func handleNativePointerSelection(_ range: NSRange, in textView: NSTextView) {
+      guard parent.isActiveSurface, surfaceTransition == .idle else { return }
+      guard parent.profile.vim.enabled else {
+        publishSelection(range)
+        return
+      }
+      hasPendingNativeSelectionChange = true
+      pendingNativeSelectionSource = .pointer
+      pendingNativeSelectionRange = range
+      lastRequestedVimNativeRanges = nil
+      lastAppliedVimNativeRanges = nil
+      synchronizeVimCursorAfterSelectionChange(in: textView, requestedRange: range)
+      scheduleCaretPublication(for: textView)
+    }
+
+    /// Mouse clicks change AppKit's selection before another key event reaches
+    /// Vim. Move the engine immediately; waiting for a SwiftUI update leaves
+    /// the next Vim command at the previous cursor.
+    private func synchronizeVimCursorAfterSelectionChange(
+      in textView: NSTextView,
+      requestedRange: NSRange? = nil
+    ) {
+      guard hasPendingNativeSelectionChange else { return }
+      if vimController == nil {
+        configureVim(for: textView)
+      }
+      guard let controller = vimController else { return }
+
+      if controller.engine.state.text != textView.string {
+        _ = controller.reconcileExternalText(textView.string, cursor: nil)
+      }
+
+      let source = pendingNativeSelectionSource ?? .accessibility
+      let targetRange = requestedRange ?? pendingNativeSelectionRange ?? textView.selectedRange()
+      controller.acceptHostCursorMove(
+        toUTF16Offset: targetRange.location,
+        source: source
+      )
+      let presentation = CalciteVimSelectionPresenter.presentation(
+        for: controller.engine.state,
+        selectionSet: controller.engine.selectionSet
+      )
+      applyVimSelectionPresentation(presentation, to: textView, scrollToPrimary: false)
+      synchronizedVimTextRevision = parent.textRevision
+      publishSelection(presentation.primaryRange)
+      updateVimCursorStyle(for: controller.engine.state.mode, in: textView)
+      publishVimMode(controller.engine.state.mode)
+      publishVimPrompt(controller.prompt)
+      publishVimInteraction(controller.interactionSnapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
     }
 
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -1759,17 +2051,32 @@ struct CodeTextEditor: NSViewRepresentable {
       }
     }
 
+    private func clearDeferredPublications() {
+      deferredSelection = nil
+      deferredVimMode = nil
+      deferredVimPrompt = nil
+      hasDeferredVimPrompt = false
+      deferredVimInteraction = nil
+      deferredVimInputSource = nil
+      hasDeferredVimInputSource = false
+    }
+
     private func scheduleDeferredPublicationsIfNeeded() {
-      guard !publicationFlushScheduled,
+      guard publicationFlushTask == nil,
         deferredSelection != nil || deferredVimMode != nil || hasDeferredVimPrompt
           || deferredVimInteraction != nil || hasDeferredVimInputSource
       else { return }
-      publicationFlushScheduled = true
-      Task { @MainActor [weak self] in
+
+      let generation = bindingGeneration
+      publicationFlushTask = Task { @MainActor [weak self] in
         await Task.yield()
         guard let self, !Task.isCancelled else { return }
-        self.publicationFlushScheduled = false
+        guard generation == self.bindingGeneration else {
+          self.publicationFlushTask = nil
+          return
+        }
         guard self.representableUpdateDepth == 0 else {
+          self.publicationFlushTask = nil
           self.scheduleDeferredPublicationsIfNeeded()
           return
         }
@@ -1781,13 +2088,8 @@ struct CodeTextEditor: NSViewRepresentable {
         let interaction = self.deferredVimInteraction
         let inputSource = self.deferredVimInputSource
         let publishesInputSource = self.hasDeferredVimInputSource
-        self.deferredSelection = nil
-        self.deferredVimMode = nil
-        self.deferredVimPrompt = nil
-        self.hasDeferredVimPrompt = false
-        self.deferredVimInteraction = nil
-        self.deferredVimInputSource = nil
-        self.hasDeferredVimInputSource = false
+        self.clearDeferredPublications()
+        self.publicationFlushTask = nil
 
         if let selection { self.parent.onSelectionChange(selection) }
         if let mode { self.parent.onVimModeChange(mode) }
@@ -1805,42 +2107,139 @@ struct CodeTextEditor: NSViewRepresentable {
       controller.engine.updateViewport(visibleUTF16Range: range)
     }
 
+    private func applyVimSelectionPresentation(
+      _ presentation: CalciteVimSelectionPresenter.Presentation,
+      to textView: NSTextView,
+      scrollToPrimary: Bool
+    ) {
+      let requestedRanges = presentation.nativeRanges
+      isApplyingExternalUpdate = true
+      textView.setSelectedRanges(
+        requestedRanges.map { NSValue(range: $0) },
+        affinity: .downstream,
+        stillSelecting: false
+      )
+      if scrollToPrimary {
+        textView.scrollRangeToVisible(presentation.primaryRange)
+      }
+      isApplyingExternalUpdate = false
+      hasPendingNativeSelectionChange = false
+      pendingNativeSelectionSource = nil
+      pendingNativeSelectionRange = nil
+      lastRequestedVimNativeRanges = requestedRanges
+      lastAppliedVimNativeRanges = textView.selectedRanges.map(\.rangeValue)
+      (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+    }
+
+    private func vimOwnsNativeSelection(
+      _ currentRanges: [NSRange],
+      presentation: CalciteVimSelectionPresenter.Presentation
+    ) -> Bool {
+      let requestedRanges = presentation.nativeRanges
+      if nativeSelectionIsNormalization(currentRanges, of: requestedRanges) {
+        return true
+      }
+      return lastRequestedVimNativeRanges == requestedRanges
+        && lastAppliedVimNativeRanges == currentRanges
+    }
+
+    private func nativeSelectionIsNormalization(
+      _ currentRanges: [NSRange],
+      of requestedRanges: [NSRange]
+    ) -> Bool {
+      if currentRanges == requestedRanges { return true }
+
+      let ordered: (NSRange, NSRange) -> Bool = { lhs, rhs in
+        lhs.location == rhs.location
+          ? lhs.length < rhs.length
+          : lhs.location < rhs.location
+      }
+      let currentNonEmpty = currentRanges.filter { $0.length > 0 }.sorted(by: ordered)
+      let requestedNonEmpty = requestedRanges.filter { $0.length > 0 }.sorted(by: ordered)
+      guard currentNonEmpty == requestedNonEmpty else { return false }
+
+      // NSTextView can omit zero-length selections on short/empty rows of a Visual Block.
+      // It must not invent a caret outside one of Vim's requested virtual row positions.
+      let requestedEmptyLocations = Set(
+        requestedRanges.lazy.filter { $0.length == 0 }.map(\.location)
+      )
+      return currentRanges.lazy
+        .filter { $0.length == 0 }
+        .allSatisfy { requestedEmptyLocations.contains($0.location) }
+    }
+
     private func synchronizeVimControllerIfNeeded(
       _ controller: VimKeymapController,
       with textView: NSTextView
     ) {
       guard vimDocumentComposition == nil else { return }
       let currentRanges = textView.selectedRanges.map(\.rangeValue)
-      let expectedRanges = CalciteVimSelectionPresenter.ranges(
+      let expectedPresentation = CalciteVimSelectionPresenter.presentation(
         for: controller.engine.state,
         selectionSet: controller.engine.selectionSet
       )
+      let selectionChanged =
+        !vimOwnsNativeSelection(currentRanges, presentation: expectedPresentation)
       let textChanged =
         synchronizedVimTextRevision != parent.textRevision
         || controller.engine.state.text != textView.string
-      guard textChanged || currentRanges != expectedRanges else { return }
-      let cursor = currentRanges.first?.location ?? textView.selectedRange().location
+      guard textChanged || selectionChanged else {
+        hasPendingNativeSelectionChange = false
+        pendingNativeSelectionSource = nil
+        pendingNativeSelectionRange = nil
+        return
+      }
+
+      let requestedSelection = pendingNativeSelectionRange ?? textView.selectedRange()
+      let cursor = requestedSelection.location
       if controller.engine.state.text != textView.string {
-        let requestedCursor = currentRanges != expectedRanges ? cursor : nil
+        let requestedCursor = hasPendingNativeSelectionChange ? cursor : nil
         _ = controller.reconcileExternalText(textView.string, cursor: requestedCursor)
-        let reconciledRanges = CalciteVimSelectionPresenter.ranges(
+        let reconciledPresentation = CalciteVimSelectionPresenter.presentation(
           for: controller.engine.state,
           selectionSet: controller.engine.selectionSet
         )
-        if textView.selectedRanges.map(\.rangeValue) != reconciledRanges {
-          textView.setSelectedRanges(
-            reconciledRanges.map { NSValue(range: $0) },
-            affinity: .downstream,
-            stillSelecting: false
+        if !vimOwnsNativeSelection(
+          textView.selectedRanges.map(\.rangeValue),
+          presentation: reconciledPresentation
+        ) {
+          applyVimSelectionPresentation(
+            reconciledPresentation,
+            to: textView,
+            scrollToPrimary: false
           )
-          lastPublishedSelection = CalciteVimSelectionPresenter.primaryRange(
-            from: reconciledRanges,
-            state: controller.engine.state,
-            selectionSet: controller.engine.selectionSet
-          )
+        } else {
+          hasPendingNativeSelectionChange = false
+          pendingNativeSelectionSource = nil
+          pendingNativeSelectionRange = nil
         }
+        lastPublishedSelection = reconciledPresentation.primaryRange
+      } else if hasPendingNativeSelectionChange {
+        // A real AppKit selection event (mouse, accessibility, or an explicit host request)
+        // moves Vim's cursor and intentionally leaves Visual mode. Merely observing a range
+        // normalization produced by `setSelectedRanges` does not.
+        controller.acceptHostCursorMove(
+          toUTF16Offset: cursor,
+          source: pendingNativeSelectionSource ?? .accessibility
+        )
+        let reconciledPresentation = CalciteVimSelectionPresenter.presentation(
+          for: controller.engine.state,
+          selectionSet: controller.engine.selectionSet
+        )
+        applyVimSelectionPresentation(
+          reconciledPresentation,
+          to: textView,
+          scrollToPrimary: false
+        )
+        lastPublishedSelection = reconciledPresentation.primaryRange
       } else {
-        controller.synchronize(text: textView.string, cursor: cursor)
+        // NSTextView may normalize, reorder, or omit zero-length ranges in a block. Vim remains
+        // authoritative unless the delegate observed a genuine native selection mutation.
+        applyVimSelectionPresentation(
+          expectedPresentation,
+          to: textView,
+          scrollToPrimary: false
+        )
       }
       synchronizedVimTextRevision = parent.textRevision
     }
@@ -1852,16 +2251,11 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       let state = execution.state
       updateVimCursorStyle(for: state.mode, in: textView)
-      let selections = CalciteVimSelectionPresenter.ranges(
+      let selectionPresentation = CalciteVimSelectionPresenter.presentation(
         for: state,
         selectionSet: controller.engine.selectionSet
       )
-      let primarySelection = CalciteVimSelectionPresenter.primaryRange(
-        from: selections,
-        state: state,
-        selectionSet: controller.engine.selectionSet
-      )
-      let selectionValues = selections.map { NSValue(range: $0) }
+      let primarySelection = selectionPresentation.primaryRange
       if state.text != textView.string {
         let sourceText = textView.string
         var transaction = resolvedTransaction(for: execution, sourceText: sourceText)
@@ -1923,11 +2317,13 @@ struct CodeTextEditor: NSViewRepresentable {
           )
         }
         textView.textStorage?.endEditing()
-        textView.setSelectedRanges(selectionValues, affinity: .downstream, stillSelecting: false)
-        textView.scrollRangeToVisible(primarySelection)
         synchronizedText = state.text
         isApplyingExternalUpdate = false
-        (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+        applyVimSelectionPresentation(
+          selectionPresentation,
+          to: textView,
+          scrollToPrimary: true
+        )
         synchronizedVimTextRevision = publishVimTransaction(
           transaction,
           selection: primarySelection
@@ -1936,15 +2332,19 @@ struct CodeTextEditor: NSViewRepresentable {
         scheduleCaretPublication(for: textView)
       } else {
         let currentRanges = textView.selectedRanges.map(\.rangeValue)
-        if currentRanges != selections {
-          isApplyingExternalUpdate = true
-          textView.setSelectedRanges(selectionValues, affinity: .downstream, stillSelecting: false)
-          textView.scrollRangeToVisible(primarySelection)
-          isApplyingExternalUpdate = false
-          (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+        if !vimOwnsNativeSelection(currentRanges, presentation: selectionPresentation) {
+          applyVimSelectionPresentation(
+            selectionPresentation,
+            to: textView,
+            scrollToPrimary: true
+          )
           publishSelection(primarySelection)
           reloadEditorGeometry(for: textView)
           scheduleCaretPublication(for: textView)
+        } else {
+          hasPendingNativeSelectionChange = false
+          pendingNativeSelectionSource = nil
+          pendingNativeSelectionRange = nil
         }
       }
       publishVimMode(state.mode)

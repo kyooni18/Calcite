@@ -69,6 +69,9 @@ final class CodeEditorTextView: NSTextView {
   var showQuickHelpHandler: (() -> Void)?
   var showFindHandler: ((Bool) -> Void)?
   var contentDidChangeHandler: ((NSTextView) -> Void)?
+  var nativePointerSelectionHandler: ((NSRange, NSTextView) -> Void)?
+  private(set) var isProcessingPointerSelection = false
+  private var pointerSelectionRange: NSRange?
   var errorLineRanges: [NSRange] = [] {
     didSet { needsDisplay = true }
   }
@@ -178,7 +181,7 @@ final class CodeEditorTextView: NSTextView {
 
   func refreshCustomInsertionPoint() {
     guard window?.firstResponder === self,
-      (selectedRange().length == 0 || vimCursorLocation != nil),
+      selectedRange().length == 0 || vimCursorLocation != nil,
       let cursorRect = customInsertionPointRect()
     else {
       customCursorView.hide()
@@ -809,14 +812,65 @@ final class CodeEditorTextView: NSTextView {
       showQuickHelpHandler?()
       return
     }
+    let selectionBeforeMouseDown = selectedRange()
+    pointerSelectionRange = pointerInsertionRange(for: event)
+    isProcessingPointerSelection = true
     super.mouseDown(with: event)
-    // NSTextView updates its selection during super.
+    isProcessingPointerSelection = false
+    // NSTextView completes click/drag hit-testing during `super`. Notify the
+    // Vim bridge only after the final native selection is available. TextKit
+    // can synchronously reapply Vim's previous presentation while processing
+    // the delegate callback, so retain the hit-tested insertion offset instead
+    // of relying solely on `selectedRange()` after `super` returns.
     refreshCustomInsertionPoint()
+    let finalSelection = selectedRange()
+    let pointerSelection = Self.resolvedPointerSelection(
+      hitTested: pointerSelectionRange,
+      selectionBeforeMouseDown: selectionBeforeMouseDown,
+      selectionAfterMouseDown: finalSelection,
+      isPlainSingleClick: event.clickCount == 1
+        && !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift)
+    )
+    pointerSelectionRange = nil
+    nativePointerSelectionHandler?(pointerSelection, self)
   }
 
   override func mouseDragged(with event: NSEvent) {
     super.mouseDragged(with: event)
     refreshCustomInsertionPoint()
+  }
+
+  /// Returns a UTF-16 insertion range for the physical click independent of
+  /// the current native selection. `NSTextView.characterIndexForInsertion(at:)`
+  /// already handles wrapped rows, tabs, empty lines, and clicks beyond EOL.
+  private func pointerInsertionRange(for event: NSEvent) -> NSRange {
+    let point = convert(event.locationInWindow, from: nil)
+    let length = (string as NSString).length
+    let location = min(max(characterIndexForInsertion(at: point), 0), length)
+    return NSRange(location: location, length: 0)
+  }
+
+  static func resolvedPointerSelection(
+    hitTested: NSRange?,
+    selectionBeforeMouseDown: NSRange,
+    selectionAfterMouseDown: NSRange,
+    isPlainSingleClick: Bool
+  ) -> NSRange {
+    // For drag, Shift-click, and multi-click selection, AppKit's resulting
+    // range carries intentional selection semantics and must be preserved.
+    guard isPlainSingleClick, let hitTested else { return selectionAfterMouseDown }
+
+    // Prefer the physical hit target for a plain click. In particular, if a
+    // delegate echo restored the old Vim selection during `super.mouseDown`,
+    // `selectionAfterMouseDown` equals the pre-click range even though the user
+    // clicked elsewhere.
+    if selectionAfterMouseDown == selectionBeforeMouseDown
+      || selectionAfterMouseDown.length != 0
+      || selectionAfterMouseDown.location != hitTested.location
+    {
+      return hitTested
+    }
+    return selectionAfterMouseDown
   }
 
   override func pressureChange(with event: NSEvent) {

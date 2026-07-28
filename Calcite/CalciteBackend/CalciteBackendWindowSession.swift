@@ -75,6 +75,14 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     @Published private(set) var verticalScrollOffset: Double
     @Published private(set) var zoomScale: Double
 
+    private struct DocumentPresentationState {
+      var selectedRange: NSRange
+      var horizontalScrollOffset: Double
+      var verticalScrollOffset: Double
+      var zoomScale: Double
+    }
+
+    private var documentPresentationStates: [UUID: DocumentPresentationState] = [:]
     private weak var windowSession: CalciteBackendWindowSession?
 
     var document: EditorTab? {
@@ -101,27 +109,72 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       self.verticalScrollOffset = max(0, verticalScrollOffset)
       self.zoomScale = Self.clampedZoom(zoomScale)
       self.windowSession = windowSession
+      persistCurrentPresentation()
     }
 
     fileprivate func switchDocument(to document: EditorTab) {
       guard documentID != document.id else { return }
+      persistCurrentPresentation()
       documentID = document.id
-      selectedRange = Self.clamped(
-        document.selectedRange,
-        utf16Length: document.text.utf16.count
-      )
-      horizontalScrollOffset = 0
-      verticalScrollOffset = 0
+
+      if let stored = documentPresentationStates[document.id] {
+        selectedRange = Self.clamped(
+          stored.selectedRange,
+          utf16Length: document.text.utf16.count
+        )
+        horizontalScrollOffset = max(0, stored.horizontalScrollOffset)
+        verticalScrollOffset = max(0, stored.verticalScrollOffset)
+        zoomScale = Self.clampedZoom(stored.zoomScale)
+      } else {
+        selectedRange = Self.clamped(
+          document.selectedRange,
+          utf16Length: document.text.utf16.count
+        )
+        horizontalScrollOffset = 0
+        verticalScrollOffset = 0
+        zoomScale = 1
+      }
+      persistCurrentPresentation()
+    }
+
+    func selection(for document: EditorTab) -> NSRange {
+      if documentID == document.id {
+        return Self.clamped(selectedRange, utf16Length: document.text.utf16.count)
+      }
+      if let stored = documentPresentationStates[document.id] {
+        return Self.clamped(stored.selectedRange, utf16Length: document.text.utf16.count)
+      }
+      return Self.clamped(document.selectedRange, utf16Length: document.text.utf16.count)
     }
 
     func updateSelection(_ range: NSRange) {
       guard let document else { return }
+      updateSelection(range, for: document)
+    }
+
+    func updateSelection(_ range: NSRange, for document: EditorTab) {
       let clamped = Self.clamped(range, utf16Length: document.text.utf16.count)
-      guard selectedRange != clamped else { return }
-      selectedRange = clamped
-      if isActive {
-        document.updateSelection(clamped)
+      if documentID == document.id {
+        if selectedRange != clamped {
+          selectedRange = clamped
+        }
+        persistCurrentPresentation()
+        if isActive, document.selectedRange != clamped {
+          document.updateSelection(clamped)
+        }
+        return
       }
+
+      var state =
+        documentPresentationStates[document.id]
+        ?? DocumentPresentationState(
+          selectedRange: clamped,
+          horizontalScrollOffset: 0,
+          verticalScrollOffset: 0,
+          zoomScale: 1
+        )
+      state.selectedRange = clamped
+      documentPresentationStates[document.id] = state
     }
 
     func updateScroll(horizontal: Double? = nil, vertical: Double? = nil) {
@@ -131,11 +184,13 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       if let vertical, vertical.isFinite {
         verticalScrollOffset = max(0, vertical)
       }
+      persistCurrentPresentation()
     }
 
     func updateZoom(_ scale: Double) {
       guard scale.isFinite else { return }
       zoomScale = Self.clampedZoom(scale)
+      persistCurrentPresentation()
     }
 
     func zoomIn() {
@@ -156,6 +211,16 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         document.selectedRange,
         utf16Length: document.text.utf16.count
       )
+      persistCurrentPresentation()
+    }
+
+    /// Updates this editor instance's window-local selection without writing it
+    /// through to the shared document. This is used during a document handoff,
+    /// before the target editor becomes authoritative for the document again.
+    fileprivate func restoreSelection(_ range: NSRange) {
+      guard let document else { return }
+      selectedRange = Self.clamped(range, utf16Length: document.text.utf16.count)
+      persistCurrentPresentation()
     }
 
     fileprivate func applySelectionToDocument() {
@@ -167,6 +232,16 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       if document.selectedRange != clamped {
         document.updateSelection(clamped)
       }
+      persistCurrentPresentation()
+    }
+
+    private func persistCurrentPresentation() {
+      documentPresentationStates[documentID] = DocumentPresentationState(
+        selectedRange: selectedRange,
+        horizontalScrollOffset: horizontalScrollOffset,
+        verticalScrollOffset: verticalScrollOffset,
+        zoomScale: zoomScale
+      )
     }
 
     private static func clamped(_ range: NSRange, utf16Length: Int) -> NSRange {
@@ -459,11 +534,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       editor = createEditorSession(for: document, activate: false)
     } else {
       editor = activeEditorSession!
-      editor.switchDocument(to: document)
-      _ = vimSessionCoordinator.switchBuffer(
-        in: VimWindowID(editor.id),
-        to: VimBufferID(document.id)
-      )
+      switchDocument(in: editor, to: document)
     }
     activateEditorSession(editor.id)
     return editor
@@ -497,11 +568,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard let backend, let document = backend.document(id: documentID),
       let editor = editorSessions.first(where: { $0.id == editorSessionID })
     else { return false }
-    _ = vimSessionCoordinator.switchBuffer(
-      in: VimWindowID(editorSessionID),
-      to: VimBufferID(documentID)
-    )
-    editor.switchDocument(to: document)
+    switchDocument(in: editor, to: document)
     if activeEditorSessionID == editorSessionID { activateEditorSession(editorSessionID) }
     return true
   }
@@ -563,11 +630,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard let backend, let document = backend.document(id: documentID) else { return nil }
 
     if let assigned = editorSessionAssigned(toSection: sectionID) {
-      assigned.switchDocument(to: document)
-      _ = vimSessionCoordinator.switchBuffer(
-        in: VimWindowID(assigned.id),
-        to: VimBufferID(document.id)
-      )
+      switchDocument(in: assigned, to: document)
       activateEditorSession(assigned.id)
       return assigned.id
     }
@@ -601,12 +664,19 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       let backend
     else { return }
 
-    activeEditorSession?.captureSelectionFromDocument()
+    // A same-editor tab switch has already persisted the outgoing document.
+    // Reading from `activeEditorSession.document` here would read the *new*
+    // document and overwrite the state restored by `switchDocument(in:to:)`.
+    if let outgoing = activeEditorSession, outgoing.id != editor.id {
+      captureAuthoritativeSelection(for: outgoing)
+    }
+
     isSynchronizingSelection = true
     if let activeEditorSessionID, activeEditorSessionID != editor.id {
       previousActiveEditorSessionID = activeEditorSessionID
     }
     activeEditorSessionID = editor.id
+    restoreSelectionFromVimIfAvailable(for: editor)
     if backend.controller.selectedTabID != editor.documentID {
       backend.controller.selectedTabID = editor.documentID
     }
@@ -615,12 +685,99 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     isSynchronizingSelection = false
   }
 
+  /// Performs a document handoff without allowing shared `EditorTab.selectedRange`
+  /// to overwrite the window-local Vim state. Both the outgoing and incoming
+  /// selections are refreshed directly from their cached `(window, buffer)`
+  /// controllers when Calcite Vim is active.
+  private func switchDocument(in editor: EditorSession, to document: EditorTab) {
+    guard editor.documentID != document.id else {
+      restoreSelectionFromVimIfAvailable(for: editor)
+      return
+    }
+
+    captureAuthoritativeSelection(for: editor)
+    editor.switchDocument(to: document)
+    _ = vimSessionCoordinator.switchBuffer(
+      in: VimWindowID(editor.id),
+      to: VimBufferID(document.id)
+    )
+    restoreSelectionFromVimIfAvailable(for: editor)
+  }
+
+  private func captureAuthoritativeSelection(for editor: EditorSession) {
+    if let controller = existingVimController(for: editor) {
+      reconcileCollapsedHostSelection(editor.selectedRange, with: controller)
+      restoreSelection(controller, to: editor)
+    } else {
+      editor.captureSelectionFromDocument()
+    }
+  }
+
+  /// The AppKit selection is normally written into Vim immediately. Reconcile it
+  /// once more at the tab boundary so a delayed or coalesced native selection
+  /// notification cannot leave the cached controller at the previous cursor.
+  private func reconcileCollapsedHostSelection(
+    _ selection: NSRange,
+    with controller: VimKeymapController
+  ) {
+    guard selection.length == 0 else { return }
+    switch controller.engine.state.mode {
+    case .normal, .insert, .replace:
+      break
+    case .visualCharacter, .visualLine, .commandLine, .search:
+      return
+    }
+
+    let presentation = CalciteVimSelectionPresenter.presentation(
+      for: controller.engine.state,
+      selectionSet: controller.engine.selectionSet
+    )
+    guard presentation.primaryRange.location != selection.location else { return }
+    controller.acceptHostCursorMove(
+      toUTF16Offset: selection.location,
+      source: .parentRequest
+    )
+  }
+
+  @discardableResult
+  private func restoreSelectionFromVimIfAvailable(for editor: EditorSession) -> Bool {
+    guard let controller = existingVimController(for: editor) else { return false }
+    restoreSelection(controller, to: editor)
+    return true
+  }
+
+  private func existingVimController(for editor: EditorSession) -> VimKeymapController? {
+    guard selectedEditorInterface.usesCalciteVim else { return nil }
+    return vimSessionCoordinator.existingController(
+      for: VimWindowID(editor.id),
+      displaying: VimBufferID(editor.documentID)
+    )
+  }
+
+  private func restoreSelection(
+    _ controller: VimKeymapController,
+    to editor: EditorSession
+  ) {
+    let presentation = CalciteVimSelectionPresenter.presentation(
+      for: controller.engine.state,
+      selectionSet: controller.engine.selectionSet
+    )
+    editor.restoreSelection(presentation.primaryRange)
+  }
+
+  private var selectedEditorInterface: EditorInterface {
+    EditorInterface(
+      rawValue: defaults.string(forKey: EditorInterfacePreferences.interfaceKey)
+        ?? EditorInterface.builtIn.rawValue
+    ) ?? .builtIn
+  }
+
   /// Closes only one editor instance. The underlying document remains open until explicitly
   /// closed through `requestCloseDocument` / `resolvePendingDocumentClose`.
   func closeEditorSession(_ id: UUID) {
     guard let index = editorSessions.firstIndex(where: { $0.id == id }) else { return }
     let wasActive = activeEditorSessionID == id
-    editorSessions[index].captureSelectionFromDocument()
+    captureAuthoritativeSelection(for: editorSessions[index])
     vimSessionCoordinator.removeWindow(VimWindowID(id))
     editorSessions.remove(at: index)
     if previousActiveEditorSessionID == id { previousActiveEditorSessionID = nil }
@@ -665,7 +822,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         activateEditorSession(replacement.id)
       } else {
         activeEditorSessionID = replacement.id
-        replacement.captureSelectionFromDocument()
+        restoreSelectionFromVimIfAvailable(for: replacement)
       }
     }
   }
@@ -674,6 +831,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard !isSynchronizingSelection, !isClosed, let backend, let activeEditorSession else {
       return
     }
+    restoreSelectionFromVimIfAvailable(for: activeEditorSession)
     activeEditorSession.applySelectionToDocument()
     if backend.controller.selectedTabID != activeEditorSession.documentID {
       backend.controller.selectedTabID = activeEditorSession.documentID
@@ -686,12 +844,8 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     else { return }
     if let editor = activeEditorSession {
       isSynchronizingSelection = true
-      editor.switchDocument(to: document)
-      _ = vimSessionCoordinator.switchBuffer(
-        in: VimWindowID(editor.id),
-        to: VimBufferID(document.id)
-      )
-      editor.captureSelectionFromDocument()
+      switchDocument(in: editor, to: document)
+      editor.applySelectionToDocument()
       isSynchronizingSelection = false
     } else {
       _ = createEditorSession(for: document)
@@ -776,12 +930,12 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       // Do this in the window that received the Vim event. Routing through the
       // shared workspace controller can target another active window/section.
       activateEditorSession(origin.id)
-      navigateTab(forward: true)
+      navigateTab(forward: true, originatingEditorSessionID: origin.id)
       return .accepted
     case .previousTab:
       guard let origin else { return .rejected(.staleContext) }
       activateEditorSession(origin.id)
-      navigateTab(forward: false)
+      navigateTab(forward: false, originatingEditorSessionID: origin.id)
       return .accepted
     case .custom(let command) where command.hasPrefix("vim-"):
       return handleVimCustomTopologyCommand(command, origin: origin)
@@ -1394,8 +1548,16 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     }
   #endif
 
-  func navigateTab(forward: Bool) {
-    guard let backend, let context = tabNavigationContext() else { return }
+  func navigateTab(
+    forward: Bool,
+    originatingEditorSessionID: UUID? = nil
+  ) {
+    guard
+      let backend,
+      let context = tabNavigationContext(
+        originatingEditorSessionID: originatingEditorSessionID
+      )
+    else { return }
     let (sectionID, section, primaryEditorTabID, items) = context
 
     let currentItem: SectionTabNavigationItem?
@@ -1420,27 +1582,50 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
   /// Selects a visible tab by its one-based position, matching Command-Number
   /// and Vim leader-number conventions.
-  func selectTab(number: Int) {
-    guard let context = tabNavigationContext(), context.items.indices.contains(number - 1) else {
-      return
-    }
+  func selectTab(
+    number: Int,
+    originatingEditorSessionID: UUID? = nil
+  ) {
+    guard
+      let context = tabNavigationContext(
+        originatingEditorSessionID: originatingEditorSessionID
+      ),
+      context.items.indices.contains(number - 1)
+    else { return }
     selectTabNavigationItem(context.items[number - 1], in: context.sectionID)
   }
 
-  private func tabNavigationContext() -> (
+  private func tabNavigationContext(
+    originatingEditorSessionID: UUID? = nil
+  ) -> (
     sectionID: UUID,
     section: MainSectionLayoutNode,
     primaryEditorTabID: UUID?,
     items: [SectionTabNavigationItem]
   )? {
     guard let backend else { return nil }
-    let sectionID = sectionalLayout.activeSectionID ?? sectionalLayout.root.visibleSectionIDs.first
+    let originEditorTabID = originatingEditorSessionID.flatMap { editorSessionID in
+      sectionalEditorAssignments.first { $0.value == editorSessionID }?.key
+    }
+    let originSectionID = originEditorTabID.flatMap { editorTabID in
+      sectionalLayout.root.sectionID(containingTab: editorTabID)
+    }
+    let sectionID =
+      originSectionID
+      ?? sectionalLayout.activeSectionID
+      ?? sectionalLayout.root.visibleSectionIDs.first
     guard let sectionID, let section = sectionalLayout.root.sectionNode(id: sectionID) else {
       return nil
     }
-    let primaryEditorTabID = section.visibleTabs.first {
-      $0.kind == .editor || $0.kind == .workspace
-    }?.id
+    let primaryEditorTabID =
+      originEditorTabID.flatMap { editorTabID in
+        section.visibleTabs.first {
+          $0.id == editorTabID && ($0.kind == .editor || $0.kind == .workspace)
+        }?.id
+      }
+      ?? section.visibleTabs.first {
+        $0.kind == .editor || $0.kind == .workspace
+      }?.id
     let items = section.visibleTabs.flatMap { tab -> [SectionTabNavigationItem] in
       if tab.id == primaryEditorTabID,
         tab.kind == .editor || tab.kind == .workspace,
@@ -1647,11 +1832,7 @@ extension CalciteBackendWindowSession: EditorCommandExecutorDelegate {
   func commandSelectDocument(_ id: UUID) {
     guard let backend, let document = backend.document(id: id) else { return }
     if let editor = activeEditorSession {
-      editor.switchDocument(to: document)
-      _ = vimSessionCoordinator.switchBuffer(
-        in: VimWindowID(editor.id),
-        to: VimBufferID(document.id)
-      )
+      switchDocument(in: editor, to: document)
       activateEditorSession(editor.id)
     } else {
       _ = createEditorSession(for: document)
@@ -1685,8 +1866,28 @@ extension CalciteBackendWindowSession: EditorCommandExecutorDelegate {
     navigateTab(forward: forward)
   }
 
+  func commandNavigateTab(
+    forward: Bool,
+    originatingEditorSessionID: UUID
+  ) {
+    navigateTab(
+      forward: forward,
+      originatingEditorSessionID: originatingEditorSessionID
+    )
+  }
+
   func commandSelectTab(number: Int) {
     selectTab(number: number)
+  }
+
+  func commandSelectTab(
+    number: Int,
+    originatingEditorSessionID: UUID
+  ) {
+    selectTab(
+      number: number,
+      originatingEditorSessionID: originatingEditorSessionID
+    )
   }
 
   func commandNavigateSection(forward: Bool) {

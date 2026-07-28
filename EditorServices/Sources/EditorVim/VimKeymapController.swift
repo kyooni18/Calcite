@@ -40,6 +40,7 @@ public final class VimKeymapController: @unchecked Sendable {
   private var storedInputPolicy: VimCommandKeyboardPolicy = .automatic
   private var storedLanguageMap: [Character: Character] = [:]
   private var storedMessage: VimMessage?
+  private var storedConfigurationSignature: String?
 
   public private(set) var pendingNotation: String {
     get { lock.withLock { storedPendingNotation } }
@@ -156,6 +157,54 @@ public final class VimKeymapController: @unchecked Sendable {
       resetPendingInputUnlocked()
       cancelPromptUnlocked()
       engine.synchronize(text: text, cursor: cursor)
+    }
+  }
+
+  /// Applies host configuration once per semantic signature. A recreated
+  /// SwiftUI/AppKit bridge can safely call this with the same signature without
+  /// clearing pending mappings, operators, counts, registers, or prompts.
+  @_spi(Calcite)
+  @discardableResult
+  public func applyConfiguration(
+    signature: String,
+    leader: String,
+    localLeader: String,
+    tabWidth: Int,
+    startInInsertMode: Bool,
+    inputPolicy: VimCommandKeyboardPolicy,
+    languageMap: [Character: Character],
+    mappings: [VimKeyMappingV2]
+  ) -> Bool {
+    lock.withLock {
+      guard storedConfigurationSignature != signature else { return false }
+      let isInitialConfiguration = storedConfigurationSignature == nil
+      engine.leader = leader
+      engine.localLeader = localLeader
+      engine.tabWidth = max(1, tabWidth)
+      storedInputPolicy = inputPolicy
+      storedLanguageMap = languageMap
+      setMappings(mappings)
+      if isInitialConfiguration, startInInsertMode, engine.state.mode == .normal {
+        _ = try? engine.execute(.action(.enterInsert))
+      }
+      storedConfigurationSignature = signature
+      return true
+    }
+  }
+
+  /// Accepts a native cursor movement without treating it as a document
+  /// replacement. This deliberately cancels parser/prompt state while keeping
+  /// Insert and Replace modes intact inside the engine.
+  @_spi(Calcite)
+  @discardableResult
+  public func acceptHostCursorMove(
+    toUTF16Offset offset: Int,
+    source: VimHostCursorMoveSource
+  ) -> VimState {
+    lock.withLock {
+      resetPendingInputUnlocked()
+      cancelPromptUnlocked()
+      return engine.acceptHostCursorMove(toUTF16Offset: offset, source: source)
     }
   }
 
