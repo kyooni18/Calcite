@@ -101,6 +101,16 @@ final class CodeEditorTextView: NSTextView {
       window?.invalidateCursorRects(for: self)
     }
   }
+  /// Visual mode owns a selected range, but Vim still needs a cursor at its
+  /// active endpoint. `NSTextView` only exposes the range, so the native Vim
+  /// coordinator supplies that endpoint separately while Visual mode is active.
+  var vimCursorLocation: Int? {
+    didSet {
+      guard oldValue != vimCursorLocation else { return }
+      refreshCustomInsertionPoint()
+      window?.invalidateCursorRects(for: self)
+    }
+  }
   var editorCursorColor = NSColor.labelColor {
     didSet {
       guard !oldValue.isEqual(editorCursorColor) else { return }
@@ -167,7 +177,8 @@ final class CodeEditorTextView: NSTextView {
   }
 
   func refreshCustomInsertionPoint() {
-    guard window?.firstResponder === self, selectedRange().length == 0,
+    guard window?.firstResponder === self,
+      (selectedRange().length == 0 || vimCursorLocation != nil),
       let cursorRect = customInsertionPointRect()
     else {
       customCursorView.hide()
@@ -186,7 +197,8 @@ final class CodeEditorTextView: NSTextView {
     guard let layoutManager, let textContainer else { return nil }
 
     let sourceLength = (string as NSString).length
-    let location = min(max(selectedRange().location, 0), sourceLength)
+    let cursorLocation = vimCursorLocation ?? selectedRange().location
+    let location = min(max(cursorLocation, 0), sourceLength)
     let layoutLocation = min(location, max(0, sourceLength - 1))
     layoutManager.ensureLayout(
       forCharacterRange: NSRange(

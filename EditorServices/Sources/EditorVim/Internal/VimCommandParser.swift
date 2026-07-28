@@ -520,6 +520,17 @@ struct VimCommandParser: Sendable {
     prefix: VimCommandPrefix,
     mode: VimMode
   ) throws -> VimParserStep {
+    // Tabs are a host concern, but `gt`/`gT` are native Vim Normal-mode
+    // commands. Emit host requests here instead of treating them as unknown
+    // direct notation, so they also work with Calcite's shared Vim controller.
+    switch token {
+    case "t":
+      return complete(.action(.host(.nextTab), count: 1, register: prefix.register))
+    case "T":
+      return complete(.action(.host(.previousTab), count: 1, register: prefix.register))
+    default:
+      break
+    }
     if let op = Self.gOperator(for: token) {
       if mode == .visualCharacter || mode == .visualLine {
         return complete(.visualOperation(op, register: prefix.register))

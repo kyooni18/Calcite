@@ -162,6 +162,14 @@ final class VimStage12StateOwnershipTests: XCTestCase {
       [.nextTab]
     )
     XCTAssertEqual(
+      try engine.executeNotation("gt").hostRequests,
+      [.nextTab]
+    )
+    XCTAssertEqual(
+      try engine.executeNotation("gT").hostRequests,
+      [.previousTab]
+    )
+    XCTAssertEqual(
       try engine.execute(.ex("close")).hostRequests,
       [.closeWindow]
     )

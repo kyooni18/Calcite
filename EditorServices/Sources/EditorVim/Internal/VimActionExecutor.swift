@@ -154,9 +154,10 @@ extension VimEngine {
         let deletionRegister: VimRegister =
           state.mode == .insert || state.mode == .replace ? .blackHole : register
         performMutation(action: action, count: count, register: register) {
-          let lowerLimit =
-            state.mode == .insert || state.mode == .replace ? lineStart(at: state.cursor) : 0
-          let start = max(lowerLimit, advanceCharacters(from: state.cursor, count: -count))
+          // Insert-mode Backspace must cross a line boundary so it can remove
+          // the newline that `Return` just inserted. The character-boundary
+          // helper preserves grapheme clusters while allowing that join.
+          let start = max(0, advanceCharacters(from: state.cursor, count: -count))
           delete(range: start..<state.cursor, register: deletionRegister, linewise: false)
           state.cursor = start
         }

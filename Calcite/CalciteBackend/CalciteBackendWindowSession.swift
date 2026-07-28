@@ -771,6 +771,18 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       guard let origin else { return .rejected(.staleContext) }
       scrollVimWindow(origin, lines: lines)
       return .accepted
+    case .nextTab:
+      guard let origin else { return .rejected(.staleContext) }
+      // Do this in the window that received the Vim event. Routing through the
+      // shared workspace controller can target another active window/section.
+      activateEditorSession(origin.id)
+      navigateTab(forward: true)
+      return .accepted
+    case .previousTab:
+      guard let origin else { return .rejected(.staleContext) }
+      activateEditorSession(origin.id)
+      navigateTab(forward: false)
+      return .accepted
     case .custom(let command) where command.hasPrefix("vim-"):
       return handleVimCustomTopologyCommand(command, origin: origin)
     default:

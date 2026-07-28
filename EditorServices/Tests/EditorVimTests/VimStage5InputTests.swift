@@ -93,6 +93,15 @@ final class VimStage5InputTests: XCTestCase {
     XCTAssertEqual(engine.state.text, "")
   }
 
+  func testInsertBackspaceAtLineStartRemovesThePrecedingNewline() throws {
+    let engine = VimEngine(text: "first\nsecond", cursor: 6)
+
+    _ = try engine.executeNotation("i<BS>")
+
+    XCTAssertEqual(engine.state.text, "firstsecond")
+    XCTAssertEqual(engine.state.cursor, 5)
+  }
+
   func testUnicodeReplacementArgumentUsesOneGrapheme() throws {
     let engine = VimEngine(text: "a한c", cursor: 0)
     let controller = VimKeymapController(engine: engine)

@@ -22,6 +22,7 @@
           "value" : 0
         }
       ],
+      "hidden" : false,
       "layers" : [
         {
           "image-name" : "CalciteAppIcon.png",
@@ -43,9 +44,9 @@
         ]
       },
       "refractivity" : {
-        "depth" : 0.556015625,
+        "depth" : 0.1359765625,
         "enabled" : true,
-        "strength" : -0.181171875
+        "strength" : -0.2455078125
       },
       "shadow-specializations" : [
         {
@@ -73,7 +74,7 @@
         {
           "value" : {
             "enabled" : true,
-            "value" : 0.49
+            "value" : 0.93
           }
         },
         {
@@ -101,6 +102,7 @@
           "value" : 0.5
         }
       ],
+      "hidden" : true,
       "layers" : [
         {
           "image-name" : "생성된 이미지 1.png",

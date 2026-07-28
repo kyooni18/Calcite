@@ -1728,6 +1728,13 @@ struct CodeTextEditor: NSViewRepresentable {
         to: textView,
         isEnabled: isEnabled
       )
+      guard let codeTextView = textView as? CodeEditorTextView else { return }
+      switch mode {
+      case .visualCharacter, .visualLine:
+        codeTextView.vimCursorLocation = vimController?.engine.state.cursor
+      case .normal, .insert, .replace, .commandLine, .search:
+        codeTextView.vimCursorLocation = nil
+      }
     }
 
     private func publishVimMode(_ mode: VimMode) {
