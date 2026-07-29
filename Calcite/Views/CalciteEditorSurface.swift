@@ -673,9 +673,6 @@ struct CodeTextEditor: NSViewRepresentable {
     textView.showFindHandler = onShowFind
     textView.activationHandler = onActivate
     textView.delegate = context.coordinator
-    textView.contentDidChangeHandler = { [weak coordinator = context.coordinator] textView in
-      coordinator?.handleObservedTextChange(in: textView)
-    }
     textView.nativePointerSelectionHandler = {
       [weak coordinator = context.coordinator] range, textView in
       coordinator?.handleNativePointerSelection(range, in: textView)
@@ -940,9 +937,15 @@ struct CodeTextEditor: NSViewRepresentable {
 
   @MainActor
   final class Coordinator: NSObject, NSTextViewDelegate {
+    private struct PendingNativeEdit {
+      var range: NSRange
+      var replacement: String
+      var selectionBefore: NSRange
+    }
+
     var parent: CodeTextEditor
     var isApplyingExternalUpdate = false
-    private var pendingEdit: (range: NSRange, replacement: String)?
+    private var pendingEdit: PendingNativeEdit?
     fileprivate let documentSynchronizer: CalciteVimDocumentSynchronizer
     var synchronizedText: String {
       get { documentSynchronizer.synchronizedText }
@@ -1803,11 +1806,6 @@ struct CodeTextEditor: NSViewRepresentable {
       replacementString: String?
     ) -> Bool {
       guard !isApplyingExternalUpdate else { return true }
-      // First-responder delivery is authoritative for native input. In
-      // particular an empty document has no selection delta to activate the
-      // surface before its first edit, so rejecting edits based on the previous
-      // SwiftUI snapshot makes the editor appear permanently read-only.
-      if !parent.isActiveSurface { parent.onActivate() }
       let replacement = replacementString ?? ""
       if handleTypingUtility(
         in: textView,
@@ -1816,8 +1814,11 @@ struct CodeTextEditor: NSViewRepresentable {
       ) {
         return false
       }
-      pendingEdit = (affectedCharRange, replacement)
-      parent.onWillEdit()
+      pendingEdit = PendingNativeEdit(
+        range: affectedCharRange,
+        replacement: replacement,
+        selectionBefore: textView.selectedRange()
+      )
       return true
     }
 
@@ -1828,7 +1829,6 @@ struct CodeTextEditor: NSViewRepresentable {
 
     func handleObservedTextChange(in textView: NSTextView) {
       guard !isApplyingExternalUpdate else { return }
-      if !parent.isActiveSurface { parent.onActivate() }
       guard vimDocumentComposition == nil else {
         pendingEdit = nil
         return
@@ -1841,15 +1841,22 @@ struct CodeTextEditor: NSViewRepresentable {
       }
 
       let edit: (range: NSRange, replacement: String)
+      let selection: NSRange
       if let pendingEdit,
         Self.applying(
-          pendingEdit,
+          (pendingEdit.range, pendingEdit.replacement),
           to: synchronizedText
         ) == resultingText
       {
-        edit = pendingEdit
+        edit = (pendingEdit.range, pendingEdit.replacement)
+        selection = Self.resolvedSelectionAfterNativeEdit(
+          observed: textView.selectedRange(),
+          pendingEdit: pendingEdit,
+          resultingText: resultingText
+        )
       } else {
         edit = Self.singleEdit(from: synchronizedText, to: resultingText)
+        selection = Self.clampedRange(textView.selectedRange(), in: resultingText)
       }
       self.pendingEdit = nil
       synchronizedText = resultingText
@@ -1863,7 +1870,7 @@ struct CodeTextEditor: NSViewRepresentable {
         range: edit.range,
         replacement: edit.replacement,
         resultingText: resultingText,
-        selection: textView.selectedRange()
+        selection: selection
       )
       reloadEditorGeometry(
         for: textView,
@@ -2506,6 +2513,22 @@ struct CodeTextEditor: NSViewRepresentable {
         NSMaxRange(edit.range) <= value.length
       else { return nil }
       return value.replacingCharacters(in: edit.range, with: edit.replacement)
+    }
+
+    private static func resolvedSelectionAfterNativeEdit(
+      observed: NSRange,
+      pendingEdit: PendingNativeEdit,
+      resultingText: String
+    ) -> NSRange {
+      let clampedObserved = clampedRange(observed, in: resultingText)
+      guard observed == pendingEdit.selectionBefore else { return clampedObserved }
+
+      let sourceLength = (resultingText as NSString).length
+      let insertionLocation = min(
+        max(0, pendingEdit.range.location + pendingEdit.replacement.utf16.count),
+        sourceLength
+      )
+      return NSRange(location: insertionLocation, length: 0)
     }
 
     private static func singleEdit(from old: String, to new: String) -> (

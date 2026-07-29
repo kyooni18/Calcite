@@ -43,16 +43,12 @@ struct MainSectionalView: View {
     }
     .onAppear {
       windowSession.markActive()
-      layout.setSidebarVisible(windowSession.showsSidebar)
       synchronizeSidebarVisibility()
       reconcileSectionalEditorAssignments()
     }
     .onChange(of: layout.root) { _, _ in
       synchronizeSidebarVisibility()
       reconcileSectionalEditorAssignments()
-    }
-    .onChange(of: windowSession.showsSidebar) { _, isVisible in
-      layout.setSidebarVisible(isVisible)
     }
   }
 
@@ -384,8 +380,8 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
   var onFractionsChanged: ([Double]) -> Void
 
   private weak var installedSplitView: NSSplitView?
-  private var willResizeObserver: NSObjectProtocol?
-  private var resizeObserver: NSObjectProtocol?
+  private var mouseEventMonitor: Any?
+  private var installationWorkItem: DispatchWorkItem?
   private var captureWorkItem: DispatchWorkItem?
   private var geometryReleaseWorkItem: DispatchWorkItem?
   private var geometryApplyGeneration: UInt64 = 0
@@ -421,19 +417,18 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
   }
 
   private func tearDownObservation() {
+    installationWorkItem?.cancel()
+    installationWorkItem = nil
     captureWorkItem?.cancel()
     captureWorkItem = nil
     geometryReleaseWorkItem?.cancel()
     geometryReleaseWorkItem = nil
-    if let willResizeObserver {
-      NotificationCenter.default.removeObserver(willResizeObserver)
-      self.willResizeObserver = nil
-    }
-    if let resizeObserver {
-      NotificationCenter.default.removeObserver(resizeObserver)
-      self.resizeObserver = nil
+    if let mouseEventMonitor {
+      NSEvent.removeMonitor(mouseEventMonitor)
+      self.mouseEventMonitor = nil
     }
     installedSplitView = nil
+    isUserResizing = false
   }
 
   override func viewDidMoveToSuperview() {
@@ -460,9 +455,19 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
   }
 
   func scheduleInstallation() {
-    // `updateNSView`, layout, and hierarchy callbacks already execute on the main actor.
-    // Applying synchronously avoids an old deferred installation targeting a rebuilt split view.
-    installAndApplyGeometry()
+    // SwiftUI can rebuild a split and report several transient frames in the same run-loop turn.
+    // Apply once after the hierarchy has settled instead of pushing persisted geometry into each
+    // intermediate frame.
+    guard installationWorkItem == nil else { return }
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.installationWorkItem = nil
+        self.installAndApplyGeometry()
+      }
+    }
+    installationWorkItem = workItem
+    DispatchQueue.main.async(execute: workItem)
   }
 
   private func installAndApplyGeometry() {
@@ -481,47 +486,98 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
   }
 
   private func installObserver(for splitView: NSSplitView) {
-    if let willResizeObserver { NotificationCenter.default.removeObserver(willResizeObserver) }
-    if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+    if let mouseEventMonitor { NSEvent.removeMonitor(mouseEventMonitor) }
     installedSplitView = splitView
     isUserResizing = false
     lastAppliedSignature = ""
-    willResizeObserver = NotificationCenter.default.addObserver(
-      forName: NSSplitView.willResizeSubviewsNotification,
-      object: splitView,
-      queue: .main
-    ) { [weak self] _ in
-      MainActor.assumeIsolated {
-        guard let self, !self.isApplyingGeometry else { return }
+    mouseEventMonitor = NSEvent.addLocalMonitorForEvents(
+      matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+    ) { [weak self, weak splitView] event in
+      guard let self, let splitView, event.window === splitView.window else { return event }
+      switch event.type {
+      case .leftMouseDown:
+        let point = splitView.convert(event.locationInWindow, from: nil)
+        guard self.isPointOnDivider(point, in: splitView) else { return event }
+        self.captureWorkItem?.cancel()
+        self.captureWorkItem = nil
         self.isUserResizing = true
+      case .leftMouseUp:
+        guard self.isUserResizing else { return event }
+        self.finishUserResize(in: splitView)
+      case .leftMouseDragged:
+        break
+      default:
+        break
       }
-    }
-    resizeObserver = NotificationCenter.default.addObserver(
-      forName: NSSplitView.didResizeSubviewsNotification,
-      object: splitView,
-      queue: .main
-    ) { [weak self, weak splitView] _ in
-      MainActor.assumeIsolated {
-        guard let self, let splitView, !self.isApplyingGeometry else { return }
-        self.scheduleGeometryCapture(from: splitView)
-      }
+      return event
     }
   }
 
-  private func scheduleGeometryCapture(from splitView: NSSplitView) {
+  private func finishUserResize(in splitView: NSSplitView) {
     captureWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self, weak splitView] in
       MainActor.assumeIsolated {
-        guard let self, let splitView, !self.isApplyingGeometry,
+        guard let self else { return }
+        defer {
+          self.isUserResizing = false
+          self.captureWorkItem = nil
+          self.scheduleInstallation()
+        }
+        guard let splitView, !self.isApplyingGeometry,
           self.installedSplitView === splitView
         else { return }
         self.captureGeometry(from: splitView)
-        self.isUserResizing = false
-        self.captureWorkItem = nil
       }
     }
     captureWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.045, execute: workItem)
+    // Let NSSplitView finish the mouse-up layout before reading its final frames.
+    DispatchQueue.main.async(execute: workItem)
+  }
+
+  private func isPointOnDivider(_ point: NSPoint, in splitView: NSSplitView) -> Bool {
+    let subviews = splitView.arrangedSubviews
+    guard subviews.count > 1 else { return false }
+    let hitSlop: CGFloat = 4
+    let thickness = max(1, splitView.dividerThickness)
+
+    for index in 0..<(subviews.count - 1) {
+      let first = subviews[index].frame
+      let second = subviews[index + 1].frame
+      let dividerRect: NSRect
+      if splitView.isVertical {
+        let dividerCenter: CGFloat
+        if first.maxX <= second.minX {
+          dividerCenter = (first.maxX + second.minX) / 2
+        } else if second.maxX <= first.minX {
+          dividerCenter = (second.maxX + first.minX) / 2
+        } else {
+          dividerCenter = (first.midX + second.midX) / 2
+        }
+        dividerRect = NSRect(
+          x: dividerCenter - thickness / 2 - hitSlop,
+          y: splitView.bounds.minY,
+          width: thickness + hitSlop * 2,
+          height: splitView.bounds.height
+        )
+      } else {
+        let dividerCenter: CGFloat
+        if first.maxY <= second.minY {
+          dividerCenter = (first.maxY + second.minY) / 2
+        } else if second.maxY <= first.minY {
+          dividerCenter = (second.maxY + first.minY) / 2
+        } else {
+          dividerCenter = (first.midY + second.midY) / 2
+        }
+        dividerRect = NSRect(
+          x: splitView.bounds.minX,
+          y: dividerCenter - thickness / 2 - hitSlop,
+          width: splitView.bounds.width,
+          height: thickness + hitSlop * 2
+        )
+      }
+      if dividerRect.contains(point) { return true }
+    }
+    return false
   }
 
   private func applyGeometry(to splitView: NSSplitView) {
@@ -579,7 +635,6 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
   }
 
   private func captureGeometry(from splitView: NSSplitView) {
-    defer { isUserResizing = false }
     guard isGeometryEnabled,
       !isApplyingGeometry,
       splitView.arrangedSubviews.count == childIDs.count,

@@ -69,7 +69,6 @@ final class CodeEditorTextView: NSTextView {
   var showQuickHelpHandler: (() -> Void)?
   var showFindHandler: ((Bool) -> Void)?
   var activationHandler: (() -> Void)?
-  var contentDidChangeHandler: ((NSTextView) -> Void)?
   var nativePointerSelectionHandler: ((NSRange, NSTextView) -> Void)?
   private(set) var isProcessingPointerSelection = false
   private var pointerSelectionRange: NSRange?
@@ -169,7 +168,6 @@ final class CodeEditorTextView: NSTextView {
   override func didChangeText() {
     super.didChangeText()
     refreshInsertionPointRendering()
-    contentDidChangeHandler?(self)
   }
 
   /// Use AppKit's native caret for ordinary GUI editing. Custom rendering is
@@ -186,7 +184,10 @@ final class CodeEditorTextView: NSTextView {
 
   override func becomeFirstResponder() -> Bool {
     let result = super.becomeFirstResponder()
-    if result { refreshInsertionPointRendering() }
+    if result {
+      activationHandler?()
+      refreshInsertionPointRendering()
+    }
     return result
   }
 

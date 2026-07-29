@@ -411,7 +411,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     self.nowPlaying = NowPlayingController()
     self.sectionalLayout = sectionalLayout
     self.layoutProfile = CalciteLayoutProfileService()
-    self.showsSidebar = initialSidebarVisibility
+    // The sectional layout file is authoritative once it exists. The legacy workspace setting is
+    // used only to seed a brand-new layout, never to overwrite a restored tree on first appear.
+    self.showsSidebar = sectionalLayout.containsVisible(.sidebar)
     self.commandExecutor = EditorCommandExecutor(
       controller: backend.controller,
       terminal: backend.terminal,
