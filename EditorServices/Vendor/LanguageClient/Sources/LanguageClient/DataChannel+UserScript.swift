@@ -53,13 +53,9 @@ extension DataChannel {
 
 		// Forward stdout to the data channel
 		Task {
-			do {
-				let dataStream = stdoutPipe.fileHandleForReading.dataStream
-				for try await data in dataStream {
-					continuation.yield(data)
-				}
-			} catch {
-				continuation.finish()
+			let dataStream = stdoutPipe.fileHandleForReading.dataStream
+			for await data in dataStream {
+				continuation.yield(data)
 			}
 			continuation.finish()
 		}

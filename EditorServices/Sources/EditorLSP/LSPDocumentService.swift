@@ -426,6 +426,52 @@ public actor LSPDocumentService: LanguageIntelligenceProviding {
     return result
   }
 
+  public func workspaceSymbols(query: String) async throws -> [EditorWorkspaceSymbol] {
+    _ = try await initialize()
+    guard
+      twoTypeProviderEnabled(initialization?.capabilities.workspaceSymbolProvider)
+        || isDynamicallyRegistered("workspace/symbol")
+    else { throw LanguageFeatureError.unsupported("workspace/symbol") }
+    return LSPConversion.workspaceSymbols(
+      try await transport.workspaceSymbols(WorkspaceSymbolParams(query: query))
+    )
+  }
+
+  public func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {
+    guard !changes.isEmpty else { return }
+    _ = try await initialize()
+    let events = changes.map { change in
+      FileEvent(
+        uri: change.uri.absoluteString,
+        type: FileChangeType(rawValue: change.kind.rawValue) ?? .changed
+      )
+    }
+    try await transport.didChangeWatchedFiles(DidChangeWatchedFilesParams(changes: events))
+  }
+
+  public func pullDiagnostics(uri: URL, previousResultID: String? = nil) async throws
+    -> DiagnosticBatch
+  {
+    _ = try await initialize()
+    guard initialization?.capabilities.diagnosticProvider != nil
+      || isDynamicallyRegistered("textDocument/diagnostic")
+    else { throw LanguageFeatureError.unsupported("textDocument/diagnostic") }
+    let key = documentKey(uri)
+    let report = try await transport.diagnostics(
+      DocumentDiagnosticParams(
+        textDocument: TextDocumentIdentifier(uri: key.absoluteString),
+        previousResultId: previousResultID
+      )
+    )
+    let batch = DiagnosticBatch(
+      uri: key,
+      version: documents[key]?.snapshot.version,
+      diagnostics: (report.items ?? []).map(LSPConversion.diagnostic)
+    )
+    diagnosticContinuation.yield(batch)
+    return batch
+  }
+
   public func codeActions(
     uri: URL,
     range: EditorTextRange,
@@ -640,8 +686,12 @@ public actor LSPDocumentService: LanguageIntelligenceProviding {
     case .notification(.textDocumentPublishDiagnostics(let params)):
       guard let rawURI = URL(string: params.uri) else { return }
       let uri = documentKey(rawURI)
-      guard let document = documents[uri] else { return }
-      if let version = params.version, version < document.snapshot.version { return }
+      if let document = documents[uri],
+        let version = params.version,
+        version < document.snapshot.version
+      {
+        return
+      }
       diagnosticContinuation.yield(
         DiagnosticBatch(
           uri: uri, version: params.version,

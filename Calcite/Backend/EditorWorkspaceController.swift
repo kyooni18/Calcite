@@ -59,6 +59,13 @@ struct EditorSymbolLocationCollection: Identifiable {
   let locations: [SourceLocation]
 }
 
+struct EditorProjectDiagnosticGroup: Identifiable {
+  let url: URL
+  let diagnostics: [Diagnostic]
+
+  var id: URL { url }
+}
+
 struct EditorDebugConfiguration: Codable, Equatable, Sendable {
   var programPath: String
   var arguments: String
@@ -103,13 +110,16 @@ final class EditorWorkspaceController: ObservableObject {
     didSet { scheduleSessionPersistence() }
   }
   @Published private(set) var phase: EditorWorkspacePhase = .idle
+  @Published private(set) var runtimeState: WorkspaceRuntimeState = .idle
   @Published private(set) var serviceReport = EditorServiceAvailabilityReport()
   @Published private(set) var diagnosticsRevision = 0
+  @Published private(set) var projectDiagnostics: [URL: [Diagnostic]] = [:]
   @Published private(set) var isPreparingBuildTask = false
   @Published private(set) var debugPhase: EditorDebugPhase = .idle
   @Published private(set) var debugThreads: [DAPThread] = []
   @Published private(set) var debugFrames: [StackFrame] = []
   @Published private(set) var debugScopes: [EditorDebugScopeSnapshot] = []
+  @Published private(set) var debugBreakpointVerification: [URL: [Breakpoint]] = [:]
   @Published private(set) var selectedDebugFrameID: Int?
   @Published private(set) var debugConsole: [String] = []
   @Published var fileOperationError: String?
@@ -144,28 +154,37 @@ final class EditorWorkspaceController: ObservableObject {
   private let sessionStore: EditorWorkspaceSessionStore
   private let symbolResolver: EditorProjectSymbolResolver
   private var ideWorkspace: EditorIDEWorkspace?
+  private var projectDiagnosticsByService: [URL: [String: [Diagnostic]]] = [:]
+  private let taskSupervisor = WorkspaceTaskSupervisor()
+  private let stabilityRecorder = StabilityEventRecorder.shared
+  private var serviceRecoveryPolicy = WorkspaceServiceRecoveryPolicy()
   private var startTask: Task<EditorIDEWorkspace, Error>?
   private var startGeneration = 0
-  private var messageTask: Task<Void, Never>?
-  private var sourceWorkspaceTask: Task<Void, Never>?
-  private var debugEventTask: Task<Void, Never>?
-  private var debugStandardErrorTask: Task<Void, Never>?
-  private var debugErrorTask: Task<Void, Never>?
+  private var backendObservationGeneration: UInt64 = 0
   private var activeThreadID: Int?
   private var openingDocumentURLs: Set<URL> = []
   private var externalConflictIDs: [URL: SourceFileID] = [:]
   private var pendingExternalFileConflicts: [EditorExternalFileConflict] = []
-  private var sessionPersistenceTask: Task<Void, Never>?
-  private var projectContextRefreshTask: Task<Void, Never>?
   private var projectContextRefreshGeneration: UInt64 = 0
-  private var reconfigurationTask: Task<Void, Never>?
-  private var pendingServicesConfiguration: EditorServicesConfiguration?
-  private var buildLaunchTask: Task<Void, Never>?
-  private var debugOperationTask: Task<Void, Never>?
-  private var debugInspectionTask: Task<Void, Never>?
+  private struct ServicesReconfigurationRequest {
+    var configuration: EditorServicesConfiguration
+    var requiresSuccessfulSave: Bool
+  }
+
+  private var pendingReconfigurationRequest: ServicesReconfigurationRequest?
+  private var pendingRuntimeTabRestoration: [ReconfigurationTabState]?
+  private var pendingRuntimeSelectedTabID: EditorTab.ID?
   private var hasRestoredSession = false
-  private var isShuttingDown = false
-  private var hasShutDown = false
+
+  private var isShuttingDown: Bool {
+    if case .shuttingDown = runtimeState { return true }
+    return false
+  }
+
+  private var hasShutDown: Bool {
+    if case .terminated = runtimeState { return true }
+    return false
+  }
 
   var hasUnsavedDocuments: Bool { tabs.contains(where: \.isDirty) }
 
@@ -247,32 +266,91 @@ final class EditorWorkspaceController: ObservableObject {
     self.buildController.onDiagnostics = { [weak self] diagnostics in
       self?.applyBuildDiagnostics(diagnostics)
     }
+    let workspacePath = self.workspaceURL.path
+    self.taskSupervisor.onEvent = { event in
+      let lease: WorkspaceTaskLease
+      let name: String
+      switch event {
+      case .started(let value):
+        lease = value
+        name = "task-started"
+      case .cancelled(let value):
+        lease = value
+        name = "task-cancelled"
+      case .finished(let value):
+        lease = value
+        name = "task-finished"
+      }
+      StabilityEventRecorder.shared.record(
+        .task,
+        name,
+        metadata: [
+          "key": lease.key.description,
+          "generation": String(lease.generation),
+          "workspace": workspacePath,
+        ]
+      )
+    }
+  }
+
+  var activeRuntimeTaskCount: Int { taskSupervisor.activeCount }
+
+  func exportStabilityReport(to url: URL) throws {
+    try stabilityRecorder.export(to: url)
+  }
+
+  private func transitionRuntime(
+    to next: WorkspaceRuntimeState,
+    detail: String? = nil
+  ) {
+    let previous = runtimeState
+    guard previous.permitsTransition(to: next) else {
+      stabilityRecorder.record(
+        .warning,
+        "invalid-runtime-transition",
+        detail: "\(previous) -> \(next)",
+        metadata: ["workspace": workspaceURL.path]
+      )
+      return
+    }
+    runtimeState = next
+    switch next {
+    case .idle, .terminated:
+      phase = .idle
+    case .starting, .reconfiguring:
+      phase = .starting
+    case .running:
+      phase = .ready
+    case .shuttingDown:
+      break
+    case .failed(let message):
+      phase = .failed(message)
+    }
+    stabilityRecorder.record(
+      .lifecycle,
+      "runtime-transition",
+      detail: detail,
+      metadata: [
+        "from": String(describing: previous),
+        "to": String(describing: next),
+        "workspace": workspaceURL.path,
+      ]
+    )
   }
 
   isolated deinit {
     startTask?.cancel()
     startTask = nil
     startGeneration &+= 1
-    messageTask?.cancel()
-    sourceWorkspaceTask?.cancel()
-    debugEventTask?.cancel()
-    debugStandardErrorTask?.cancel()
-    debugErrorTask?.cancel()
-    sessionPersistenceTask?.cancel()
-    projectContextRefreshTask?.cancel()
-    reconfigurationTask?.cancel()
-    buildLaunchTask?.cancel()
-    debugOperationTask?.cancel()
-    debugInspectionTask?.cancel()
   }
 
   func start() async {
-    guard !isShuttingDown else { return }
-    if phase == .ready { return }
-    phase = .starting
+    guard !isShuttingDown, !hasShutDown else { return }
+    if runtimeState == .running { return }
     let operationID: UUID?
 
     if startTask == nil {
+      transitionRuntime(to: .starting(UUID()), detail: "start requested")
       operationID = logStore.beginOperation(
         "Preparing editor services",
         category: "Workspace",
@@ -311,7 +389,7 @@ final class EditorWorkspaceController: ObservableObject {
         serviceReport = workspace.serviceResult.report
         observeBackend(workspace.backend)
       }
-      phase = .ready
+      transitionRuntime(to: .running, detail: "editor services ready")
       let externalReport = await workspace.backend.externalSourceIndexReport()
       let workspaceFileCount = await workspace.backend.sourceWorkspace.files().count
       if let operationID {
@@ -325,7 +403,9 @@ final class EditorWorkspaceController: ObservableObject {
           ]
         )
       }
-      if !hasRestoredSession {
+      if pendingRuntimeTabRestoration != nil {
+        await restoreRuntimeTabs(using: workspace)
+      } else if !hasRestoredSession {
         hasRestoredSession = true
         await restoreWorkspaceSession()
         scheduleSessionPersistence()
@@ -338,7 +418,9 @@ final class EditorWorkspaceController: ObservableObject {
         }
         return
       }
-      if ideWorkspace == nil { phase = .idle }
+      if ideWorkspace == nil {
+        transitionRuntime(to: .idle, detail: "startup cancelled")
+      }
       if let operationID {
         logStore.finishOperation(operationID, level: .notice, message: "Editor startup cancelled")
       }
@@ -350,7 +432,7 @@ final class EditorWorkspaceController: ObservableObject {
         }
         return
       }
-      phase = .failed(error.localizedDescription)
+      transitionRuntime(to: .failed(error.localizedDescription), detail: "startup failed")
       if let operationID {
         logStore.finishOperation(operationID, level: .error, message: error.localizedDescription)
       }
@@ -359,22 +441,41 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func applyServicesConfiguration(_ configuration: EditorServicesConfiguration) {
-    guard !isShuttingDown else { return }
+    enqueueServicesReconfiguration(configuration, requiresSuccessfulSave: true)
+  }
+
+  private func enqueueServicesReconfiguration(
+    _ configuration: EditorServicesConfiguration,
+    requiresSuccessfulSave: Bool
+  ) {
+    guard !isShuttingDown, !hasShutDown else { return }
     var configuration = configuration
     configuration.environment = resolvedPythonProcessEnvironment()
-    pendingServicesConfiguration = configuration
-    guard reconfigurationTask == nil else { return }
-    reconfigurationTask = Task { [weak self] in
+    if let pending = pendingReconfigurationRequest {
+      pendingReconfigurationRequest = ServicesReconfigurationRequest(
+        configuration: configuration,
+        requiresSuccessfulSave: pending.requiresSuccessfulSave && requiresSuccessfulSave
+      )
+    } else {
+      pendingReconfigurationRequest = ServicesReconfigurationRequest(
+        configuration: configuration,
+        requiresSuccessfulSave: requiresSuccessfulSave
+      )
+    }
+    guard !taskSupervisor.contains(.reconfiguration) else { return }
+    taskSupervisor.replace(.reconfiguration) { [weak self] lease in
       guard let self else { return }
-      while !Task.isCancelled, let next = self.pendingServicesConfiguration {
-        self.pendingServicesConfiguration = nil
-        await self.reconfigure(using: next)
+      while !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        let request = self.pendingReconfigurationRequest
+      {
+        self.pendingReconfigurationRequest = nil
+        await self.reconfigure(using: request)
       }
-      self.reconfigurationTask = nil
     }
   }
 
   func openDocument(at url: URL) async {
+    guard !isShuttingDown, !hasShutDown else { return }
     let key = url.standardizedFileURL
     guard isRegularFile(key) else { return }
     if let existing = tabs.first(where: { $0.url.standardizedFileURL == key }) {
@@ -434,24 +535,38 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func closeTab(_ tab: EditorTab, saving: Bool = false) {
-    Task { [weak self] in
-      guard let self else { return }
+    let key = WorkspaceTaskKey.tabOperation(tab.id)
+    guard !isShuttingDown, !hasShutDown, !taskSupervisor.contains(key) else { return }
+    taskSupervisor.replace(key) { [weak self, weak tab] lease in
+      guard let self, let tab, self.taskSupervisor.isCurrent(lease) else { return }
       if saving, !(await tab.save()) { return }
+      guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
       await tab.close()
       try? await self.ideWorkspace?.closeDocument(at: tab.url)
-      withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+      guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+      let removeTab = {
         self.tabs.removeAll { $0.id == tab.id }
         if self.selectedTabID == tab.id {
           self.selectedTabID = self.tabs.last?.id
         }
       }
-      self.scheduleSessionPersistence()
+      if self.isShuttingDown {
+        removeTab()
+      } else {
+        withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+          removeTab()
+        }
+        self.scheduleSessionPersistence()
+      }
     }
   }
 
   func saveActiveDocument() {
     guard let activeTab else { return }
-    Task { await activeTab.save() }
+    taskSupervisor.replace(.auxiliary("save-active-\(activeTab.id.uuidString)")) {
+      [weak activeTab] _ in
+      _ = await activeTab?.save()
+    }
   }
 
   @discardableResult
@@ -544,25 +659,25 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func runBuildTask(_ kind: EditorBuildTaskKind) {
-    guard buildLaunchTask == nil, !buildController.phase.isRunning else { return }
+    guard !taskSupervisor.contains(.buildLaunch), !buildController.phase.isRunning else { return }
     isPreparingBuildTask = true
-    buildLaunchTask = Task { [weak self] in
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
       guard let self else { return }
-      defer {
-        self.isPreparingBuildTask = false
-        self.buildLaunchTask = nil
-      }
+      defer { self.isPreparingBuildTask = false }
       guard await self.saveAllDocuments(), !Task.isCancelled,
+        self.taskSupervisor.isCurrent(lease),
         let target = self.resolvedBuildTask(kind)
       else { return }
       self.isPreparingBuildTask = false
       switch target {
       case .project(let command):
-        if await self.buildController.run(command) {
+        if await self.buildController.run(command), self.taskSupervisor.isCurrent(lease) {
           self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
         }
       case .standalone(let fileURL, _):
-        if await self.buildController.runSingleFile(fileURL, kind: kind) {
+        if await self.buildController.runSingleFile(fileURL, kind: kind),
+          self.taskSupervisor.isCurrent(lease)
+        {
           self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
         }
       }
@@ -570,28 +685,29 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func runSelectedBuildTask() {
-    guard buildLaunchTask == nil, !buildController.phase.isRunning else { return }
+    guard !taskSupervisor.contains(.buildLaunch), !buildController.phase.isRunning else { return }
     isPreparingBuildTask = true
-    buildLaunchTask = Task { [weak self] in
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
       guard let self else { return }
-      defer {
-        self.isPreparingBuildTask = false
-        self.buildLaunchTask = nil
-      }
-      guard await self.saveAllDocuments(), !Task.isCancelled else { return }
+      defer { self.isPreparingBuildTask = false }
+      guard await self.saveAllDocuments(), !Task.isCancelled,
+        self.taskSupervisor.isCurrent(lease)
+      else { return }
       self.isPreparingBuildTask = false
       if let selected = self.buildController.selectedCommand {
-        if await self.buildController.run(selected) {
+        if await self.buildController.run(selected), self.taskSupervisor.isCurrent(lease) {
           self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
         }
       } else if let target = self.resolvedBuildTask(.run) {
         switch target {
         case .project(let command):
-          if await self.buildController.run(command) {
+          if await self.buildController.run(command), self.taskSupervisor.isCurrent(lease) {
             self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
           }
         case .standalone(let fileURL, _):
-          if await self.buildController.runSingleFile(fileURL, kind: .run) {
+          if await self.buildController.runSingleFile(fileURL, kind: .run),
+            self.taskSupervisor.isCurrent(lease)
+          {
             self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
           }
         }
@@ -600,15 +716,16 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func cancelBuildTask() {
-    buildLaunchTask?.cancel()
+    taskSupervisor.cancel(.buildLaunch)
+    isPreparingBuildTask = false
     buildController.cancel()
   }
 
   func openBuildDiagnostic(_ diagnostic: EditorBuildDiagnostic) {
-    Task { [weak self] in
+    runAuxiliaryTask("open-build-diagnostic") { [weak self] lease in
       guard let self else { return }
       await self.openDocument(at: diagnostic.url)
-      guard
+      guard self.taskSupervisor.isCurrent(lease),
         let tab = self.tabs.first(where: {
           $0.url.standardizedFileURL == diagnostic.url.standardizedFileURL
         })
@@ -700,10 +817,10 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func scheduleProjectContextRefresh(delay: Duration = .milliseconds(350)) {
+    guard !isShuttingDown, !hasShutDown else { return }
     projectContextRefreshGeneration &+= 1
     let generation = projectContextRefreshGeneration
-    projectContextRefreshTask?.cancel()
-    projectContextRefreshTask = Task { [weak self] in
+    taskSupervisor.replace(.projectRefresh) { [weak self] lease in
       if delay > .zero {
         do {
           try await Task.sleep(for: delay)
@@ -711,19 +828,22 @@ final class EditorWorkspaceController: ObservableObject {
           return
         }
       }
-      guard let self, !Task.isCancelled, !self.isShuttingDown,
+      guard let self, !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        !self.isShuttingDown, !self.hasShutDown,
         self.projectContextRefreshGeneration == generation
       else { return }
       self.buildController.rediscover()
       self.synchronizePythonProcessEnvironment()
-      guard !Task.isCancelled, self.projectContextRefreshGeneration == generation else { return }
+      guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        self.projectContextRefreshGeneration == generation
+      else { return }
       if let backend = self.ideWorkspace?.backend {
         _ = await backend.refreshExternalSourceIndex()
       }
-      guard !Task.isCancelled, self.projectContextRefreshGeneration == generation else { return }
+      guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        self.projectContextRefreshGeneration == generation
+      else { return }
       await self.symbolResolver.invalidate()
-      guard self.projectContextRefreshGeneration == generation else { return }
-      self.projectContextRefreshTask = nil
     }
   }
 
@@ -873,7 +993,9 @@ final class EditorWorkspaceController: ObservableObject {
     case .openFile(let path):
       let url = URL(
         fileURLWithPath: NSString(string: path).expandingTildeInPath, relativeTo: workspaceURL)
-      Task { await openDocument(at: url.standardizedFileURL) }
+      runAuxiliaryTask("vim-open-file") { [weak self] _ in
+        await self?.openDocument(at: url.standardizedFileURL)
+      }
     case .definition, .declaration:
       onVimCommand?(.goToDefinition)
     case .references:
@@ -900,11 +1022,15 @@ final class EditorWorkspaceController: ObservableObject {
 
   private func renameSymbolFromVim() {
     guard let tab = activeTab else { return }
-    Task { [weak self] in
-      guard let self else { return }
+    runAuxiliaryTask("rename-symbol") { [weak self, weak tab] lease in
+      guard let self, let tab else { return }
       do {
-        guard try await tab.prepareRenameAtSelection() != nil else {
-          self.fileOperationError = "The active language service cannot rename this symbol."
+        guard try await tab.prepareRenameAtSelection() != nil,
+          self.taskSupervisor.isCurrent(lease)
+        else {
+          if self.taskSupervisor.isCurrent(lease) {
+            self.fileOperationError = "The active language service cannot rename this symbol."
+          }
           return
         }
         let alert = NSAlert()
@@ -917,9 +1043,13 @@ final class EditorWorkspaceController: ObservableObject {
         alert.accessoryView = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let edit = try await tab.renameAtSelection(to: name) else { return }
+        guard !name.isEmpty, self.taskSupervisor.isCurrent(lease),
+          let edit = try await tab.renameAtSelection(to: name),
+          self.taskSupervisor.isCurrent(lease)
+        else { return }
         try await self.applyLanguageWorkspaceEdit(edit, description: "Rename")
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.fileOperationError = "Rename failed: \(error.localizedDescription)"
       }
     }
@@ -943,12 +1073,14 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func presentCodeActions(for tab: EditorTab) {
-    Task { [weak self] in
-      guard let self else { return }
+    runAuxiliaryTask("code-action-\(tab.id.uuidString)") { [weak self, weak tab] lease in
+      guard let self, let tab else { return }
       do {
         let actions = try await tab.codeActionsAtSelection().filter { !$0.isDisabled }
-        guard !actions.isEmpty else {
-          self.fileOperationError = "No code actions are available at the cursor."
+        guard self.taskSupervisor.isCurrent(lease), !actions.isEmpty else {
+          if self.taskSupervisor.isCurrent(lease) {
+            self.fileOperationError = "No code actions are available at the cursor."
+          }
           return
         }
         let alert = NSAlert()
@@ -964,16 +1096,19 @@ final class EditorWorkspaceController: ObservableObject {
         popup.addItems(withTitles: ordered.map(\.title))
         alert.accessoryView = popup
         guard alert.runModal() == .alertFirstButtonReturn,
-          ordered.indices.contains(popup.indexOfSelectedItem)
+          ordered.indices.contains(popup.indexOfSelectedItem),
+          self.taskSupervisor.isCurrent(lease)
         else { return }
         let action = ordered[popup.indexOfSelectedItem]
         if let edit = action.edit {
           try await self.applyLanguageWorkspaceEdit(edit, description: action.title)
         }
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         if let command = action.command, let backend = self.ideWorkspace?.backend {
           _ = try await backend.executeLanguageCommand(command)
         }
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.fileOperationError = "Code action failed: \(error.localizedDescription)"
       }
     }
@@ -1014,14 +1149,18 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   func showQuickHelp() {
-    Task { [weak self] in
+    runAuxiliaryTask("quick-help") { [weak self] lease in
       guard let self, let tab = self.activeTab else { return }
       do {
-        guard let hover = try await tab.hoverAtSelection(), !hover.markdown.isEmpty else {
-          self.symbolInformation = EditorSymbolInformation(
-            title: tab.symbolAtSelection ?? "Quick Help",
-            markdown: "No symbol information was returned by the active language service."
-          )
+        guard let hover = try await tab.hoverAtSelection(), !hover.markdown.isEmpty,
+          self.taskSupervisor.isCurrent(lease)
+        else {
+          if self.taskSupervisor.isCurrent(lease) {
+            self.symbolInformation = EditorSymbolInformation(
+              title: tab.symbolAtSelection ?? "Quick Help",
+              markdown: "No symbol information was returned by the active language service."
+            )
+          }
           return
         }
         self.symbolInformation = EditorSymbolInformation(
@@ -1029,6 +1168,7 @@ final class EditorWorkspaceController: ObservableObject {
           markdown: hover.markdown
         )
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.symbolInformation = EditorSymbolInformation(
           title: tab.symbolAtSelection ?? "Quick Help",
           markdown: "Quick Help failed: \(error.localizedDescription)"
@@ -1039,7 +1179,22 @@ final class EditorWorkspaceController: ObservableObject {
 
   func openSymbolLocation(_ location: SourceLocation) {
     symbolLocations = nil
-    Task { [weak self] in
+    runAuxiliaryTask("open-symbol-location") { [weak self] _ in
+      await self?.openSourceLocation(location)
+    }
+  }
+
+  func workspaceSymbols(matching query: String) async throws -> [EditorWorkspaceSymbol] {
+    guard let backend = ideWorkspace?.backend else { return [] }
+    return try await backend.workspaceSymbols(matching: query)
+  }
+
+  func openWorkspaceSymbol(_ symbol: EditorWorkspaceSymbol) {
+    guard let location = symbol.location else {
+      fileOperationError = "The language server returned no source location for \(symbol.name)."
+      return
+    }
+    runAuxiliaryTask("open-workspace-symbol") { [weak self] _ in
       await self?.openSourceLocation(location)
     }
   }
@@ -1048,11 +1203,12 @@ final class EditorWorkspaceController: ObservableObject {
     guard let tab = activeTab else { return }
     tab.toggleBreakpointAtCurrentLine()
     guard debugPhase == .running || debugPhase == .stopped else { return }
-    Task { [weak self] in
-      guard let self, let backend = self.ideWorkspace?.backend else { return }
+    runAuxiliaryTask("breakpoint-sync-\(tab.id.uuidString)") { [weak self, weak tab] lease in
+      guard let self, let tab, let backend = self.ideWorkspace?.backend else { return }
       do {
         try await self.synchronizeBreakpoints(for: tab, using: backend)
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.appendDebugMessage("Breakpoint update failed: \(error.localizedDescription)")
       }
     }
@@ -1108,13 +1264,15 @@ final class EditorWorkspaceController: ObservableObject {
 
   func selectDebugFrame(_ frame: StackFrame) {
     selectedDebugFrameID = frame.id
-    debugInspectionTask?.cancel()
-    debugInspectionTask = Task { [weak self] in
-      guard let self, let backend = self.ideWorkspace?.backend else { return }
+    taskSupervisor.replace(.debugInspection) { [weak self] lease in
+      guard let self, let backend = self.ideWorkspace?.backend,
+        self.taskSupervisor.isCurrent(lease)
+      else { return }
       await self.loadDebugScopes(frameID: frame.id, backend: backend)
-      guard !Task.isCancelled, self.selectedDebugFrameID == frame.id else { return }
+      guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        self.selectedDebugFrameID == frame.id
+      else { return }
       await self.openDebugFrame(frame)
-      self.debugInspectionTask = nil
     }
   }
 
@@ -1125,10 +1283,11 @@ final class EditorWorkspaceController: ObservableObject {
       externalFileConflict = nil
       return
     }
-    Task { [weak self] in
+    runAuxiliaryTask("external-conflict-\(url.path)") { [weak self] lease in
       guard let self else { return }
       do {
         _ = try await backend.resolveSourceFileConflict(id, using: resolution)
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         if let tab = self.tabs.first(where: { $0.url.standardizedFileURL == url }) {
           switch resolution {
           case .useDisk:
@@ -1137,6 +1296,7 @@ final class EditorWorkspaceController: ObservableObject {
             tab.markExternalConflictResolved()
           }
         }
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.externalConflictIDs.removeValue(forKey: url)
         if self.externalFileConflict?.url.standardizedFileURL == url {
           self.externalFileConflict = nil
@@ -1144,6 +1304,7 @@ final class EditorWorkspaceController: ObservableObject {
         }
         self.appendDebugMessage("Resolved external file conflict: \(url.lastPathComponent)")
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.fileOperationError =
           "Could not resolve the external file conflict: \(error.localizedDescription)"
       }
@@ -1164,6 +1325,7 @@ final class EditorWorkspaceController: ObservableObject {
       try? await backend.disconnectDebugger()
       self.activeThreadID = nil
       self.clearDebugInspection()
+      self.debugBreakpointVerification.removeAll(keepingCapacity: true)
       self.debugPhase = .idle
     }
   }
@@ -1172,55 +1334,81 @@ final class EditorWorkspaceController: ObservableObject {
   func shutdown(saveChanges: Bool = true) async -> Bool {
     if hasShutDown { return true }
     guard !isShuttingDown else { return false }
-    isShuttingDown = true
-    pendingServicesConfiguration = nil
-    if let task = reconfigurationTask { await task.value }
-    buildLaunchTask?.cancel()
-    if buildController.phase.isRunning { buildController.cancel() }
-    if let buildLaunchTask { await buildLaunchTask.value }
-    self.buildLaunchTask = nil
-    debugOperationTask?.cancel()
-    debugInspectionTask?.cancel()
-    projectContextRefreshTask?.cancel()
-    projectContextRefreshTask = nil
-    projectContextRefreshGeneration &+= 1
+    transitionRuntime(to: .shuttingDown, detail: "workspace shutdown requested")
+    pendingReconfigurationRequest = nil
+
+    await taskSupervisor.cancelAndWait(.reconfiguration)
+    await taskSupervisor.cancelAndWait(.sessionPersistence)
+    let tabTaskKeys = taskSupervisor.snapshots().compactMap { snapshot -> WorkspaceTaskKey? in
+      if case .tabOperation = snapshot.key { return snapshot.key }
+      return nil
+    }
+    for key in tabTaskKeys { await taskSupervisor.cancelAndWait(key) }
 
     if saveChanges {
       await persistWorkspaceSession(includeRecoveries: true)
       guard await saveAllDocuments() else {
-        phase = .failed("One or more documents could not be saved.")
-        isShuttingDown = false
+        transitionRuntime(
+          to: .failed("One or more documents could not be saved."),
+          detail: "shutdown save failed"
+        )
+        scheduleSessionPersistence()
         return false
       }
+      await persistWorkspaceSession(
+        includeRecoveries: pendingRuntimeTabRestoration != nil
+      )
     } else {
       await persistWorkspaceSession(includeRecoveries: false)
     }
 
-    startTask?.cancel()
+    if buildController.phase.isRunning { buildController.cancel() }
+    await taskSupervisor.cancelAndWait(.buildLaunch)
+    await taskSupervisor.cancelAndWait(.debugOperation)
+    await taskSupervisor.cancelAndWait(.debugInspection)
+    await taskSupervisor.cancelAndWait(.projectRefresh)
+    projectContextRefreshGeneration &+= 1
+
+    let pendingStart = startTask
+    pendingStart?.cancel()
     startTask = nil
     startGeneration &+= 1
-    messageTask?.cancel()
-    sourceWorkspaceTask?.cancel()
-    debugEventTask?.cancel()
-    debugStandardErrorTask?.cancel()
-    debugErrorTask?.cancel()
+
+    for tab in tabs { await tab.close() }
+    tabs.removeAll(keepingCapacity: false)
+    selectedTabID = nil
+
+    let observationTasks = cancelBackendObservationTasks()
     try? await ideWorkspace?.shutdown()
     ideWorkspace = nil
-    phase = .idle
-    await persistWorkspaceSession(includeRecoveries: false)
-    hasShutDown = true
-    isShuttingDown = false
+    for task in observationTasks { await task.value }
+    if let pendingStart { _ = try? await pendingStart.value }
+
+    await taskSupervisor.cancelAllAndWait(rejectingNewTasks: true)
+    transitionRuntime(to: .terminated, detail: "workspace shutdown complete")
     return true
   }
 
   private func runDebugOperation(
     _ operation: @escaping @MainActor () async -> Void
   ) {
-    guard debugOperationTask == nil, !isShuttingDown else { return }
-    debugOperationTask = Task { [weak self] in
-      guard let self else { return }
+    guard !taskSupervisor.contains(.debugOperation), !isShuttingDown, !hasShutDown else {
+      return
+    }
+    taskSupervisor.replace(.debugOperation) { [weak self] lease in
+      guard let self, self.taskSupervisor.isCurrent(lease) else { return }
       await operation()
-      self.debugOperationTask = nil
+    }
+  }
+
+  private func runAuxiliaryTask(
+    _ name: String,
+    operation: @escaping @MainActor (WorkspaceTaskLease) async -> Void
+  ) {
+    guard !isShuttingDown, !hasShutDown else { return }
+    taskSupervisor.replace(.auxiliary(name)) { [weak self] lease in
+      guard let self, self.taskSupervisor.isCurrent(lease) else { return }
+      await operation(lease)
     }
   }
 
@@ -1228,39 +1416,77 @@ final class EditorWorkspaceController: ObservableObject {
     var id: UUID
     var url: URL
     var selectedRange: NSRange
+    var text: String
+    var isDirty: Bool
+    var diskModificationTime: TimeInterval?
   }
 
-  private func reconfigure(using configuration: EditorServicesConfiguration) async {
+  private func reconfigure(using request: ServicesReconfigurationRequest) async {
     guard !isShuttingDown else { return }
-    let tabStates = tabs.map {
-      ReconfigurationTabState(id: $0.id, url: $0.url, selectedRange: $0.selectedRange)
-    }
-    let previouslySelectedID = selectedTabID
-    guard await saveAllDocuments() else {
-      phase = .failed(
-        "Editor Services were not reconfigured because a document could not be saved.")
+    transitionRuntime(to: .reconfiguring(UUID()), detail: "service configuration changed")
+    if request.requiresSuccessfulSave, !(await saveAllDocuments()) {
+      transitionRuntime(
+        to: .failed(
+          "Editor Services were not reconfigured because a document could not be saved."),
+        detail: "reconfiguration save failed"
+      )
       return
     }
+    guard !Task.isCancelled, !isShuttingDown else { return }
+    var tabStates = tabs.map {
+      ReconfigurationTabState(
+        id: $0.id,
+        url: $0.url,
+        selectedRange: $0.selectedRange,
+        text: $0.text,
+        isDirty: $0.isDirty,
+        diskModificationTime: $0.diskModificationTime
+      )
+    }
+    let capturedIDs = Set(tabStates.map(\.id))
+    tabStates.append(
+      contentsOf: (pendingRuntimeTabRestoration ?? []).filter { !capturedIDs.contains($0.id) }
+    )
+    let previouslySelectedID = selectedTabID ?? pendingRuntimeSelectedTabID
 
     startTask?.cancel()
     startTask = nil
     startGeneration &+= 1
-    projectContextRefreshTask?.cancel()
-    projectContextRefreshTask = nil
+    await taskSupervisor.cancelAndWait(.projectRefresh)
     projectContextRefreshGeneration &+= 1
+    let observationTasks = cancelBackendObservationTasks()
+    pendingRuntimeTabRestoration = tabStates
+    pendingRuntimeSelectedTabID = previouslySelectedID
+    // Once teardown starts it must finish as one unit. Returning halfway would leave
+    // a mixture of closed and live tabs backed by a partially shut down workspace.
     for tab in tabs { await tab.close() }
+    tabs.removeAll(keepingCapacity: false)
+    selectedTabID = nil
     try? await ideWorkspace?.shutdown()
+    for task in observationTasks { await task.value }
     ideWorkspace = nil
-    servicesConfiguration = configuration
-    EditorServicePreferencesStore.save(configuration: configuration)
-    phase = .idle
+    guard !Task.isCancelled, !isShuttingDown else { return }
+    servicesConfiguration = request.configuration
+    EditorServicePreferencesStore.save(configuration: request.configuration)
+    transitionRuntime(to: .idle, detail: "old services stopped")
     await start()
-    guard !isShuttingDown, phase == .ready, let workspace = ideWorkspace else { return }
+  }
 
+  private func restoreRuntimeTabs(using workspace: EditorIDEWorkspace) async {
+    guard let tabStates = pendingRuntimeTabRestoration else { return }
+    let previouslySelectedID = pendingRuntimeSelectedTabID
     var reopenedTabs: [EditorTab] = []
+    var remainingStates: [ReconfigurationTabState] = []
     reopenedTabs.reserveCapacity(tabStates.count)
-    for state in tabStates {
-      guard isRegularFile(state.url) else { continue }
+    for (index, state) in tabStates.enumerated() {
+      guard !Task.isCancelled, !isShuttingDown else {
+        remainingStates.append(contentsOf: tabStates[index...])
+        break
+      }
+      guard isRegularFile(state.url) else {
+        remainingStates.append(state)
+        continue
+      }
       do {
         let tab = try await makeEditorTab(
           at: state.url,
@@ -1268,8 +1494,18 @@ final class EditorWorkspaceController: ObservableObject {
           id: state.id,
           selectedRange: state.selectedRange
         )
+        if tab.text != state.text {
+          try await tab.restoreRecoveredText(state.text)
+          let utf16Length = (tab.text as NSString).length
+          let location = min(max(state.selectedRange.location, 0), utf16Length)
+          tab.selectedRange = NSRange(
+            location: location,
+            length: min(max(state.selectedRange.length, 0), utf16Length - location)
+          )
+        }
         reopenedTabs.append(tab)
       } catch {
+        remainingStates.append(state)
         appendDebugMessage(
           "Could not reopen \(state.url.lastPathComponent) after reconfiguration: "
             + error.localizedDescription
@@ -1277,21 +1513,34 @@ final class EditorWorkspaceController: ObservableObject {
       }
     }
 
-    // Replace the collection once, preserving IDs and selection. Split panes key their state by
-    // tab ID, so they do not collapse or switch documents while the backend is recreated.
+    pendingRuntimeTabRestoration = remainingStates.isEmpty ? nil : remainingStates
+    if remainingStates.isEmpty {
+      pendingRuntimeSelectedTabID = nil
+    } else if let previouslySelectedID,
+      !remainingStates.contains(where: { $0.id == previouslySelectedID })
+    {
+      pendingRuntimeSelectedTabID = remainingStates.first?.id
+    }
     tabs = reopenedTabs
     if let previouslySelectedID, reopenedTabs.contains(where: { $0.id == previouslySelectedID }) {
       selectedTabID = previouslySelectedID
     } else {
       selectedTabID = reopenedTabs.first?.id
     }
+    if !remainingStates.isEmpty {
+      recoveryWarning =
+        "Some tabs could not be reopened after Editor Services restarted. Their in-memory contents were kept in workspace recovery."
+    }
     scheduleSessionPersistence()
   }
 
   private func beginDebugging() async {
-    guard let workspace = ideWorkspace, let tab = activeTab else { return }
-    guard let language = editorLanguage(for: tab.languageID) else {
-      debugPhase = .failed("No debug language mapping exists for \(tab.languageID).")
+    guard let workspace = ideWorkspace else { return }
+    debugBreakpointVerification.removeAll(keepingCapacity: true)
+    guard let language = await resolvedDebugLanguage(in: workspace) else {
+      debugPhase = .failed(
+        "No debuggable project language could be resolved. Choose a launch program or open a source file."
+      )
       return
     }
 
@@ -1357,9 +1606,26 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func synchronizeBreakpoints(using backend: MultiLanguageEditorBackend) async throws {
+    var workspaceBreakpoints = EditorBreakpointStore.all(under: workspaceURL)
+    var modifiedByURL: [URL: Bool] = [:]
     for tab in tabs {
-      try await synchronizeBreakpoints(for: tab, using: backend)
+      let key = tab.url.standardizedFileURL
+      workspaceBreakpoints[key] = tab.breakpoints
+      modifiedByURL[key] = tab.isDirty
     }
+
+    var verification: [URL: [Breakpoint]] = [:]
+    for url in workspaceBreakpoints.keys.sorted(by: { $0.path < $1.path }) {
+      let values = workspaceBreakpoints[url, default: []].sorted().map {
+        SourceBreakpoint(line: $0)
+      }
+      verification[url] = try await backend.setBreakpoints(
+        in: url,
+        breakpoints: values,
+        sourceModified: modifiedByURL[url] ?? false
+      )
+    }
+    debugBreakpointVerification = verification
   }
 
   private func synchronizeBreakpoints(
@@ -1367,11 +1633,12 @@ final class EditorWorkspaceController: ObservableObject {
     using backend: MultiLanguageEditorBackend
   ) async throws {
     let values = tab.breakpoints.sorted().map { SourceBreakpoint(line: $0) }
-    _ = try await backend.setBreakpoints(
+    let verification = try await backend.setBreakpoints(
       in: tab.url,
       breakpoints: values,
       sourceModified: tab.isDirty
     )
+    debugBreakpointVerification[tab.url.standardizedFileURL] = verification
   }
 
   private func performThreadCommand(
@@ -1396,48 +1663,188 @@ final class EditorWorkspaceController: ObservableObject {
     return first.id
   }
 
-  private func observeBackend(_ backend: MultiLanguageEditorBackend) {
-    messageTask?.cancel()
-    sourceWorkspaceTask?.cancel()
-    debugEventTask?.cancel()
-    debugStandardErrorTask?.cancel()
-    debugErrorTask?.cancel()
+  private var backendObservationTaskKeys: [WorkspaceTaskKey] {
+    [
+      .backendMessages,
+      .backendDiagnostics,
+      .sourceWorkspaceEvents,
+      .debugEvents,
+      .debugStandardError,
+      .debugTransportErrors,
+    ]
+  }
 
-    messageTask = Task { [weak self] in
+  private func observeBackend(_ backend: MultiLanguageEditorBackend) {
+    cancelBackendObservationTasks()
+    backendObservationGeneration &+= 1
+    let generation = backendObservationGeneration
+
+    taskSupervisor.replace(.backendMessages) { [weak self] lease in
       for await message in backend.languageServerMessages {
-        guard let self else { return }
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
         let service = message.serviceIdentifier.map { "[\($0)] " } ?? ""
         self.appendDebugMessage("LSP \(service)\(message.message)")
+        if message.kind == .error,
+          message.message.hasPrefix(Self.unexpectedLanguageServerTerminationPrefix)
+        {
+          self.scheduleLanguageServiceRecovery(
+            for: message.serviceIdentifier ?? "unknown"
+          )
+        }
       }
     }
-    sourceWorkspaceTask = Task { [weak self] in
+    projectDiagnosticsByService.removeAll(keepingCapacity: true)
+    projectDiagnostics.removeAll(keepingCapacity: true)
+    diagnosticsRevision &+= 1
+    taskSupervisor.replace(.backendDiagnostics) { [weak self] lease in
+      for await batch in backend.diagnostics {
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
+        self.applyProjectDiagnosticBatch(batch)
+      }
+    }
+    taskSupervisor.replace(.sourceWorkspaceEvents) { [weak self] lease in
       let events = await backend.sourceWorkspaceEvents()
       for await event in events {
-        guard let self else { return }
-        self.handleSourceWorkspaceEvent(event)
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
+        await self.handleSourceWorkspaceEvent(event, backend: backend)
       }
     }
-    debugEventTask = Task { [weak self] in
+    taskSupervisor.replace(.debugEvents) { [weak self] lease in
       for await event in backend.debugEvents {
-        guard let self else { return }
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
         await self.handleDebugEvent(event, backend: backend)
       }
     }
-    debugStandardErrorTask = Task { [weak self] in
+    taskSupervisor.replace(.debugStandardError) { [weak self] lease in
       for await line in backend.debugAdapterStandardError {
-        guard let self else { return }
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
         self.appendDebugMessage("DAP stderr: \(line)")
       }
     }
-    debugErrorTask = Task { [weak self] in
+    taskSupervisor.replace(.debugTransportErrors) { [weak self] lease in
       for await error in backend.debugTransportErrors {
-        guard let self else { return }
+        guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
+          generation == self.backendObservationGeneration,
+          !self.isShuttingDown, !self.hasShutDown
+        else { return }
         self.appendDebugMessage("DAP: \(error)")
+        if error.hasPrefix(Self.unexpectedDebugAdapterTerminationPrefix) {
+          self.activeThreadID = nil
+          self.clearDebugInspection()
+          self.debugBreakpointVerification.removeAll(keepingCapacity: true)
+          self.debugPhase = .failed(error)
+          self.stabilityRecorder.record(
+            .error,
+            "debug-adapter-terminated",
+            detail: error,
+            metadata: ["workspace": self.workspaceURL.path]
+          )
+        }
       }
     }
   }
 
-  private func handleSourceWorkspaceEvent(_ event: SourceWorkspaceEvent) {
+  private static let unexpectedDebugAdapterTerminationPrefix =
+    "DAP process terminated unexpectedly"
+
+  private static let unexpectedLanguageServerTerminationPrefix =
+    "Language server process terminated unexpectedly"
+
+  private func scheduleLanguageServiceRecovery(for serviceIdentifier: String) {
+    guard runtimeState == .running, !isShuttingDown, !hasShutDown else { return }
+    guard let decision = serviceRecoveryPolicy.nextDecision(for: serviceIdentifier) else {
+      let message =
+        "Automatic restart was stopped for \(serviceIdentifier) after repeated failures."
+      appendDebugMessage(message)
+      stabilityRecorder.record(
+        .warning,
+        "language-service-restart-suppressed",
+        detail: message,
+        metadata: [
+          "service": serviceIdentifier,
+          "workspace": workspaceURL.path,
+        ]
+      )
+      return
+    }
+
+    let key = WorkspaceTaskKey.languageServiceRecovery(serviceIdentifier)
+    taskSupervisor.replace(key) { [weak self] lease in
+      do {
+        try await Task.sleep(for: decision.delay)
+      } catch {
+        return
+      }
+      guard let self, !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+        self.runtimeState == .running, !self.isShuttingDown, !self.hasShutDown
+      else { return }
+      self.stabilityRecorder.record(
+        .languageService,
+        "language-service-restart",
+        metadata: [
+          "service": serviceIdentifier,
+          "attempt": String(decision.attempt),
+          "workspace": self.workspaceURL.path,
+        ]
+      )
+      self.appendDebugMessage(
+        "Restarting Editor Services after \(serviceIdentifier) exited "
+          + "(attempt \(decision.attempt))."
+      )
+      self.enqueueServicesReconfiguration(
+        self.servicesConfiguration,
+        requiresSuccessfulSave: false
+      )
+    }
+  }
+
+  @discardableResult
+  private func cancelBackendObservationTasks() -> [Task<Void, Never>] {
+    backendObservationGeneration &+= 1
+    return backendObservationTaskKeys.compactMap { taskSupervisor.cancelReturningTask($0) }
+  }
+
+  private func cancelBackendObservationTasksAndWait() async {
+    let tasks = cancelBackendObservationTasks()
+    for task in tasks { await task.value }
+  }
+
+  private func handleSourceWorkspaceEvent(
+    _ event: SourceWorkspaceEvent,
+    backend: MultiLanguageEditorBackend
+  ) async {
+    let changes = await workspaceFileChanges(for: event, backend: backend)
+    if !changes.isEmpty {
+      do {
+        try await backend.notifyWorkspaceFileChanges(changes)
+      } catch {
+        appendDebugMessage("LSP workspace update failed: \(error.localizedDescription)")
+      }
+
+      for change in changes where change.kind != .deleted {
+        let key = change.uri.standardizedFileURL
+        guard !tabs.contains(where: { $0.url.standardizedFileURL == key }) else { continue }
+        if let batch = try? await backend.pullDiagnostics(for: key) {
+          applyProjectDiagnosticBatch(batch)
+        }
+      }
+    }
+
     switch event {
     case .conflict(let file):
       let url = file.url.standardizedFileURL
@@ -1458,6 +1865,7 @@ final class EditorWorkspaceController: ObservableObject {
     case .removed(_, let relativePath):
       scheduleProjectContextRefresh()
       let url = workspaceURL.appendingPathComponent(relativePath).standardizedFileURL
+      clearProjectDiagnostics(for: url)
       guard let tab = tabs.first(where: { $0.url.standardizedFileURL == url }) else { return }
       let message = "\(tab.title) was removed from disk. Save it to recreate the file."
       tab.reportExternalFileIssue(message)
@@ -1465,12 +1873,147 @@ final class EditorWorkspaceController: ObservableObject {
       appendDebugMessage("Workspace file removed: \(relativePath)")
     case .scanFailed(let message):
       appendDebugMessage("Workspace scan failed: \(message)")
-    case .added, .moved:
+    case .moved(_, let oldRelativePath, _):
+      let oldURL = workspaceURL.appendingPathComponent(oldRelativePath).standardizedFileURL
+      clearProjectDiagnostics(for: oldURL)
+      scheduleProjectContextRefresh()
+    case .added:
       scheduleProjectContextRefresh()
     case .changed, .saved, .reloaded, .restored:
-      Task { await symbolResolver.invalidate() }
+      runAuxiliaryTask("invalidate-project-symbols") { [weak self] _ in
+        guard let self else { return }
+        await self.symbolResolver.invalidate()
+      }
     case .scanned:
       break
+    }
+  }
+
+  private func workspaceFileChanges(
+    for event: SourceWorkspaceEvent,
+    backend: MultiLanguageEditorBackend
+  ) async -> [EditorWorkspaceFileChange] {
+    switch event {
+    case .added(let file):
+      return [.init(uri: file.url.standardizedFileURL, kind: .created)]
+    case .changed(let file), .saved(let file), .reloaded(let file), .conflict(let file):
+      return [.init(uri: file.url.standardizedFileURL, kind: .changed)]
+    case .moved(_, let oldRelativePath, let file):
+      return [
+        .init(
+          uri: workspaceURL.appendingPathComponent(oldRelativePath).standardizedFileURL,
+          kind: .deleted),
+        .init(uri: file.url.standardizedFileURL, kind: .created),
+      ]
+    case .removed(_, let relativePath):
+      return [
+        .init(
+          uri: workspaceURL.appendingPathComponent(relativePath).standardizedFileURL,
+          kind: .deleted)
+      ]
+    case .scanned(let report):
+      let created = await files(for: report.added, backend: backend).map {
+        EditorWorkspaceFileChange(uri: $0.url.standardizedFileURL, kind: .created)
+      }
+      let changed = await files(for: report.refreshed, backend: backend).map {
+        EditorWorkspaceFileChange(uri: $0.url.standardizedFileURL, kind: .changed)
+      }
+      return created + changed
+    case .restored(let report):
+      let created = await files(for: report.imported, backend: backend).map {
+        EditorWorkspaceFileChange(uri: $0.url.standardizedFileURL, kind: .created)
+      }
+      let changed = await files(for: report.replaced, backend: backend).map {
+        EditorWorkspaceFileChange(uri: $0.url.standardizedFileURL, kind: .changed)
+      }
+      return created + changed
+    case .scanFailed:
+      return []
+    }
+  }
+
+  private func files(
+    for ids: [SourceFileID],
+    backend: MultiLanguageEditorBackend
+  ) async -> [SourceCodeFile] {
+    var result: [SourceCodeFile] = []
+    result.reserveCapacity(ids.count)
+    for id in ids {
+      if let file = try? await backend.sourceFile(id: id) { result.append(file) }
+    }
+    return result
+  }
+
+  private func applyProjectDiagnosticBatch(_ batch: DiagnosticBatch) {
+    let url = batch.uri.standardizedFileURL
+    let aggregateKey = "__calcite_merged__"
+    var buckets = projectDiagnosticsByService[url] ?? [:]
+
+    if let serviceIdentifier = batch.serviceIdentifier {
+      buckets.removeValue(forKey: aggregateKey)
+      if batch.diagnostics.isEmpty {
+        buckets.removeValue(forKey: serviceIdentifier)
+      } else {
+        buckets[serviceIdentifier] = batch.diagnostics
+      }
+    } else {
+      let hasServiceSpecificBatch = buckets.keys.contains { $0 != aggregateKey }
+      if !hasServiceSpecificBatch {
+        if batch.diagnostics.isEmpty {
+          buckets.removeValue(forKey: aggregateKey)
+        } else {
+          buckets[aggregateKey] = batch.diagnostics
+        }
+      }
+    }
+
+    if buckets.isEmpty {
+      projectDiagnosticsByService.removeValue(forKey: url)
+      projectDiagnostics.removeValue(forKey: url)
+    } else {
+      projectDiagnosticsByService[url] = buckets
+      var seen = Set<Diagnostic>()
+      let merged = buckets.keys.sorted().flatMap { buckets[$0] ?? [] }.filter {
+        seen.insert($0).inserted
+      }
+      if merged.isEmpty {
+        projectDiagnostics.removeValue(forKey: url)
+      } else {
+        projectDiagnostics[url] = merged
+      }
+    }
+    diagnosticsRevision &+= 1
+  }
+
+  private func clearProjectDiagnostics(for url: URL) {
+    let key = url.standardizedFileURL
+    projectDiagnosticsByService.removeValue(forKey: key)
+    projectDiagnostics.removeValue(forKey: key)
+    diagnosticsRevision &+= 1
+  }
+
+  var closedDocumentDiagnostics: [EditorProjectDiagnosticGroup] {
+    let openURLs = Set(tabs.map { $0.url.standardizedFileURL })
+    return
+      projectDiagnostics
+      .filter { !openURLs.contains($0.key.standardizedFileURL) && !$0.value.isEmpty }
+      .map { EditorProjectDiagnosticGroup(url: $0.key, diagnostics: $0.value) }
+      .sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }
+  }
+
+  func openProjectDiagnostic(_ diagnostic: Diagnostic, at url: URL) {
+    runAuxiliaryTask("open-project-diagnostic") { [weak self] lease in
+      guard let self else { return }
+      await self.openDocument(at: url)
+      guard self.taskSupervisor.isCurrent(lease),
+        let tab = self.tabs.first(where: {
+          $0.url.standardizedFileURL == url.standardizedFileURL
+        })
+      else { return }
+      let snapshot = TextSnapshot(text: tab.text)
+      if let range = try? snapshot.nsRange(for: diagnostic.range) {
+        tab.updateSelection(range)
+      }
     }
   }
 
@@ -1592,11 +2135,56 @@ final class EditorWorkspaceController: ObservableObject {
     EditorLanguage.allCases.first { $0.languageIDs.contains(languageID) }
   }
 
+  private func resolvedDebugLanguage(in workspace: EditorIDEWorkspace) async -> EditorLanguage? {
+    if let activeTab,
+      let language = editorLanguage(for: activeTab.languageID),
+      workspace.serviceResult.debugAdapter(for: language) != nil
+    {
+      return language
+    }
+
+    let configuredProgram = debugConfiguration.programPath
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if !configuredProgram.isEmpty {
+      let languageID = EditorLanguageCatalog.standard.languageID(
+        for: URL(fileURLWithPath: configuredProgram, relativeTo: workspaceURL)
+      )
+      if let language = editorLanguage(for: languageID),
+        workspace.serviceResult.debugAdapter(for: language) != nil
+      {
+        return language
+      }
+    }
+
+    let projectLanguage: EditorLanguage? =
+      switch buildController.plan.projectKind {
+      case .xcode, .swiftPackage: .swift
+      case .rustCargo: .rust
+      case .goModule: .go
+      case .nodePackage: .javascript
+      case .python: .python
+      case .gradle, .maven: .java
+      case .zig: .zig
+      case .cmake, .make, .generic: nil
+      }
+    if let projectLanguage, workspace.serviceResult.debugAdapter(for: projectLanguage) != nil {
+      return projectLanguage
+    }
+
+    for file in await workspace.backend.sourceFiles() {
+      let languageID = EditorLanguageCatalog.standard.languageID(for: file.url)
+      guard let language = editorLanguage(for: languageID) else { continue }
+      if workspace.serviceResult.debugAdapter(for: language) != nil { return language }
+    }
+    return nil
+  }
+
   private func navigateToDefinition() {
-    Task { [weak self] in
+    runAuxiliaryTask("navigate-definition") { [weak self] lease in
       guard let self, let tab = self.activeTab else { return }
       do {
         var locations = try await tab.definitionsAtSelection()
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         if locations.isEmpty, let symbol = tab.symbolAtSelection {
           locations = await self.symbolResolver.definitionLocations(
             for: symbol,
@@ -1604,6 +2192,7 @@ final class EditorWorkspaceController: ObservableObject {
             inMemoryDocuments: self.openDocumentTexts
           )
         }
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         locations = uniqueSourceLocations(locations)
         guard let first = locations.first else {
           self.symbolInformation = EditorSymbolInformation(
@@ -1622,6 +2211,7 @@ final class EditorWorkspaceController: ObservableObject {
           await self.openSourceLocation(first)
         }
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.symbolInformation = EditorSymbolInformation(
           title: tab.symbolAtSelection ?? "Definition",
           markdown: "Definition lookup failed: \(error.localizedDescription)"
@@ -1631,10 +2221,11 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func navigateToReferences() {
-    Task { [weak self] in
+    runAuxiliaryTask("navigate-references") { [weak self] lease in
       guard let self, let tab = self.activeTab else { return }
       do {
         var locations = try await tab.referencesAtSelection()
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         if locations.isEmpty, let symbol = tab.symbolAtSelection {
           locations = await self.symbolResolver.referenceLocations(
             for: symbol,
@@ -1642,6 +2233,7 @@ final class EditorWorkspaceController: ObservableObject {
             inMemoryDocuments: self.openDocumentTexts
           )
         }
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         locations = uniqueSourceLocations(locations)
         guard !locations.isEmpty else {
           self.symbolInformation = EditorSymbolInformation(
@@ -1656,6 +2248,7 @@ final class EditorWorkspaceController: ObservableObject {
           locations: locations
         )
       } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
         self.symbolInformation = EditorSymbolInformation(
           title: tab.symbolAtSelection ?? "References",
           markdown: "Reference lookup failed: \(error.localizedDescription)"
@@ -1761,34 +2354,45 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func scheduleSessionPersistence() {
-    guard hasRestoredSession else { return }
-    sessionPersistenceTask?.cancel()
-    sessionPersistenceTask = Task { [weak self] in
+    guard hasRestoredSession, !isShuttingDown, !hasShutDown else { return }
+    taskSupervisor.replace(.sessionPersistence) { [weak self] lease in
       do {
         try await Task.sleep(for: .milliseconds(350))
       } catch {
         return
       }
-      guard let self, !Task.isCancelled else { return }
+      guard let self, !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
       await self.persistWorkspaceSession()
     }
   }
 
   private func persistWorkspaceSession(includeRecoveries: Bool = true) async {
-    let selectedURL = activeTab?.url
-    let recoveries =
-      includeRecoveries
-      ? tabs.compactMap { tab -> EditorSessionRecoveryInput? in
-        guard tab.isDirty else { return nil }
-        return EditorSessionRecoveryInput(
-          url: tab.url,
-          text: tab.text,
-          diskModificationTime: tab.diskModificationTime
-        )
-      } : []
+    let pendingStates = pendingRuntimeTabRestoration ?? []
+    let pendingSelectedURL = pendingRuntimeSelectedTabID.flatMap { selectedID in
+      pendingStates.first(where: { $0.id == selectedID })?.url
+    }
+    let selectedURL = activeTab?.url ?? pendingSelectedURL
+    let openURLs = tabs.map(\.url) + pendingStates.map(\.url)
+    let liveRecoveries = tabs.compactMap { tab -> EditorSessionRecoveryInput? in
+      guard tab.isDirty else { return nil }
+      return EditorSessionRecoveryInput(
+        url: tab.url,
+        text: tab.text,
+        diskModificationTime: tab.diskModificationTime
+      )
+    }
+    let pendingRecoveries = pendingStates.compactMap { state -> EditorSessionRecoveryInput? in
+      guard state.isDirty else { return nil }
+      return EditorSessionRecoveryInput(
+        url: state.url,
+        text: state.text,
+        diskModificationTime: state.diskModificationTime
+      )
+    }
+    let recoveries = includeRecoveries ? liveRecoveries + pendingRecoveries : []
     do {
       let report = try await sessionStore.save(
-        openURLs: tabs.map(\.url),
+        openURLs: openURLs,
         selectedURL: selectedURL,
         recoveredDocuments: recoveries
       )

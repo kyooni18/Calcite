@@ -6,10 +6,29 @@ import Foundation
   import Glibc
 #endif
 
+public enum DAPProcessTerminationReason: String, Hashable, Sendable {
+  case exit
+  case uncaughtSignal
+  case unknown
+}
+
+public struct DAPProcessTermination: Hashable, Sendable {
+  public let status: Int32
+  public let reason: DAPProcessTerminationReason
+  public let expected: Bool
+
+  public init(status: Int32, reason: DAPProcessTerminationReason, expected: Bool) {
+    self.status = status
+    self.reason = reason
+    self.expected = expected
+  }
+}
+
 public final class DAPProcessConnection: @unchecked Sendable {
   public let session: DAPSession
   public let standardError: AsyncStream<String>
   public let transportErrors: AsyncStream<String>
+  public let terminationEvents: AsyncStream<DAPProcessTermination>
 
   private let process: Process
   private let input: FileHandle
@@ -17,6 +36,7 @@ public final class DAPProcessConnection: @unchecked Sendable {
   private let errorOutput: FileHandle
   private let stderrContinuation: AsyncStream<String>.Continuation
   private let transportContinuation: AsyncStream<String>.Continuation
+  private let terminationContinuation: AsyncStream<DAPProcessTermination>.Continuation
   private let terminationState = TerminationState()
 
   public init(
@@ -48,10 +68,31 @@ public final class DAPProcessConnection: @unchecked Sendable {
     self.errorOutput = stderrPipe.fileHandleForReading
     (standardError, stderrContinuation) = AsyncStream.makeStream(of: String.self)
     (transportErrors, transportContinuation) = AsyncStream.makeStream(of: String.self)
+    (terminationEvents, terminationContinuation) = AsyncStream.makeStream(
+      of: DAPProcessTermination.self,
+      bufferingPolicy: .bufferingNewest(1)
+    )
     let inputHandle = self.input
     self.session = DAPSession { data in try inputHandle.write(contentsOf: data) }
 
-    process.terminationHandler = { [session] _ in
+    let terminationState = self.terminationState
+    let terminationContinuation = self.terminationContinuation
+    process.terminationHandler = { [session] process in
+      let expected = terminationState.markProcessExited()
+      let reason: DAPProcessTerminationReason =
+        switch process.terminationReason {
+        case .exit: .exit
+        case .uncaughtSignal: .uncaughtSignal
+        @unknown default: .unknown
+        }
+      terminationContinuation.yield(
+        DAPProcessTermination(
+          status: process.terminationStatus,
+          reason: reason,
+          expected: expected
+        )
+      )
+      terminationContinuation.finish()
       Task { await session.disconnect() }
     }
     try process.run()
@@ -63,14 +104,28 @@ public final class DAPProcessConnection: @unchecked Sendable {
   /// Stops the child process and all pipe readers. This method is idempotent.
   public func terminate() {
     guard terminationState.beginTermination() else { return }
-    process.terminationHandler = nil
-    if process.isRunning { process.terminate() }
+    Self.terminateProcess(process)
     try? input.close()
     try? output.close()
     try? errorOutput.close()
     Task { await session.disconnect() }
     stderrContinuation.finish()
     transportContinuation.finish()
+    // On some Foundation implementations a process explicitly terminated by the
+    // owner does not invoke its termination handler promptly. Consumers only need
+    // unexpected exits, so finishing is sufficient for the expected path.
+    terminationContinuation.finish()
+  }
+
+  private static func terminateProcess(_ process: Process) {
+    guard process.isRunning else { return }
+    #if canImport(Darwin)
+      _ = Darwin.kill(process.processIdentifier, SIGTERM)
+    #elseif canImport(Glibc)
+      _ = Glibc.kill(process.processIdentifier, SIGTERM)
+    #else
+      process.terminate()
+    #endif
   }
 
   private func startReaders() {
@@ -166,6 +221,7 @@ public final class DAPProcessConnection: @unchecked Sendable {
 private final class TerminationState: @unchecked Sendable {
   private let lock = NSLock()
   private var terminating = false
+  private var expected = false
 
   var isTerminating: Bool {
     lock.lock()
@@ -178,6 +234,16 @@ private final class TerminationState: @unchecked Sendable {
     defer { lock.unlock() }
     guard !terminating else { return false }
     terminating = true
+    expected = true
     return true
+  }
+
+  /// Returns whether the process exit was initiated by the owner.
+  func markProcessExited() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    let wasExpected = expected
+    terminating = true
+    return wasExpected
   }
 }

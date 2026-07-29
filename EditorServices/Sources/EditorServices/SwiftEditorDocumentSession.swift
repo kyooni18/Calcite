@@ -57,6 +57,9 @@ public final class SwiftEditorDocumentSession: @unchecked Sendable {
   public func resolveCompletion(_ completion: Completion) async throws -> Completion {
     try await backend.resolveCompletion(completion, in: uri)
   }
+  public func recordCompletionUsage(_ completion: Completion) async {
+    await backend.recordCompletionUsage(completion, in: uri)
+  }
   @discardableResult
   public func applyCompletion(
     _ completion: Completion,

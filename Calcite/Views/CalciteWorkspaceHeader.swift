@@ -379,6 +379,9 @@ private struct CalciteMarkdownEditorControls: View {
 
 private struct CalciteLayoutCustomizationControls: View {
   @ObservedObject var layout: MainSectionalLayoutController
+  @State private var isShowingSaveProfileAlert = false
+  @State private var isShowingRenameProfileAlert = false
+  @State private var profileName = ""
 
   var body: some View {
     HStack(spacing: 5) {
@@ -394,11 +397,62 @@ private struct CalciteLayoutCustomizationControls: View {
         .disabled(!layout.canRedo)
 
         Menu {
-          ForEach(MainSectionalLayoutPreset.allCases) { preset in
-            Button {
-              layout.applyPreset(preset)
-            } label: {
-              Label(preset.title, systemImage: preset.systemImage)
+          Section("Built-in Profiles") {
+            ForEach(layout.layoutProfiles.filter(\.isBuiltIn)) { profile in
+              Button {
+                layout.applyLayoutProfile(id: profile.id)
+              } label: {
+                Label(
+                  profile.name,
+                  systemImage: layout.activeLayoutProfileID == profile.id
+                    ? "checkmark.circle.fill"
+                    : (profile.builtInPreset?.systemImage ?? "rectangle.3.group")
+                )
+              }
+            }
+          }
+
+          let customProfiles = layout.layoutProfiles.filter { !$0.isBuiltIn }
+          if !customProfiles.isEmpty {
+            Section("Custom Profiles") {
+              ForEach(customProfiles) { profile in
+                Button {
+                  layout.applyLayoutProfile(id: profile.id)
+                } label: {
+                  Label(
+                    profile.name,
+                    systemImage: layout.activeLayoutProfileID == profile.id
+                      ? "checkmark.circle.fill"
+                      : "rectangle.3.group.bubble"
+                  )
+                }
+              }
+            }
+          }
+
+          Divider()
+          Button("Save Current Layout as Profile", systemImage: "plus.rectangle.on.rectangle") {
+            profileName = ""
+            isShowingSaveProfileAlert = true
+          }
+          if let activeProfile = layout.activeLayoutProfile {
+            Button("Duplicate Active Profile", systemImage: "plus.square.on.square") {
+              layout.duplicateLayoutProfile(id: activeProfile.id)
+            }
+            if !activeProfile.isBuiltIn {
+              Button("Rename Active Profile", systemImage: "pencil") {
+                profileName = activeProfile.name
+                isShowingRenameProfileAlert = true
+              }
+
+              Button("Update Active Profile", systemImage: "square.and.arrow.down") {
+                layout.updateActiveLayoutProfile()
+              }
+              .disabled(!layout.isActiveLayoutProfileModified)
+
+              Button("Delete Active Profile", systemImage: "trash", role: .destructive) {
+                layout.deleteLayoutProfile(id: activeProfile.id)
+              }
             }
           }
           Divider()
@@ -406,7 +460,10 @@ private struct CalciteLayoutCustomizationControls: View {
             layout.reset()
           }
         } label: {
-          Label("Layout Presets", systemImage: "rectangle.3.group")
+          Label(
+            layout.activeLayoutProfile?.name ?? "Layout Profiles",
+            systemImage: "rectangle.3.group"
+          )
         }
         .menuStyle(.borderlessButton)
       }
@@ -427,5 +484,20 @@ private struct CalciteLayoutCustomizationControls: View {
     .buttonStyle(.plain)
     .labelStyle(.iconOnly)
     .transition(.opacity.combined(with: .move(edge: .trailing)))
+    .alert("Save Layout Profile", isPresented: $isShowingSaveProfileAlert) {
+      TextField("Profile name", text: $profileName)
+      Button("Cancel", role: .cancel) {}
+      Button("Save") { layout.saveCurrentLayoutProfile(named: profileName) }
+    } message: {
+      Text("Save the current section arrangement and divider sizes.")
+    }
+    .alert("Rename Layout Profile", isPresented: $isShowingRenameProfileAlert) {
+      TextField("Profile name", text: $profileName)
+      Button("Cancel", role: .cancel) {}
+      Button("Rename") {
+        guard let profile = layout.activeLayoutProfile else { return }
+        layout.renameLayoutProfile(id: profile.id, to: profileName)
+      }
+    }
   }
 }

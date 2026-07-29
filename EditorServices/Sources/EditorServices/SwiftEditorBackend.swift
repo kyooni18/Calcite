@@ -215,6 +215,7 @@ public final class SwiftEditorBackend: @unchecked Sendable {
   private let diagnosticBroadcaster: DiagnosticBroadcaster
   private var diagnosticTask: Task<Void, Never>?
   private var languageServerMessageTask: Task<Void, Never>?
+  private let lifetimeTaskStore = BackendLifetimeTaskStore()
   private let debugEventContinuation: AsyncStream<DAPEvent>.Continuation
   private let debugStandardErrorContinuation: AsyncStream<String>.Continuation
   private let debugTransportErrorContinuation: AsyncStream<String>.Continuation
@@ -331,6 +332,7 @@ public final class SwiftEditorBackend: @unchecked Sendable {
   deinit {
     diagnosticTask?.cancel()
     languageServerMessageTask?.cancel()
+    lifetimeTaskStore.cancelAll()
     diagnosticContinuation.finish()
     languageServerMessageContinuation.finish()
     let broadcaster = diagnosticBroadcaster
@@ -429,6 +431,11 @@ public final class SwiftEditorBackend: @unchecked Sendable {
         serviceIdentifier: "sourcekit-lsp",
         to: backend
       )
+      forwardTermination(
+        connection.terminationEvents,
+        serviceIdentifier: "sourcekit-lsp",
+        to: backend
+      )
       do {
         if configuration.automaticallyApplyServerWorkspaceEdits {
           await connection.service.setWorkspaceEditHandler(
@@ -458,9 +465,9 @@ public final class SwiftEditorBackend: @unchecked Sendable {
       serviceIdentifier: String,
       to backend: SwiftEditorBackend
     ) {
-      Task { [weak backend] in
+      let task = Task { [weak backend] in
         for await line in stream {
-          guard let backend else { return }
+          guard let backend, !Task.isCancelled else { return }
           backend.reportLanguageServerMessage(
             LanguageServerMessage(
               kind: .log,
@@ -470,7 +477,31 @@ public final class SwiftEditorBackend: @unchecked Sendable {
           )
         }
       }
+      backend.retainLifetimeTask(task)
     }
+
+    private static func forwardTermination(
+      _ stream: AsyncStream<LSPProcessTermination>,
+      serviceIdentifier: String,
+      to backend: SwiftEditorBackend
+    ) {
+      let task = Task { [weak backend] in
+        for await event in stream {
+          guard let backend, !Task.isCancelled, !event.expected else { return }
+          backend.reportLanguageServerMessage(
+            LanguageServerMessage(
+              kind: .error,
+              message:
+                "Language server process terminated unexpectedly "
+                + "(reason: \(event.reason.rawValue), status: \(event.status)).",
+              serviceIdentifier: serviceIdentifier
+            )
+          )
+        }
+      }
+      backend.retainLifetimeTask(task)
+    }
+
   #endif
 
   // MARK: - Source workspace
@@ -478,6 +509,10 @@ public final class SwiftEditorBackend: @unchecked Sendable {
   /// Subscribes to source-tree changes. Each caller receives an independent stream.
   func reportLanguageServerMessage(_ message: LanguageServerMessage) {
     languageServerMessageContinuation.yield(message)
+  }
+
+  func retainLifetimeTask(_ task: Task<Void, Never>) {
+    lifetimeTaskStore.insert(task)
   }
 
   public func sourceWorkspaceEvents() async -> AsyncStream<SourceWorkspaceEvent> {
@@ -948,6 +983,10 @@ public final class SwiftEditorBackend: @unchecked Sendable {
     try await runtime.resolveCompletion(completion, in: uri)
   }
 
+  public func recordCompletionUsage(_ completion: Completion, in uri: URL) async {
+    await runtime.recordCompletionUsage(completion, in: uri)
+  }
+
   @discardableResult
   public func applyCompletion(
     _ completion: Completion,
@@ -1035,6 +1074,21 @@ public final class SwiftEditorBackend: @unchecked Sendable {
 
   public func documentSymbols(in uri: URL) async throws -> [EditorDocumentSymbol] {
     try await runtime.documentSymbols(in: uri)
+  }
+
+  public func workspaceSymbols(matching query: String) async throws -> [EditorWorkspaceSymbol] {
+    try await runtime.workspaceSymbols(matching: query)
+  }
+
+  public func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {
+    try await runtime.notifyWorkspaceFileChanges(changes)
+  }
+
+  public func pullDiagnostics(
+    for uri: URL,
+    previousResultID: String? = nil
+  ) async throws -> DiagnosticBatch {
+    try await runtime.pullDiagnostics(for: uri, previousResultID: previousResultID)
   }
 
   public func codeActions(
@@ -1294,11 +1348,47 @@ public final class SwiftEditorBackend: @unchecked Sendable {
 
   /// Closes documents, disconnects the debugger, and shuts down the language server.
   public func shutdown() async throws {
-    defer {
+    do {
+      try await runtime.shutdown()
+    } catch {
       languageServerMessageTask?.cancel()
+      await lifetimeTaskStore.cancelAllAndWait()
       languageServerMessageContinuation.finish()
+      throw error
     }
-    try await runtime.shutdown()
+    languageServerMessageTask?.cancel()
+    await lifetimeTaskStore.cancelAllAndWait()
+    languageServerMessageContinuation.finish()
+  }
+}
+
+private final class BackendLifetimeTaskStore: @unchecked Sendable {
+  private let lock = NSLock()
+  private var tasks: [Task<Void, Never>] = []
+
+  func insert(_ task: Task<Void, Never>) {
+    lock.lock()
+    tasks.append(task)
+    lock.unlock()
+  }
+
+  func cancelAll() {
+    let pending = takeAll()
+    for task in pending { task.cancel() }
+  }
+
+  func cancelAllAndWait() async {
+    let pending = takeAll()
+    for task in pending { task.cancel() }
+    for task in pending { await task.value }
+  }
+
+  private func takeAll() -> [Task<Void, Never>] {
+    lock.lock()
+    let pending = tasks
+    tasks.removeAll(keepingCapacity: false)
+    lock.unlock()
+    return pending
   }
 }
 
@@ -1369,6 +1459,7 @@ private actor Runtime {
   private var debugEventTask: Task<Void, Never>?
   private var debugStandardErrorTask: Task<Void, Never>?
   private var debugTransportErrorTask: Task<Void, Never>?
+  private var debugTerminationTask: Task<Void, Never>?
   private var lifecycle = Lifecycle.active
   private var shutdownResult: Result<Void, any Error>?
   private var shutdownWaiters: [CheckedContinuation<Void, any Error>] = []
@@ -2360,6 +2451,12 @@ private actor Runtime {
     try await (try await requireDocument(uri)).resolveCompletion(completion)
   }
 
+  func recordCompletionUsage(_ completion: Completion, in uri: URL) async {
+    guard let document = try? await requireDocument(uri) else { return }
+    let documentLanguageID = await document.languageID
+    completionUsageHistory.record(completion, languageID: documentLanguageID)
+  }
+
   func applyCompletion(
     _ completion: Completion, in uri: URL, at position: TextPosition,
     replacing replacementRange: EditorTextRange?, snippetVariables: [String: String]
@@ -2368,56 +2465,15 @@ private actor Runtime {
     let resolved =
       completion.resolutionID == nil ? completion : try await document.resolveCompletion(completion)
     let oldSnapshot = await document.snapshot
-    let plan = try CompletionUtilities.applicationPlan(
-      for: resolved, in: oldSnapshot, at: position,
-      replacing: replacementRange, snippetVariables: snippetVariables
+    let planned = try CompletionUtilities.plannedApplication(
+      for: resolved,
+      in: oldSnapshot,
+      at: position,
+      replacing: replacementRange,
+      snippetVariables: snippetVariables
     )
-    let primaryNSRange = try oldSnapshot.nsRange(for: plan.primaryRange)
-    var insertionOffset = primaryNSRange.location
-    for edit in plan.edits.dropFirst() {
-      let range = try oldSnapshot.nsRange(for: edit.range)
-      let precedes =
-        range.location < primaryNSRange.location && NSMaxRange(range) <= primaryNSRange.location
-      let atStart =
-        primaryNSRange.length > 0 && range.location == primaryNSRange.location && range.length == 0
-      if precedes || atStart {
-        let (updated, overflow) = insertionOffset.addingReportingOverflow(
-          edit.replacement.utf16.count - range.length)
-        guard !overflow, updated >= 0 else {
-          throw TextBufferError.invalidUTF16Offset(insertionOffset)
-        }
-        insertionOffset = updated
-      }
-    }
-    var preview = TextBuffer(text: oldSnapshot.text, version: oldSnapshot.version)
-    _ = try preview.apply(plan.edits)
-    let previewSnapshot = preview.snapshot
-    let insertedStart = try previewSnapshot.position(atUTF16Offset: insertionOffset)
-    let (insertedEndOffset, insertedOverflow) = insertionOffset.addingReportingOverflow(
-      plan.expansion.text.utf16.count)
-    guard !insertedOverflow else { throw TextBufferError.invalidUTF16Offset(insertionOffset) }
-    let insertedEnd = try previewSnapshot.position(atUTF16Offset: insertedEndOffset)
-    let tabStops = try plan.expansion.tabStops.map { stop in
-      CompletionTabStop(
-        index: stop.index,
-        ranges: try stop.ranges.map { range in
-          let (start, o1) = insertionOffset.addingReportingOverflow(range.location)
-          let (end, o2) = insertionOffset.addingReportingOverflow(NSMaxRange(range))
-          guard !o1, !o2 else { throw TextBufferError.invalidUTF16Offset(insertionOffset) }
-          return EditorTextRange(
-            start: try previewSnapshot.position(atUTF16Offset: start),
-            end: try previewSnapshot.position(atUTF16Offset: end)
-          )
-        }, choices: stop.choices)
-    }
-    let (cursorOffset, cursorOverflow) = insertionOffset.addingReportingOverflow(
-      plan.expansion.finalCursorUTF16Offset)
-    guard !cursorOverflow else { throw TextBufferError.invalidUTF16Offset(insertionOffset) }
-    let finalCursor = try previewSnapshot.position(atUTF16Offset: cursorOffset)
-    let selection =
-      tabStops.first?.ranges.first ?? EditorTextRange(start: finalCursor, end: finalCursor)
     let documentLanguageID = await document.languageID
-    let applied = try await document.apply(plan.edits)
+    let applied = try await document.apply(planned.edits)
     do {
       _ = try await sourceWorkspace.synchronizeOpenDocument(
         at: uri,
@@ -2432,10 +2488,13 @@ private actor Runtime {
     }
     completionUsageHistory.record(resolved, languageID: documentLanguageID)
     return CompletionApplicationResult(
-      appliedEdits: applied, snapshot: await document.snapshot,
-      insertedRange: EditorTextRange(start: insertedStart, end: insertedEnd),
-      tabStops: tabStops, initialSelection: selection, finalCursor: finalCursor,
-      command: resolved.command
+      appliedEdits: applied,
+      snapshot: await document.snapshot,
+      insertedRange: planned.insertedRange,
+      tabStops: planned.tabStops,
+      initialSelection: planned.initialSelection,
+      finalCursor: planned.finalCursor,
+      command: planned.command
     )
   }
 
@@ -2516,6 +2575,29 @@ private actor Runtime {
 
   func documentSymbols(in uri: URL) async throws -> [EditorDocumentSymbol] {
     try await (try await requireDocument(uri)).documentSymbols()
+  }
+
+  func workspaceSymbols(matching query: String) async throws -> [EditorWorkspaceSymbol] {
+    try ensureActive()
+    guard let languageService else {
+      throw LanguageFeatureError.unsupported("workspace/symbol")
+    }
+    return try await languageService.workspaceSymbols(query: query)
+  }
+
+  func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {
+    try ensureActive()
+    guard let languageService else { return }
+    try await languageService.notifyWorkspaceFileChanges(changes)
+  }
+
+  func pullDiagnostics(for uri: URL, previousResultID: String?) async throws -> DiagnosticBatch {
+    try ensureActive()
+    guard let languageService else {
+      throw LanguageFeatureError.unsupported("textDocument/diagnostic")
+    }
+    return try await languageService.pullDiagnostics(
+      uri: documentKey(uri), previousResultID: previousResultID)
   }
 
   func codeActions(
@@ -2715,6 +2797,14 @@ private actor Runtime {
         }
         debugTransportErrorTask = Task {
           for await error in connection.transportErrors { transportErrorContinuation.yield(error) }
+        }
+        debugTerminationTask = Task {
+          for await termination in connection.terminationEvents {
+            guard !termination.expected else { continue }
+            transportErrorContinuation.yield(
+              "DAP process terminated unexpectedly (reason: \(termination.reason.rawValue), status: \(termination.status))."
+            )
+          }
         }
       }
       return capabilities
@@ -2927,9 +3017,11 @@ private actor Runtime {
     debugEventTask?.cancel()
     debugStandardErrorTask?.cancel()
     debugTransportErrorTask?.cancel()
+    debugTerminationTask?.cancel()
     debugEventTask = nil
     debugStandardErrorTask = nil
     debugTransportErrorTask = nil
+    debugTerminationTask = nil
     debugConnection?.terminate()
     debugConnection = nil
     debugClient = nil

@@ -121,9 +121,7 @@ actor EditorWorkspaceSessionStore {
 
   func clear() throws {
     state = StoredState()
-    if FileManager.default.fileExists(atPath: storageURL.path) {
-      try FileManager.default.removeItem(at: storageURL)
-    }
+    try CalciteStateStorage.remove(at: storageURL)
   }
 
   func url(forRelativePath path: String) -> URL? {
@@ -152,10 +150,11 @@ actor EditorWorkspaceSessionStore {
   }
 
   private func persist() throws {
-    let directory = storageURL.deletingLastPathComponent()
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let data = try JSONEncoder.sessionEncoder.encode(state)
-    try data.write(to: storageURL, options: [.atomic])
+    try CalciteStateStorage.save(
+      state,
+      to: storageURL,
+      encoder: JSONEncoder.sessionEncoder
+    )
   }
 
   private func sanitize(_ restoration: EditorWorkspaceRestoration) -> EditorWorkspaceRestoration {
@@ -176,7 +175,9 @@ actor EditorWorkspaceSessionStore {
 
   private func uniqueRelativePaths(_ urls: [URL]) -> [String] {
     var seen: Set<String> = []
-    return urls.compactMap(relativePath).filter { seen.insert($0).inserted }.prefix(Self.maximumDocumentCount).map {
+    return urls.compactMap(relativePath).filter { seen.insert($0).inserted }.prefix(
+      Self.maximumDocumentCount
+    ).map {
       $0
     }
   }
@@ -190,32 +191,16 @@ actor EditorWorkspaceSessionStore {
   }
 
   nonisolated private static func readState(from url: URL) -> StoredState {
-    guard let data = try? Data(contentsOf: url),
-      data.count <= maximumTotalRecoveryBytes + 1_000_000,
-      let value = try? JSONDecoder.sessionDecoder.decode(StoredState.self, from: data)
-    else { return StoredState() }
-    return value
+    CalciteStateStorage.load(
+      StoredState.self,
+      from: url,
+      maximumBytes: maximumTotalRecoveryBytes + 1_000_000,
+      decoder: JSONDecoder.sessionDecoder
+    ) ?? StoredState()
   }
 
   private static func storageURL(for workspaceURL: URL) -> URL {
-    let applicationSupport =
-      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
-        "Library/Application Support", isDirectory: true)
-    return
-      applicationSupport
-      .appendingPathComponent("Calcite/Workspaces", isDirectory: true)
-      .appendingPathComponent(stableIdentifier(workspaceURL.path), isDirectory: true)
-      .appendingPathComponent("session.json")
-  }
-
-  private static func stableIdentifier(_ value: String) -> String {
-    var hash: UInt64 = 14_695_981_039_346_656_037
-    for byte in value.utf8 {
-      hash ^= UInt64(byte)
-      hash &*= 1_099_511_628_211
-    }
-    return String(hash, radix: 16)
+    CalciteStateStorage.workspaceURL(workspaceURL, filename: "session.json")
   }
 
   nonisolated private static func fingerprint(_ data: Data) -> String {

@@ -363,6 +363,44 @@ public enum EditorSymbolKind: Int, Hashable, Sendable {
   case object, key, null, enumMember, `struct`, event, `operator`, typeParameter
 }
 
+public struct EditorWorkspaceSymbol: Hashable, Sendable {
+  public var name: String
+  public var kind: EditorSymbolKind
+  public var location: SourceLocation?
+  public var containerName: String?
+  public var serviceIdentifier: String?
+
+  public init(
+    name: String,
+    kind: EditorSymbolKind,
+    location: SourceLocation? = nil,
+    containerName: String? = nil,
+    serviceIdentifier: String? = nil
+  ) {
+    self.name = name
+    self.kind = kind
+    self.location = location
+    self.containerName = containerName
+    self.serviceIdentifier = serviceIdentifier
+  }
+}
+
+public enum EditorWorkspaceFileChangeKind: Int, Hashable, Sendable {
+  case created = 1
+  case changed = 2
+  case deleted = 3
+}
+
+public struct EditorWorkspaceFileChange: Hashable, Sendable {
+  public var uri: URL
+  public var kind: EditorWorkspaceFileChangeKind
+
+  public init(uri: URL, kind: EditorWorkspaceFileChangeKind) {
+    self.uri = uri
+    self.kind = kind
+  }
+}
+
 public struct EditorDocumentSymbol: Hashable, Sendable {
   public var name: String
   public var detail: String?
@@ -486,6 +524,9 @@ public protocol LanguageIntelligenceProviding: Sendable {
   func semanticHighlights(uri: URL) async throws -> [SemanticHighlight]
   func signatureHelp(uri: URL, at position: TextPosition) async throws -> EditorSignatureHelp?
   func documentSymbols(uri: URL) async throws -> [EditorDocumentSymbol]
+  func workspaceSymbols(query: String) async throws -> [EditorWorkspaceSymbol]
+  func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws
+  func pullDiagnostics(uri: URL, previousResultID: String?) async throws -> DiagnosticBatch
   func codeActions(uri: URL, range: EditorTextRange, diagnostics: [Diagnostic], only: [String]?)
     async throws -> [EditorCodeAction]
   func inlayHints(uri: URL, range: EditorTextRange) async throws -> [EditorInlayHint]
@@ -531,6 +572,15 @@ extension LanguageIntelligenceProviding {
   }
   public func documentSymbols(uri: URL) async throws -> [EditorDocumentSymbol] {
     throw LanguageFeatureError.unsupported("textDocument/documentSymbol")
+  }
+  public func workspaceSymbols(query: String) async throws -> [EditorWorkspaceSymbol] {
+    throw LanguageFeatureError.unsupported("workspace/symbol")
+  }
+  public func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {}
+  public func pullDiagnostics(uri: URL, previousResultID: String? = nil) async throws
+    -> DiagnosticBatch
+  {
+    throw LanguageFeatureError.unsupported("textDocument/diagnostic")
   }
   public func codeActions(
     uri: URL, range: EditorTextRange, diagnostics: [Diagnostic] = [], only: [String]? = nil

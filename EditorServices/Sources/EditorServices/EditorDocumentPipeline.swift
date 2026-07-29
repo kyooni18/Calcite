@@ -230,6 +230,37 @@ public actor EditorDocumentPipeline {
     return try await session.resolveCompletion(completion)
   }
 
+  public func planCompletion(
+    _ completion: Completion,
+    atUTF16Offset offset: Int,
+    replacing replacementRange: EditorTextRange? = nil,
+    snippetVariables: [String: String] = [:]
+  ) async throws -> PlannedCompletionApplication {
+    try ensureOpen(operation: .completion)
+    do {
+      let current = try await session.snapshot()
+      let position = try current.position(atUTF16Offset: offset)
+      let resolved =
+        completion.resolutionID == nil
+        ? completion
+        : try await session.resolveCompletion(completion)
+      return try CompletionUtilities.plannedApplication(
+        for: resolved,
+        in: current,
+        at: position,
+        replacing: replacementRange,
+        snippetVariables: snippetVariables
+      )
+    } catch {
+      publishFailure(.completion, error)
+      throw error
+    }
+  }
+
+  public func recordCompletionUsage(_ completion: Completion) async {
+    await session.recordCompletionUsage(completion)
+  }
+
   @discardableResult
   public func applyCompletion(
     _ completion: Completion,
@@ -346,6 +377,18 @@ public actor EditorDocumentPipeline {
       at: current.position(atUTF16Offset: offset),
       to: newName
     )
+  }
+
+  public func formattingEdits(
+    options: EditorFormattingOptions = .init()
+  ) async throws -> [TextEdit] {
+    try ensureOpen(operation: .edit)
+    do {
+      return try await session.formattingEdits(options: options)
+    } catch {
+      publishFailure(.edit, error)
+      throw error
+    }
   }
 
   @discardableResult

@@ -21,6 +21,26 @@ private struct EditorBatchEdit: Sendable {
   var replacement: String
 }
 
+private enum EditorTabSynchronizationError: LocalizedError {
+  case invalidPlannedEdit
+  case backendTextMismatch
+  case staleAsyncResult
+  case documentChangedWhileSaving
+
+  var errorDescription: String? {
+    switch self {
+    case .invalidPlannedEdit:
+      return "The editor rejected an invalid asynchronous edit plan."
+    case .backendTextMismatch:
+      return "The editor backend returned text that did not match the queued edit."
+    case .staleAsyncResult:
+      return "An asynchronous editor result was discarded because the document changed."
+    case .documentChangedWhileSaving:
+      return "The document kept changing while it was being saved."
+    }
+  }
+}
+
 private enum EditorCompletionRequestIntent {
   case automatic
   case triggered(String)
@@ -56,6 +76,7 @@ final class EditorTab: ObservableObject, Identifiable {
   @Published private(set) var completions: [Completion] = []
   @Published private(set) var selectedCompletionIndex = 0
   @Published private(set) var isDirty = false
+  @Published private(set) var diskState: EditorDocumentDiskState = .synchronized
   @Published private(set) var errorMessage: String?
   @Published private(set) var breakpoints: Set<Int> = []
   @Published var selectedRange = NSRange(location: 0, length: 0)
@@ -67,9 +88,15 @@ final class EditorTab: ObservableObject, Identifiable {
   private var serviceDiagnostics: [Diagnostic]
   private var buildDiagnostics: [Diagnostic] = []
   private var updateTask: Task<Void, Never>?
-  private var editTask: Task<Void, Never>?
+  private let mutationQueue = EditorDocumentMutationQueue()
   private var completionTask: Task<Void, Never>?
+  private var analysisRefreshTask: Task<Void, Never>?
+  private var diagnosticPublicationTask: Task<Void, Never>?
   private var pendingEditCount = 0
+  private var lifecycleGeneration: UInt64 = 0
+  private var isClosing = false
+  private var isClosed = false
+  private var closeWaiters: [CheckedContinuation<Void, Never>] = []
   private var editEpoch = 0
   private var completionGeneration = 0
   private var diagnosticUpdateGeneration = 0
@@ -117,8 +144,9 @@ final class EditorTab: ObservableObject, Identifiable {
 
   isolated deinit {
     updateTask?.cancel()
-    editTask?.cancel()
     completionTask?.cancel()
+    analysisRefreshTask?.cancel()
+    diagnosticPublicationTask?.cancel()
   }
 
   static func open(
@@ -153,12 +181,21 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func reportExternalFileIssue(_ message: String) {
+    diskState = isDirty ? .conflicted : .diskModified
     errorMessage = message
   }
 
   func applyDiskReload() async throws {
-    await editTask?.value
+    guard !isClosing, !isClosed else { return }
+    await mutationQueue.waitForIdle()
+    let requestedRevision = textRevision
+    let lifecycle = lifecycleGeneration
     let analysis = try await pipeline.refreshAnalysis()
+    guard requestedRevision == textRevision, lifecycle == lifecycleGeneration,
+      !isClosing, !isClosed
+    else {
+      throw EditorTabSynchronizationError.staleAsyncResult
+    }
     persistedText = analysis.snapshot.text
     replaceText(with: analysis.snapshot.text)
     advancePresentationRevision()
@@ -174,6 +211,7 @@ final class EditorTab: ObservableObject, Identifiable {
     clearSnippetStops()
     diskModificationTime = Self.modificationTime(for: url)
     setDirty(false)
+    diskState = .synchronized
     errorMessage = nil
     onContentStateChange?()
   }
@@ -182,6 +220,7 @@ final class EditorTab: ObservableObject, Identifiable {
     diskModificationTime = Self.modificationTime(for: url)
     persistedText = text
     setDirty(false)
+    diskState = .synchronized
     errorMessage = nil
     onContentStateChange?()
   }
@@ -209,6 +248,7 @@ final class EditorTab: ObservableObject, Identifiable {
     selectionAfter: NSRange,
     suggestionDelay: Double
   ) {
+    guard !isClosing, !isClosed else { return }
     let previousSnapshot = TextSnapshot(text: text)
     let resultingSnapshot = TextSnapshot(text: resultingText)
     syntaxHighlights = EditorHighlightRangeMapper.remap(
@@ -255,11 +295,12 @@ final class EditorTab: ObservableObject, Identifiable {
     publishDiagnostics()
     pendingEditCount += 1
 
-    let previous = editTask
     let epoch = editEpoch
-    editTask = Task { [weak self, pipeline] in
-      await previous?.value
-      guard let self else { return }
+    let lifecycle = lifecycleGeneration
+    mutationQueue.enqueue { [weak self, pipeline] _ in
+      guard let self, !Task.isCancelled,
+        lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed
+      else { return }
       guard epoch == self.editEpoch else {
         self.pendingEditCount = max(0, self.pendingEditCount - 1)
         return
@@ -268,7 +309,9 @@ final class EditorTab: ObservableObject, Identifiable {
         let applied = try await pipeline.applyUTF16Edit(range, replacement: replacement)
         self.pendingEditCount = max(0, self.pendingEditCount - 1)
         if self.pendingEditCount == 0, self.text != applied.newSnapshot.text {
-          self.replaceText(with: applied.newSnapshot.text)
+          self.editEpoch &+= 1
+          await self.recoverFromBackendFailure(EditorTabSynchronizationError.backendTextMismatch)
+          return
         }
         self.errorMessage = nil
       } catch {
@@ -295,6 +338,7 @@ final class EditorTab: ObservableObject, Identifiable {
     selectionAfter: NSRange,
     suggestionDelay: Double
   ) {
+    guard !isClosing, !isClosed else { return }
     let expectedRevision = transaction.baseRevision?.value
     guard expectedRevision == nil || expectedRevision == textRevision else {
       errorMessage = "Vim edit was rejected because the document revision changed."
@@ -389,12 +433,13 @@ final class EditorTab: ObservableObject, Identifiable {
       return
     }
 
-    let previous = editTask
     let epoch = editEpoch
+    let lifecycle = lifecycleGeneration
     let expectedText = transaction.afterState.text
-    editTask = Task { [weak self, pipeline] in
-      await previous?.value
-      guard let self else { return }
+    mutationQueue.enqueue { [weak self, pipeline] _ in
+      guard let self, !Task.isCancelled,
+        lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed
+      else { return }
       guard epoch == self.editEpoch else {
         self.pendingEditCount = max(0, self.pendingEditCount - 1)
         return
@@ -404,7 +449,9 @@ final class EditorTab: ObservableObject, Identifiable {
         self.pendingEditCount = max(0, self.pendingEditCount - 1)
         let authoritative = applied.last?.newSnapshot.text ?? expectedText
         if self.pendingEditCount == 0, self.text != authoritative {
-          self.replaceText(with: authoritative)
+          self.editEpoch &+= 1
+          await self.recoverFromBackendFailure(EditorTabSynchronizationError.backendTextMismatch)
+          return
         }
         self.errorMessage = nil
       } catch {
@@ -446,30 +493,121 @@ final class EditorTab: ObservableObject, Identifiable {
     return value
   }
 
+  private func batchEdits(
+    from edits: [TextEdit],
+    snapshot: TextSnapshot
+  ) throws -> [EditorBatchEdit] {
+    try edits.map { edit in
+      EditorBatchEdit(
+        range: try snapshot.nsRange(for: edit.range),
+        replacement: edit.replacement
+      )
+    }
+  }
+
+  private func applyLocalBatchEdits(
+    _ edits: [EditorBatchEdit],
+    finalText: String,
+    selectionAfter: NSRange,
+    clearExistingSnippetStops: Bool
+  ) {
+    let baseSnapshot = TextSnapshot(text: text)
+    guard Self.applying(edits, to: text) == finalText else { return }
+    if clearExistingSnippetStops { clearSnippetStops() }
+
+    var workingText = text
+    var workingSnapshot = baseSnapshot
+    for edit in edits.sorted(by: Self.batchEditOrder) {
+      let nextText = (workingText as NSString).replacingCharacters(
+        in: edit.range,
+        with: edit.replacement
+      )
+      let nextSnapshot = TextSnapshot(text: nextText)
+      syntaxHighlights = EditorHighlightRangeMapper.remap(
+        syntaxHighlights,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      semanticHighlights = EditorHighlightRangeMapper.remap(
+        semanticHighlights,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      buildDiagnostics = EditorHighlightRangeMapper.remap(
+        buildDiagnostics,
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      remapBreakpoints(
+        editedRange: edit.range,
+        replacementUTF16Length: edit.replacement.utf16.count,
+        from: workingSnapshot,
+        to: nextSnapshot
+      )
+      if !clearExistingSnippetStops {
+        updateSnippetStops(
+          editedRange: edit.range,
+          replacementUTF16Length: edit.replacement.utf16.count
+        )
+      }
+      workingText = nextText
+      workingSnapshot = nextSnapshot
+    }
+
+    serviceDiagnostics = []
+    replaceText(with: finalText)
+    let length = (finalText as NSString).length
+    let location = min(max(0, selectionAfter.location), length)
+    let selectionLength = min(max(0, selectionAfter.length), length - location)
+    selectedRange = NSRange(location: location, length: selectionLength)
+    updateDirtyState(for: finalText)
+    onContentStateChange?()
+    completions = []
+    selectedCompletionIndex = 0
+    diagnosticUpdateGeneration &+= 1
+    diagnosticPublicationTask?.cancel()
+    publishDiagnostics()
+    pendingEditCount += 1
+  }
+
   private func requestCompletions(
     atUTF16Offset offset: Int,
     delay: Double,
     intent: EditorCompletionRequestIntent
   ) {
-    guard !isMarkdownDocument else {
+    guard !isClosing, !isClosed, !isMarkdownDocument else {
       dismissCompletions()
       return
     }
     completionGeneration &+= 1
     let generation = completionGeneration
+    let requestedRevision = textRevision
+    let lifecycle = lifecycleGeneration
     completionOffset = offset
     completionTask?.cancel()
     completionTask = Task { [weak self, pipeline] in
-      guard let self else { return }
+      guard let self, lifecycle == self.lifecycleGeneration,
+        !self.isClosing, !self.isClosed
+      else { return }
       do {
         try await Task.sleep(for: .seconds(max(0, delay)))
-        await self.editTask?.value
-        guard !Task.isCancelled, generation == self.completionGeneration else { return }
+        await self.mutationQueue.waitForIdle()
+        guard !Task.isCancelled, generation == self.completionGeneration,
+          requestedRevision == self.textRevision, self.pendingEditCount == 0
+        else { return }
         let localOrTriggered = try await pipeline.completions(
           atUTF16Offset: offset,
           invocation: intent.invocation
         )
-        guard generation == self.completionGeneration else { return }
+        guard generation == self.completionGeneration,
+          requestedRevision == self.textRevision, self.pendingEditCount == 0
+        else { return }
         self.publishCompletions(
           self.mergingSnippetCompletions(localOrTriggered, atUTF16Offset: offset)
         )
@@ -478,11 +616,15 @@ final class EditorTab: ObservableObject, Identifiable {
           self.identifierPrefixLength(atUTF16Offset: offset) >= 3
         else { return }
         try await Task.sleep(for: .milliseconds(360))
-        guard !Task.isCancelled, generation == self.completionGeneration else { return }
+        guard !Task.isCancelled, generation == self.completionGeneration,
+          requestedRevision == self.textRevision, self.pendingEditCount == 0
+        else { return }
         if let enriched = try? await pipeline.completions(
           atUTF16Offset: offset,
           invocation: .explicit
-        ), generation == self.completionGeneration {
+        ), generation == self.completionGeneration,
+          requestedRevision == self.textRevision, self.pendingEditCount == 0
+        {
           self.publishCompletions(
             self.mergingSnippetCompletions(enriched, atUTF16Offset: offset)
           )
@@ -498,37 +640,85 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func applyCompletion(_ completion: Completion) {
+    guard !isClosing, !isClosed else { return }
     completionGeneration &+= 1
     completionTask?.cancel()
     let offset = completionOffset
-    let previous = editTask
-    editTask = Task { [weak self, pipeline] in
-      await previous?.value
-      guard let self else { return }
+    let baseRevision = textRevision
+    let epoch = editEpoch
+    let lifecycle = lifecycleGeneration
+    mutationQueue.enqueue { [weak self, pipeline] _ in
+      guard let self, !Task.isCancelled,
+        lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed,
+        epoch == self.editEpoch, baseRevision == self.textRevision
+      else { return }
+
+      var appliedLocally = false
+      var pendingCountReleased = false
       do {
-        let result = try await pipeline.applyCompletion(
+        let planned = try await pipeline.planCompletion(
           completion,
           atUTF16Offset: offset
         )
-        self.replaceText(with: result.snapshot.text)
-        self.selectedRange =
-          (try? result.snapshot.nsRange(for: result.initialSelection))
-          ?? NSRange(location: min(offset, result.snapshot.utf16Count), length: 0)
-        self.installSnippetStops(from: result)
-        self.completions = []
-        self.selectedCompletionIndex = 0
-        self.advancePresentationRevision()
-        self.syntaxHighlights = []
-        self.semanticHighlights = []
-        self.serviceDiagnostics = []
-        self.publishDiagnostics()
-        self.updateDirtyState(for: result.snapshot.text)
-        self.onContentStateChange?()
+        guard !Task.isCancelled,
+          lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed,
+          epoch == self.editEpoch, baseRevision == self.textRevision
+        else { return }
+
+        let baseSnapshot = TextSnapshot(text: self.text)
+        let batchEdits = try self.batchEdits(from: planned.edits, snapshot: baseSnapshot)
+        guard Self.applying(batchEdits, to: self.text) == planned.snapshot.text else {
+          throw EditorTabSynchronizationError.invalidPlannedEdit
+        }
+        let selection =
+          (try? planned.snapshot.nsRange(for: planned.initialSelection))
+          ?? NSRange(location: min(offset, planned.snapshot.utf16Count), length: 0)
+        self.applyLocalBatchEdits(
+          batchEdits,
+          finalText: planned.snapshot.text,
+          selectionAfter: selection,
+          clearExistingSnippetStops: true
+        )
+        self.installSnippetStops(
+          tabStops: planned.tabStops,
+          finalCursor: planned.finalCursor,
+          snapshot: planned.snapshot
+        )
+        appliedLocally = true
+
+        let applied = try await pipeline.applyEdits(planned.edits)
+        self.pendingEditCount = max(0, self.pendingEditCount - 1)
+        pendingCountReleased = true
+        let authoritative = applied.last?.newSnapshot.text ?? planned.snapshot.text
+        if self.pendingEditCount == 0, authoritative != self.text {
+          throw EditorTabSynchronizationError.backendTextMismatch
+        }
+        await pipeline.recordCompletionUsage(planned.completion)
         self.errorMessage = nil
+      } catch is CancellationError {
+        if appliedLocally, !pendingCountReleased {
+          self.pendingEditCount = max(0, self.pendingEditCount - 1)
+          pendingCountReleased = true
+        }
+        if appliedLocally, !self.isClosing, !self.isClosed {
+          self.editEpoch &+= 1
+          await self.recoverFromBackendFailure(CancellationError())
+        }
       } catch {
-        self.completions = []
-        self.selectedCompletionIndex = 0
-        self.errorMessage = error.localizedDescription
+        if appliedLocally {
+          if !pendingCountReleased {
+            self.pendingEditCount = max(0, self.pendingEditCount - 1)
+            pendingCountReleased = true
+          }
+          self.editEpoch &+= 1
+          self.completionGeneration &+= 1
+          self.completionTask?.cancel()
+          await self.recoverFromBackendFailure(error)
+        } else {
+          self.completions = []
+          self.selectedCompletionIndex = 0
+          self.errorMessage = error.localizedDescription
+        }
       }
     }
   }
@@ -583,37 +773,37 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func definitionsAtSelection() async throws -> [SourceLocation] {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.definitions(atUTF16Offset: navigationUTF16Offset)
   }
 
   func referencesAtSelection() async throws -> [SourceLocation] {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.references(atUTF16Offset: navigationUTF16Offset)
   }
 
   func documentSymbols() async throws -> [EditorDocumentSymbol] {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.documentSymbols()
   }
 
   func hoverAtSelection() async throws -> HoverResult? {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.hover(atUTF16Offset: navigationUTF16Offset)
   }
 
   func prepareRenameAtSelection() async throws -> RenamePreparation? {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.prepareRename(atUTF16Offset: navigationUTF16Offset)
   }
 
   func renameAtSelection(to newName: String) async throws -> EditorWorkspaceEdit? {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     return try await pipeline.rename(atUTF16Offset: navigationUTF16Offset, to: newName)
   }
 
   func codeActionsAtSelection() async throws -> [EditorCodeAction] {
-    await editTask?.value
+    await mutationQueue.waitForIdle()
     let sourceLength = (text as NSString).length
     let location = min(max(selectedRange.location, 0), sourceLength)
     let range: NSRange
@@ -872,12 +1062,17 @@ final class EditorTab: ObservableObject, Identifiable {
     return nsRange.length
   }
 
-  private func installSnippetStops(from result: CompletionApplicationResult) {
-    var ranges = result.tabStops
+  private func installSnippetStops(
+    tabStops: [CompletionTabStop],
+    finalCursor: TextPosition,
+    snapshot: TextSnapshot
+  ) {
+    var ranges =
+      tabStops
       .sorted { $0.index < $1.index }
       .compactMap { $0.ranges.first }
-      .compactMap { try? result.snapshot.nsRange(for: $0) }
-    if let finalOffset = try? result.snapshot.utf16Offset(of: result.finalCursor) {
+      .compactMap { try? snapshot.nsRange(for: $0) }
+    if let finalOffset = try? snapshot.utf16Offset(of: finalCursor) {
       let finalRange = NSRange(location: finalOffset, length: 0)
       if ranges.last != finalRange { ranges.append(finalRange) }
     }
@@ -937,61 +1132,162 @@ final class EditorTab: ObservableObject, Identifiable {
   private func setDirty(_ value: Bool) {
     if isDirty != value { isDirty = value }
     if chrome.isDirty != value { chrome.isDirty = value }
+    if value {
+      switch diskState {
+      case .conflicted, .diskModified, .unavailable:
+        break
+      case .synchronized, .memoryModified, .saving:
+        diskState = .memoryModified(revision: textRevision)
+      }
+    } else if diskState != .diskModified && diskState != .conflicted {
+      diskState = .synchronized
+    }
   }
 
   func refreshAnalysis() {
-    Task { [weak self, pipeline] in
+    guard !isClosing, !isClosed else { return }
+    analysisRefreshTask?.cancel()
+    let lifecycle = lifecycleGeneration
+    let requestedRevision = textRevision
+    analysisRefreshTask = Task { [weak self, pipeline] in
       guard let self else { return }
+      await self.mutationQueue.waitForIdle()
+      guard !Task.isCancelled, lifecycle == self.lifecycleGeneration,
+        requestedRevision == self.textRevision, !self.isClosing, !self.isClosed
+      else { return }
       do {
         let value = try await pipeline.refreshAnalysis()
+        guard !Task.isCancelled, lifecycle == self.lifecycleGeneration,
+          requestedRevision == self.textRevision, !self.isClosing, !self.isClosed
+        else { return }
         self.consume(.analysis(value))
+      } catch is CancellationError {
+        return
       } catch {
         self.errorMessage = error.localizedDescription
+      }
+      if lifecycle == self.lifecycleGeneration {
+        self.analysisRefreshTask = nil
       }
     }
   }
 
   func format(tabWidth: Int, insertSpaces: Bool) {
-    let previous = editTask
-    editTask = Task { [weak self, pipeline] in
-      await previous?.value
-      guard let self else { return }
+    guard !isClosing, !isClosed else { return }
+    let baseRevision = textRevision
+    let epoch = editEpoch
+    let lifecycle = lifecycleGeneration
+    mutationQueue.enqueue { [weak self, pipeline] _ in
+      guard let self, !Task.isCancelled,
+        lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed,
+        epoch == self.editEpoch, baseRevision == self.textRevision
+      else { return }
+
+      var appliedLocally = false
+      var pendingCountReleased = false
       do {
-        let snapshot = try await pipeline.format(
+        let edits = try await pipeline.formattingEdits(
           options: .init(tabSize: tabWidth, insertSpaces: insertSpaces)
         )
-        self.replaceText(with: snapshot.text)
-        self.updateDirtyState(for: snapshot.text)
-        self.onContentStateChange?()
-        self.completions = []
-        self.selectedCompletionIndex = 0
-        self.advancePresentationRevision()
-        self.syntaxHighlights = []
-        self.semanticHighlights = []
-        self.serviceDiagnostics = []
-        self.publishDiagnostics()
+        guard !Task.isCancelled,
+          lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed,
+          epoch == self.editEpoch, baseRevision == self.textRevision
+        else { return }
+        guard !edits.isEmpty else {
+          self.errorMessage = nil
+          return
+        }
+
+        let baseSnapshot = TextSnapshot(text: self.text)
+        let batchEdits = try self.batchEdits(from: edits, snapshot: baseSnapshot)
+        guard let formattedText = Self.applying(batchEdits, to: self.text) else {
+          throw EditorTabSynchronizationError.invalidPlannedEdit
+        }
+        let sourceLength = (formattedText as NSString).length
+        let selection = NSRange(
+          location: min(max(0, self.selectedRange.location), sourceLength),
+          length: 0
+        )
+        self.applyLocalBatchEdits(
+          batchEdits,
+          finalText: formattedText,
+          selectionAfter: selection,
+          clearExistingSnippetStops: true
+        )
+        appliedLocally = true
+
+        let applied = try await pipeline.applyEdits(edits)
+        self.pendingEditCount = max(0, self.pendingEditCount - 1)
+        pendingCountReleased = true
+        let authoritative = applied.last?.newSnapshot.text ?? formattedText
+        if self.pendingEditCount == 0, authoritative != self.text {
+          throw EditorTabSynchronizationError.backendTextMismatch
+        }
         self.errorMessage = nil
+      } catch is CancellationError {
+        if appliedLocally, !pendingCountReleased {
+          self.pendingEditCount = max(0, self.pendingEditCount - 1)
+          pendingCountReleased = true
+        }
+        if appliedLocally, !self.isClosing, !self.isClosed {
+          self.editEpoch &+= 1
+          await self.recoverFromBackendFailure(CancellationError())
+        }
       } catch {
-        self.errorMessage = error.localizedDescription
+        if appliedLocally {
+          if !pendingCountReleased {
+            self.pendingEditCount = max(0, self.pendingEditCount - 1)
+            pendingCountReleased = true
+          }
+          self.editEpoch &+= 1
+          self.completionGeneration &+= 1
+          self.completionTask?.cancel()
+          await self.recoverFromBackendFailure(error)
+        } else {
+          self.errorMessage = error.localizedDescription
+        }
       }
     }
   }
 
   @discardableResult
   func save() async -> Bool {
-    await editTask?.value
-    do {
-      try await pipeline.persist()
-      persistedText = text
+    guard !isClosed else { return false }
+
+    for _ in 0..<3 {
+      await mutationQueue.waitForIdle()
+      guard !isClosed else { return false }
+      let requestedRevision = textRevision
+      let requestedText = text
+      diskState = .saving(revision: requestedRevision)
+      do {
+        try await pipeline.persist()
+      } catch {
+        diskState = .unavailable(error.localizedDescription)
+        errorMessage = error.localizedDescription
+        return false
+      }
+
+      guard requestedRevision == textRevision, requestedText == text else {
+        diskState = .memoryModified(revision: textRevision)
+        // Input arrived while persistence was suspended. The next pass waits for that
+        // edit's backend transaction and persists the newer stable snapshot.
+        continue
+      }
+
+      persistedText = requestedText
       diskModificationTime = Self.modificationTime(for: url)
       setDirty(false)
+      diskState = .synchronized
       onContentStateChange?()
       errorMessage = nil
       return true
-    } catch {
-      errorMessage = error.localizedDescription
-      return false
     }
+
+    errorMessage = EditorTabSynchronizationError.documentChangedWhileSaving.localizedDescription
+    updateDirtyState(for: text)
+    diskState = .memoryModified(revision: textRevision)
+    return false
   }
 
   /// A successful compiler pass is authoritative for the exact on-disk snapshot
@@ -1005,9 +1301,20 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func restoreRecoveredText(_ recoveredText: String) async throws {
-    await editTask?.value
+    guard !isClosing, !isClosed else { return }
+    await mutationQueue.waitForIdle()
     guard recoveredText != text else { return }
+    let requestedRevision = textRevision
+    let lifecycle = lifecycleGeneration
     let applied = try await pipeline.replaceText(with: recoveredText)
+    guard requestedRevision == textRevision, lifecycle == lifecycleGeneration,
+      !isClosing, !isClosed
+    else {
+      // The recovery write raced with real input. Restore the backend to the live in-memory
+      // snapshot; the user's newer text remains authoritative.
+      _ = try? await pipeline.replaceText(with: text)
+      throw EditorTabSynchronizationError.staleAsyncResult
+    }
     replaceText(with: applied.newSnapshot.text)
     selectedRange = NSRange(
       location: min(selectedRange.location, applied.newSnapshot.utf16Count), length: 0)
@@ -1022,17 +1329,44 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func close() async {
+    if isClosed { return }
+    if isClosing {
+      await withCheckedContinuation { closeWaiters.append($0) }
+      return
+    }
+    isClosing = true
+    lifecycleGeneration &+= 1
+    completionGeneration &+= 1
+    diagnosticUpdateGeneration &+= 1
     completionTask?.cancel()
+    analysisRefreshTask?.cancel()
+    diagnosticPublicationTask?.cancel()
     clearSnippetStops()
-    await editTask?.value
-    updateTask?.cancel()
+
+    await mutationQueue.cancelAndWait()
+    let pendingUpdateTask = updateTask
+    pendingUpdateTask?.cancel()
     try? await pipeline.close()
+    await pendingUpdateTask?.value
+
+    updateTask = nil
+    completionTask = nil
+    analysisRefreshTask = nil
+    diagnosticPublicationTask = nil
+    isClosed = true
+    isClosing = false
+    let waiters = closeWaiters
+    closeWaiters.removeAll(keepingCapacity: false)
+    for waiter in waiters { waiter.resume() }
   }
 
   private func observePipeline() {
+    let lifecycle = lifecycleGeneration
     updateTask = Task { [weak self, pipeline] in
       for await update in pipeline.updates {
-        guard !Task.isCancelled, let self else { return }
+        guard !Task.isCancelled, let self,
+          lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed
+        else { return }
         self.consume(update)
       }
     }
@@ -1051,15 +1385,24 @@ final class EditorTab: ObservableObject, Identifiable {
       diagnosticUpdateGeneration &+= 1
       let generation = diagnosticUpdateGeneration
       let revision = textRevision
-      Task { [weak self, pipeline] in
-        try? await Task.sleep(for: .milliseconds(45))
-        guard let self, generation == self.diagnosticUpdateGeneration,
+      diagnosticPublicationTask?.cancel()
+      let lifecycle = lifecycleGeneration
+      diagnosticPublicationTask = Task { [weak self, pipeline] in
+        do {
+          try await Task.sleep(for: .milliseconds(45))
+        } catch {
+          return
+        }
+        guard let self, !Task.isCancelled,
+          lifecycle == self.lifecycleGeneration, !self.isClosing, !self.isClosed,
+          generation == self.diagnosticUpdateGeneration,
           revision == self.textRevision, self.pendingEditCount == 0,
           (try? await pipeline.text()) == self.text
         else { return }
         self.advancePresentationRevision()
         self.serviceDiagnostics = values
         self.publishDiagnostics()
+        self.diagnosticPublicationTask = nil
       }
     case .failure(_, let description):
       errorMessage = description
@@ -1070,11 +1413,34 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   private func recoverFromBackendFailure(_ error: Error) async {
-    errorMessage = error.localizedDescription
-    if let synchronizedText = try? await pipeline.text() {
-      replaceText(with: synchronizedText)
-      updateDirtyState(for: synchronizedText)
+    let originalMessage = error.localizedDescription
+    completionGeneration &+= 1
+    completionTask?.cancel()
+    diagnosticUpdateGeneration &+= 1
+    diagnosticPublicationTask?.cancel()
+
+    if !isClosing, !isClosed {
+      let localText = text
+      do {
+        let synchronized = try await pipeline.replaceText(with: localText)
+        if synchronized.newSnapshot.text == localText {
+          errorMessage =
+            originalMessage + " The in-memory text was preserved and resynchronized."
+        } else {
+          errorMessage =
+            originalMessage
+            + " The editor kept the in-memory text, but backend synchronization returned an unexpected snapshot."
+        }
+      } catch {
+        errorMessage =
+          originalMessage
+          + " The in-memory text was preserved, but the editor backend could not be resynchronized: "
+          + error.localizedDescription
+      }
+    } else {
+      errorMessage = originalMessage
     }
+
     advancePresentationRevision()
     syntaxHighlights = []
     semanticHighlights = []
@@ -1085,6 +1451,10 @@ final class EditorTab: ObservableObject, Identifiable {
     completions = []
     selectedCompletionIndex = 0
     clearSnippetStops()
+    // A language-service/backend failure is not a disk failure. Preserve an
+    // existing external-file conflict, otherwise derive disk state from the
+    // relationship between the live buffer and the last persisted snapshot.
+    updateDirtyState(for: text)
     onContentStateChange?()
   }
 

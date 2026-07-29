@@ -68,6 +68,7 @@ final class CodeEditorTextView: NSTextView {
   var findReferencesHandler: (() -> Void)?
   var showQuickHelpHandler: (() -> Void)?
   var showFindHandler: ((Bool) -> Void)?
+  var activationHandler: (() -> Void)?
   var contentDidChangeHandler: ((NSTextView) -> Void)?
   var nativePointerSelectionHandler: ((NSRange, NSTextView) -> Void)?
   private(set) var isProcessingPointerSelection = false
@@ -90,8 +91,7 @@ final class CodeEditorTextView: NSTextView {
   var editorCursorStyle: EditorCursorStyle = .line {
     didSet {
       guard oldValue != editorCursorStyle else { return }
-      refreshCustomInsertionPoint()
-      window?.invalidateCursorRects(for: self)
+      refreshInsertionPointRendering()
     }
   }
   /// A mode-specific override supplied by the Vim input controller. Keeping it
@@ -100,8 +100,7 @@ final class CodeEditorTextView: NSTextView {
   var vimCursorStyle: EditorCursorStyle? {
     didSet {
       guard oldValue != vimCursorStyle else { return }
-      refreshCustomInsertionPoint()
-      window?.invalidateCursorRects(for: self)
+      refreshInsertionPointRendering()
     }
   }
   /// Visual mode owns a selected range, but Vim still needs a cursor at its
@@ -110,15 +109,23 @@ final class CodeEditorTextView: NSTextView {
   var vimCursorLocation: Int? {
     didSet {
       guard oldValue != vimCursorLocation else { return }
-      refreshCustomInsertionPoint()
-      window?.invalidateCursorRects(for: self)
+      refreshInsertionPointRendering()
     }
   }
   var editorCursorColor = NSColor.labelColor {
     didSet {
       guard !oldValue.isEqual(editorCursorColor) else { return }
-      refreshCustomInsertionPoint()
-      window?.invalidateCursorRects(for: self)
+      refreshInsertionPointRendering()
+    }
+  }
+  /// Rich editor presentations can reshape or collapse source glyphs without
+  /// changing the underlying insertion offset. In those modes AppKit's native
+  /// caret inherits the presented glyph metrics and can become tiny, displaced,
+  /// or invisible. Keep the stable editor-owned line caret for those surfaces.
+  var requiresPresentationAwareInsertionPoint = false {
+    didSet {
+      guard oldValue != requiresPresentationAwareInsertionPoint else { return }
+      refreshInsertionPointRendering()
     }
   }
   private let customCursorView = EditorInsertionCaretView(frame: .zero)
@@ -161,15 +168,25 @@ final class CodeEditorTextView: NSTextView {
 
   override func didChangeText() {
     super.didChangeText()
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
     contentDidChangeHandler?(self)
   }
 
-  override var shouldDrawInsertionPoint: Bool { false }
+  /// Use AppKit's native caret for ordinary GUI editing. Custom rendering is
+  /// reserved for Vim and non-line cursor shapes, so a bridge refresh cannot
+  /// leave normal mode with both the native and custom carets hidden.
+  override var shouldDrawInsertionPoint: Bool { usesNativeInsertionPoint }
+
+  private var usesNativeInsertionPoint: Bool {
+    !requiresPresentationAwareInsertionPoint
+      && vimCursorStyle == nil
+      && vimCursorLocation == nil
+      && editorCursorStyle == .line
+  }
 
   override func becomeFirstResponder() -> Bool {
     let result = super.becomeFirstResponder()
-    if result { refreshCustomInsertionPoint() }
+    if result { refreshInsertionPointRendering() }
     return result
   }
 
@@ -179,8 +196,21 @@ final class CodeEditorTextView: NSTextView {
     return result
   }
 
+  func refreshInsertionPointRendering() {
+    insertionPointColor = usesNativeInsertionPoint ? editorCursorColor : .clear
+    if usesNativeInsertionPoint {
+      customCursorView.hide()
+      needsDisplay = true
+      window?.invalidateCursorRects(for: self)
+      return
+    }
+    refreshCustomInsertionPoint()
+    window?.invalidateCursorRects(for: self)
+  }
+
   func refreshCustomInsertionPoint() {
-    guard window?.firstResponder === self,
+    guard !usesNativeInsertionPoint,
+      window?.firstResponder === self,
       selectedRange().length == 0 || vimCursorLocation != nil,
       let cursorRect = customInsertionPointRect()
     else {
@@ -681,7 +711,7 @@ final class CodeEditorTextView: NSTextView {
         attributed = NSAttributedString(string: String(describing: string))
       }
       virtualMarkedText = attributed
-      refreshCustomInsertionPoint()
+      refreshInsertionPointRendering()
       return
     }
     virtualMarkedText = nil
@@ -690,7 +720,7 @@ final class CodeEditorTextView: NSTextView {
       selectedRange: selectedRange,
       replacementRange: replacementRange
     )
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
   }
 
   override func unmarkText() {
@@ -700,10 +730,10 @@ final class CodeEditorTextView: NSTextView {
     }
     let consumed = unmarkTextHandler?(self) == true
     virtualMarkedText = nil
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
     if consumed { return }
     super.unmarkText()
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
   }
 
   override func hasMarkedText() -> Bool {
@@ -722,7 +752,7 @@ final class CodeEditorTextView: NSTextView {
     isDiscardingMarkedText = true
     defer {
       isDiscardingMarkedText = false
-      refreshCustomInsertionPoint()
+      refreshInsertionPointRendering()
     }
     inputContext?.discardMarkedText()
     if super.hasMarkedText() { super.unmarkText() }
@@ -731,15 +761,16 @@ final class CodeEditorTextView: NSTextView {
   override func insertText(_ insertString: Any, replacementRange: NSRange) {
     if textInputHandler?(insertString, replacementRange, self) == true {
       virtualMarkedText = nil
-      refreshCustomInsertionPoint()
+      refreshInsertionPointRendering()
       return
     }
     virtualMarkedText = nil
     super.insertText(insertString, replacementRange: replacementRange)
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
   }
 
   override func keyDown(with event: NSEvent) {
+    activationHandler?()
     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
     if flags.contains(.command), !flags.contains(.option) {
       // `⌘+` is physically the equals key with Shift held. Matching the
@@ -756,7 +787,7 @@ final class CodeEditorTextView: NSTextView {
 
       guard !flags.contains(.shift) else {
         super.keyDown(with: event)
-        refreshCustomInsertionPoint()
+        refreshInsertionPointRendering()
         return
       }
 
@@ -775,10 +806,11 @@ final class CodeEditorTextView: NSTextView {
     super.keyDown(with: event)
     // Selection notifications can arrive while TextKit is still processing the
     // key event. Refresh once more from the final selection and layout state.
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
   }
 
   override func mouseDown(with event: NSEvent) {
+    activationHandler?()
     let point = convert(event.locationInWindow, from: nil)
     if let target = inlineDiagnosticHitTargets.first(where: { $0.rect.contains(point) }) {
       switch target.action {
@@ -822,7 +854,7 @@ final class CodeEditorTextView: NSTextView {
     // can synchronously reapply Vim's previous presentation while processing
     // the delegate callback, so retain the hit-tested insertion offset instead
     // of relying solely on `selectedRange()` after `super` returns.
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
     let finalSelection = selectedRange()
     let pointerSelection = Self.resolvedPointerSelection(
       hitTested: pointerSelectionRange,
@@ -837,7 +869,7 @@ final class CodeEditorTextView: NSTextView {
 
   override func mouseDragged(with event: NSEvent) {
     super.mouseDragged(with: event)
-    refreshCustomInsertionPoint()
+    refreshInsertionPointRendering()
   }
 
   /// Returns a UTF-16 insertion range for the physical click independent of
@@ -1295,9 +1327,9 @@ struct EditorTextStyler {
     textView.drawsBackground = true
     textView.backgroundColor = background
     textView.textColor = profile.surface.foreground.nsColor
-    // Suppress NSTextView's native insertion caret. CodeEditorTextView draws
-    // the configured cursor independently, including Vim-mode overrides.
-    textView.insertionPointColor = .clear
+    if !(textView is CodeEditorTextView) {
+      textView.insertionPointColor = profile.surface.cursor.nsColor
+    }
     textView.selectedTextAttributes = [
       .backgroundColor: profile.surface.selection.nsColor,
       .foregroundColor: profile.surface.foreground.nsColor,
@@ -1328,6 +1360,7 @@ struct EditorTextStyler {
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.editorCursorStyle = profile.surface.cursorStyle
       codeTextView.editorCursorColor = profile.surface.cursor.nsColor
+      codeTextView.refreshInsertionPointRendering()
       codeTextView.errorLineRanges = errorLineRanges(
         in: textView.string,
         diagnostics: diagnostics,
@@ -1426,6 +1459,10 @@ struct EditorTextStyler {
     }
     layoutManager.invalidateDisplay(forCharacterRange: presentationRange)
     textView.needsDisplay = true
+    // Rich Markdown styling changes glyph metrics after the caret was first
+    // configured above. Recompute from the final TextKit layout so the caret
+    // follows headings and collapsed source markers instead of the old frame.
+    (textView as? CodeEditorTextView)?.refreshInsertionPointRendering()
   }
 
   private func normalizedPresentationRange(

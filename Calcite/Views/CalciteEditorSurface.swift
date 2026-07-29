@@ -97,7 +97,10 @@ struct CalciteEditorSurface: View {
         sharedVimController: vimController,
         onWillEdit: tab.markModified,
         onEdit: { range, replacement, resultingText, selectionAfter in
-          guard isActiveDocument else { return }
+          // A native text view can become first responder before SwiftUI has
+          // published the matching active-document state. Accept the edit and
+          // promote this surface instead of dropping the first (or every, for
+          // an empty document) keystroke while that state catches up.
           onActivate()
           editorSession.updateSelection(selectionAfter, for: tab)
           tab.submitEdit(
@@ -109,7 +112,6 @@ struct CalciteEditorSurface: View {
           )
         },
         onVimEdit: { transaction, selectionAfter in
-          guard isActiveDocument else { return }
           onActivate()
           editorSession.updateSelection(selectionAfter, for: tab)
           tab.submitVimTransaction(
@@ -119,7 +121,6 @@ struct CalciteEditorSurface: View {
           )
         },
         onSelectionChange: { range in
-          guard isActiveDocument else { return }
           onActivate()
           editorSession.updateSelection(range, for: tab)
         },
@@ -154,7 +155,8 @@ struct CalciteEditorSurface: View {
             onVimHistoryChange?(snapshot)
           }
         },
-        onCaretRectChange: { completionAnchor = $0 }
+        onCaretRectChange: { completionAnchor = $0 },
+        onActivate: onActivate
       )
 
       if !tab.completions.isEmpty {
@@ -612,6 +614,7 @@ struct CodeTextEditor: NSViewRepresentable {
   let onZoomChange: (CGFloat) -> Void
   let onVimStateChange: () -> Void
   let onCaretRectChange: (CGRect) -> Void
+  var onActivate: () -> Void = {}
 
   func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -662,11 +665,13 @@ struct CodeTextEditor: NSViewRepresentable {
       coordinator?.handleUnmarkText(in: view) ?? false
     }
     textView.languageID = languageID
+    textView.requiresPresentationAwareInsertionPoint = usesRichMarkdownPresentation
     textView.zoomHandler = context.coordinator.handleZoom
     textView.goToDefinitionHandler = onGoToDefinition
     textView.findReferencesHandler = onFindReferences
     textView.showQuickHelpHandler = onShowQuickHelp
     textView.showFindHandler = onShowFind
+    textView.activationHandler = onActivate
     textView.delegate = context.coordinator
     textView.contentDidChangeHandler = { [weak coordinator = context.coordinator] textView in
       coordinator?.handleObservedTextChange(in: textView)
@@ -736,6 +741,7 @@ struct CodeTextEditor: NSViewRepresentable {
     guard let textView = scrollView.documentView as? NSTextView else { return }
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.languageID = languageID
+      codeTextView.requiresPresentationAwareInsertionPoint = usesRichMarkdownPresentation
       codeTextView.textInputHandler = {
         [weak coordinator = context.coordinator] value, range, view in
         coordinator?.handleTextInput(value, replacementRange: range, in: view) ?? false
@@ -756,6 +762,7 @@ struct CodeTextEditor: NSViewRepresentable {
       codeTextView.findReferencesHandler = onFindReferences
       codeTextView.showQuickHelpHandler = onShowQuickHelp
       codeTextView.showFindHandler = onShowFind
+      codeTextView.activationHandler = onActivate
       codeTextView.zoomHandler = context.coordinator.handleZoom
       codeTextView.nativePointerSelectionHandler = {
         [weak coordinator = context.coordinator] range, textView in
@@ -790,7 +797,7 @@ struct CodeTextEditor: NSViewRepresentable {
           ? requestedSelection
           : clampedSelection(preservedSelection, for: text)
         textView.setSelectedRange(selection)
-        (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+        (textView as? CodeEditorTextView)?.refreshInsertionPointRendering()
         context.coordinator.lastPublishedSelection = selection
         context.coordinator.isApplyingExternalUpdate = false
       }
@@ -812,7 +819,7 @@ struct CodeTextEditor: NSViewRepresentable {
       context.coordinator.noteExternalSelectionRequest(requestedSelection)
       context.coordinator.isApplyingExternalUpdate = true
       textView.setSelectedRange(requestedSelection)
-      (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+      (textView as? CodeEditorTextView)?.refreshInsertionPointRendering()
       context.coordinator.lastPublishedSelection = requestedSelection
       context.coordinator.isApplyingExternalUpdate = false
     }
@@ -834,8 +841,12 @@ struct CodeTextEditor: NSViewRepresentable {
     context.coordinator.scheduleCaretPublication(for: textView)
   }
 
+  private var usesRichMarkdownPresentation: Bool {
+    liveMarkdownStyling && languageID.lowercased() == "markdown"
+  }
+
   private var wrapsLongLines: Bool {
-    liveMarkdownStyling && wrapsMarkdownLines && languageID.lowercased() == "markdown"
+    usesRichMarkdownPresentation && wrapsMarkdownLines
   }
 
   private func configureLineWrapping(scrollView: NSScrollView, textView: NSTextView) {
@@ -1791,8 +1802,12 @@ struct CodeTextEditor: NSViewRepresentable {
       shouldChangeTextIn affectedCharRange: NSRange,
       replacementString: String?
     ) -> Bool {
-      guard parent.isActiveSurface else { return false }
       guard !isApplyingExternalUpdate else { return true }
+      // First-responder delivery is authoritative for native input. In
+      // particular an empty document has no selection delta to activate the
+      // surface before its first edit, so rejecting edits based on the previous
+      // SwiftUI snapshot makes the editor appear permanently read-only.
+      if !parent.isActiveSurface { parent.onActivate() }
       let replacement = replacementString ?? ""
       if handleTypingUtility(
         in: textView,
@@ -1812,7 +1827,8 @@ struct CodeTextEditor: NSViewRepresentable {
     }
 
     func handleObservedTextChange(in textView: NSTextView) {
-      guard parent.isActiveSurface, !isApplyingExternalUpdate else { return }
+      guard !isApplyingExternalUpdate else { return }
+      if !parent.isActiveSurface { parent.onActivate() }
       guard vimDocumentComposition == nil else {
         pendingEdit = nil
         return
@@ -1894,7 +1910,7 @@ struct CodeTextEditor: NSViewRepresentable {
         }
       }
       if let codeTextView = textView as? CodeEditorTextView {
-        codeTextView.refreshCustomInsertionPoint()
+        codeTextView.refreshInsertionPointRendering()
         codeTextView.window?.invalidateCursorRects(for: codeTextView)
       }
       if (textView as? CodeEditorTextView)?.isProcessingPointerSelection != true {
@@ -2169,7 +2185,7 @@ struct CodeTextEditor: NSViewRepresentable {
       pendingNativeSelectionRange = nil
       lastRequestedVimNativeRanges = requestedRanges
       lastAppliedVimNativeRanges = textView.selectedRanges.map(\.rangeValue)
-      (textView as? CodeEditorTextView)?.refreshCustomInsertionPoint()
+      (textView as? CodeEditorTextView)?.refreshInsertionPointRendering()
     }
 
     private func vimOwnsNativeSelection(
@@ -2413,9 +2429,11 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       let lines = controller.engine.consumeViewportScrollRequest()
       guard lines != 0, let scrollView = textView.enclosingScrollView else { return }
-      let lineHeight = textView.layoutManager.map {
-        $0.defaultLineHeight(for: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular))
-      } ?? 16
+      let lineHeight =
+        textView.layoutManager.map {
+          $0.defaultLineHeight(
+            for: textView.font ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular))
+        } ?? 16
       let clipView = scrollView.contentView
       let requested = NSRect(
         x: clipView.bounds.origin.x,

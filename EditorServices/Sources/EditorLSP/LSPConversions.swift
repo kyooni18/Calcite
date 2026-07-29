@@ -238,6 +238,37 @@ public enum LSPConversion {
     )
   }
 
+  public static func workspaceSymbols(_ value: WorkspaceSymbolResponse) -> [EditorWorkspaceSymbol] {
+    guard let value else { return [] }
+    switch value {
+    case .optionA(let symbols):
+      return symbols.map { symbol in
+        EditorWorkspaceSymbol(
+          name: symbol.name,
+          kind: EditorSymbolKind(rawValue: symbol.kind.rawValue) ?? .variable,
+          location: location(symbol.location),
+          containerName: symbol.containerName
+        )
+      }
+    case .optionB(let symbols):
+      return symbols.map { symbol in
+        let resolvedLocation: SourceLocation?
+        switch symbol.location {
+        case .some(.optionA(let value)):
+          resolvedLocation = location(value)
+        case .some(.optionB), .none:
+          resolvedLocation = nil
+        }
+        return EditorWorkspaceSymbol(
+          name: symbol.name,
+          kind: EditorSymbolKind(rawValue: symbol.kind.rawValue) ?? .variable,
+          location: resolvedLocation,
+          containerName: symbol.containerName
+        )
+      }
+    }
+  }
+
   public static func documentSymbols(_ value: DocumentSymbolResponse) -> [EditorDocumentSymbol] {
     guard let value else { return [] }
     switch value {

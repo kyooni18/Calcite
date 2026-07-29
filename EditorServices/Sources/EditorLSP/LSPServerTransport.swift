@@ -26,6 +26,9 @@ public protocol LSPServerTransport: Sendable {
   func semanticTokensFull(_ params: SemanticTokensParams) async throws -> SemanticTokensResponse
   func signatureHelp(_ params: TextDocumentPositionParams) async throws -> SignatureHelpResponse
   func documentSymbols(_ params: DocumentSymbolParams) async throws -> DocumentSymbolResponse
+  func workspaceSymbols(_ params: WorkspaceSymbolParams) async throws -> WorkspaceSymbolResponse
+  func didChangeWatchedFiles(_ params: DidChangeWatchedFilesParams) async throws
+  func diagnostics(_ params: DocumentDiagnosticParams) async throws -> DocumentDiagnosticReport
   func codeActions(_ params: CodeActionParams) async throws -> CodeActionResponse
   func inlayHints(_ params: InlayHintParams) async throws -> InlayHintResponse
   func executeCommand(_ params: ExecuteCommandParams) async throws -> ExecuteCommandResponse
@@ -62,6 +65,13 @@ extension LSPServerTransport {
   { throw LanguageFeatureError.unsupported("textDocument/signatureHelp") }
   public func documentSymbols(_ params: DocumentSymbolParams) async throws -> DocumentSymbolResponse
   { throw LanguageFeatureError.unsupported("textDocument/documentSymbol") }
+  public func workspaceSymbols(_ params: WorkspaceSymbolParams) async throws
+    -> WorkspaceSymbolResponse
+  { throw LanguageFeatureError.unsupported("workspace/symbol") }
+  public func didChangeWatchedFiles(_ params: DidChangeWatchedFilesParams) async throws {}
+  public func diagnostics(_ params: DocumentDiagnosticParams) async throws
+    -> DocumentDiagnosticReport
+  { throw LanguageFeatureError.unsupported("textDocument/diagnostic") }
   public func codeActions(_ params: CodeActionParams) async throws -> CodeActionResponse {
     throw LanguageFeatureError.unsupported("textDocument/codeAction")
   }
@@ -132,6 +142,15 @@ public final class LanguageClientServer: LSPServerTransport, @unchecked Sendable
   { try await server.signatureHelp(params) }
   public func documentSymbols(_ params: DocumentSymbolParams) async throws -> DocumentSymbolResponse
   { try await server.documentSymbol(params) }
+  public func workspaceSymbols(_ params: WorkspaceSymbolParams) async throws
+    -> WorkspaceSymbolResponse
+  { try await server.workspaceSymbol(params) }
+  public func didChangeWatchedFiles(_ params: DidChangeWatchedFilesParams) async throws {
+    try await server.workspaceDidChangeWatchedFiles(params)
+  }
+  public func diagnostics(_ params: DocumentDiagnosticParams) async throws
+    -> DocumentDiagnosticReport
+  { try await server.diagnostics(params) }
   public func codeActions(_ params: CodeActionParams) async throws -> CodeActionResponse {
     try await server.codeAction(params)
   }

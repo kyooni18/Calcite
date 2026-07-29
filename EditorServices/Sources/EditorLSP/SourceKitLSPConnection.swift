@@ -69,7 +69,7 @@ import ProcessEnv
           process.terminationHandler = { _ in finished.signal() }
           try process.run()
           guard finished.wait(timeout: .now() + 2) == .success else {
-            if process.isRunning { process.terminate() }
+            LSPProcessLifecycle.terminate(process)
             _ = finished.wait(timeout: .now() + .milliseconds(250))
             return nil
           }
@@ -80,7 +80,7 @@ import ProcessEnv
           ).trimmingCharacters(in: .whitespacesAndNewlines)
           return value.isEmpty ? nil : value
         } catch {
-          if process.isRunning { process.terminate() }
+          LSPProcessLifecycle.terminate(process)
           return nil
         }
       }
@@ -91,7 +91,9 @@ import ProcessEnv
     public let transport: LanguageClientServer
     public let service: LSPDocumentService
     public let standardError: AsyncStream<String>
+    public let terminationEvents: AsyncStream<LSPProcessTermination>
     private let process: Process
+    private let terminationRelay: LSPProcessTerminationRelay
 
     public init(
       workspaceURL: URL,
@@ -106,8 +108,14 @@ import ProcessEnv
         explicitPath: executablePath, environment: environment)
       let parameters = Process.ExecutionParameters(
         path: path, environment: environment, currentDirectoryURL: workspaceURL)
+      let terminationRelay = LSPProcessTerminationRelay()
       let result = try DataChannel.localProcessChannelWithStandardError(
-        parameters: parameters, terminationHandler: {})
+        parameters: parameters,
+        terminationHandler: { terminationRelay.processDidTerminate() }
+      )
+      terminationRelay.attach(result.process)
+      self.terminationRelay = terminationRelay
+      self.terminationEvents = terminationRelay.events
       self.process = result.process
       self.standardError = result.standardError
       let connection = JSONRPCServerConnection(dataChannel: result.channel)
@@ -176,22 +184,29 @@ import ProcessEnv
       )
     }
 
-    deinit { if process.isRunning { process.terminate() } }
+    deinit {
+      terminationRelay.markExpected()
+      LSPProcessLifecycle.terminate(process)
+    }
 
     public func shutdown() async throws {
       try await shutdown(timeout: .seconds(5))
     }
 
     public func shutdown(timeout: Duration) async throws {
+      terminationRelay.markExpected()
       do {
         try await service.shutdown(timeout: timeout)
       } catch {
-        if process.isRunning { process.terminate() }
+        LSPProcessLifecycle.terminate(process)
         throw error
       }
-      if process.isRunning { process.terminate() }
+      LSPProcessLifecycle.terminate(process)
     }
 
-    public func terminate() { if process.isRunning { process.terminate() } }
+    public func terminate() {
+      terminationRelay.markExpected()
+      LSPProcessLifecycle.terminate(process)
+    }
   }
 #endif

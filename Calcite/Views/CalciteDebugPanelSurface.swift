@@ -79,7 +79,7 @@ import SwiftUI
     private var debugControls: some View {
       HStack(spacing: 6) {
         Button("Start", systemImage: "ladybug") { controller.startDebugging() }
-          .disabled(debugSessionIsActive || controller.activeTab == nil)
+          .disabled(debugSessionIsActive)
         Button("Continue", systemImage: "play.fill") { controller.continueDebugging() }
           .disabled(!debugSessionIsStopped)
         Button("Pause", systemImage: "pause.fill") { controller.pauseDebugging() }
@@ -93,6 +93,11 @@ import SwiftUI
         Button("Stop", systemImage: "stop.fill") { controller.stopDebugging() }
           .disabled(!debugSessionIsActive)
         Spacer()
+        if let breakpointStatusText {
+          Text(breakpointStatusText)
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(rejectedBreakpointCount > 0 ? .orange : .secondary)
+        }
         Text(debugPhaseText).font(.caption).foregroundStyle(.secondary)
       }
       .labelStyle(.iconOnly)
@@ -116,6 +121,23 @@ import SwiftUI
     private var debugSessionIsStopped: Bool {
       if case .stopped = controller.debugPhase { return true }
       return false
+    }
+
+    private var breakpointVerification: [Breakpoint] {
+      controller.debugBreakpointVerification.values.flatMap { $0 }
+    }
+
+    private var rejectedBreakpointCount: Int {
+      breakpointVerification.lazy.filter { !$0.verified }.count
+    }
+
+    private var breakpointStatusText: String? {
+      let values = breakpointVerification
+      guard !values.isEmpty else { return nil }
+      let verified = values.lazy.filter(\.verified).count
+      return rejectedBreakpointCount == 0
+        ? "\(verified) breakpoints verified"
+        : "\(verified) verified · \(rejectedBreakpointCount) rejected"
     }
 
     private var debugPhaseText: String {

@@ -1022,27 +1022,26 @@ extension Double {
 }
 
 enum EditorProfileStore {
+  private struct Payload: Codable {
+    var schemaVersion = 1
+    var light: EditorCustomProfile?
+    var dark: EditorCustomProfile?
+  }
+
   private static let legacyKey = "editor.customProfile.v1"
   private static let lightKey = "editor.customProfile.light.v2"
   private static let darkKey = "editor.customProfile.dark.v2"
+  private static let storageURL = CalciteStateStorage.globalURL("theme-profiles.json")
 
   static func load(
     slot: EditorThemeSlot,
     defaults: UserDefaults = .standard
   ) -> EditorCustomProfile {
-    let key = slot == .light ? lightKey : darkKey
-    if let data = defaults.data(forKey: key),
-      let value = try? JSONDecoder().decode(EditorCustomProfile.self, from: data)
-    {
-      return value
+    if defaults === UserDefaults.standard {
+      let payload = loadFilePayload(defaults: defaults)
+      return profile(in: payload, slot: slot) ?? defaultProfile(for: slot)
     }
-    if slot == .dark,
-      let data = defaults.data(forKey: legacyKey),
-      let value = try? JSONDecoder().decode(EditorCustomProfile.self, from: data)
-    {
-      return value
-    }
-    return slot == .light ? .light : .standard
+    return legacyProfile(slot: slot, defaults: defaults) ?? defaultProfile(for: slot)
   }
 
   static func load(defaults: UserDefaults = .standard) -> EditorCustomProfile {
@@ -1054,12 +1053,68 @@ enum EditorProfileStore {
     slot: EditorThemeSlot,
     defaults: UserDefaults = .standard
   ) {
+    if defaults === UserDefaults.standard {
+      var payload = loadFilePayload(defaults: defaults)
+      if slot == .light { payload.light = profile } else { payload.dark = profile }
+      persist(payload)
+      return
+    }
     guard let data = try? JSONEncoder().encode(profile) else { return }
     defaults.set(data, forKey: slot == .light ? lightKey : darkKey)
   }
 
   static func save(_ profile: EditorCustomProfile, defaults: UserDefaults = .standard) {
     save(profile, slot: .dark, defaults: defaults)
+  }
+
+  private static func loadFilePayload(defaults: UserDefaults) -> Payload {
+    if let payload = CalciteStateStorage.load(Payload.self, from: storageURL) {
+      return payload
+    }
+    let payload = Payload(
+      light: legacyProfile(slot: .light, defaults: defaults),
+      dark: legacyProfile(slot: .dark, defaults: defaults)
+    )
+    if payload.light != nil || payload.dark != nil {
+      persist(payload)
+      defaults.removeObject(forKey: lightKey)
+      defaults.removeObject(forKey: darkKey)
+      defaults.removeObject(forKey: legacyKey)
+    }
+    return payload
+  }
+
+  private static func legacyProfile(
+    slot: EditorThemeSlot,
+    defaults: UserDefaults
+  ) -> EditorCustomProfile? {
+    let key = slot == .light ? lightKey : darkKey
+    if let data = defaults.data(forKey: key),
+      let value = try? JSONDecoder().decode(EditorCustomProfile.self, from: data)
+    {
+      return value
+    }
+    if slot == .dark, let data = defaults.data(forKey: legacyKey) {
+      return try? JSONDecoder().decode(EditorCustomProfile.self, from: data)
+    }
+    return nil
+  }
+
+  private static func profile(
+    in payload: Payload,
+    slot: EditorThemeSlot
+  ) -> EditorCustomProfile? {
+    slot == .light ? payload.light : payload.dark
+  }
+
+  private static func defaultProfile(for slot: EditorThemeSlot) -> EditorCustomProfile {
+    slot == .light ? .light : .standard
+  }
+
+  private static func persist(_ payload: Payload) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? CalciteStateStorage.save(payload, to: storageURL, encoder: encoder)
   }
 }
 
@@ -1086,10 +1141,19 @@ enum EditorWorkspaceThemeProfileStore {
     workspaceURL: URL,
     defaults: UserDefaults = .standard
   ) -> EditorWorkspaceThemeOverride {
-    guard let data = defaults.data(forKey: key(for: workspaceURL)),
-      let value = try? JSONDecoder().decode(EditorWorkspaceThemeOverride.self, from: data)
-    else { return .disabled }
-    return value
+    if defaults === UserDefaults.standard {
+      let fileURL = CalciteStateStorage.workspaceURL(workspaceURL, filename: "theme.json")
+      if let value = CalciteStateStorage.load(EditorWorkspaceThemeOverride.self, from: fileURL) {
+        return value
+      }
+      if let legacy = loadLegacy(workspaceURL: workspaceURL, defaults: defaults) {
+        persist(legacy, to: fileURL)
+        defaults.removeObject(forKey: key(for: workspaceURL))
+        return legacy
+      }
+      return .disabled
+    }
+    return loadLegacy(workspaceURL: workspaceURL, defaults: defaults) ?? .disabled
   }
 
   static func save(
@@ -1097,6 +1161,13 @@ enum EditorWorkspaceThemeProfileStore {
     workspaceURL: URL,
     defaults: UserDefaults = .standard
   ) {
+    if defaults === UserDefaults.standard {
+      persist(
+        value,
+        to: CalciteStateStorage.workspaceURL(workspaceURL, filename: "theme.json")
+      )
+      return
+    }
     guard let data = try? JSONEncoder().encode(value) else { return }
     defaults.set(data, forKey: key(for: workspaceURL))
   }
@@ -1127,13 +1198,21 @@ enum EditorWorkspaceThemeProfileStore {
     save(value, workspaceURL: workspaceURL, defaults: defaults)
   }
 
+  private static func loadLegacy(
+    workspaceURL: URL,
+    defaults: UserDefaults
+  ) -> EditorWorkspaceThemeOverride? {
+    guard let data = defaults.data(forKey: key(for: workspaceURL)) else { return nil }
+    return try? JSONDecoder().decode(EditorWorkspaceThemeOverride.self, from: data)
+  }
+
+  private static func persist(_ value: EditorWorkspaceThemeOverride, to url: URL) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? CalciteStateStorage.save(value, to: url, encoder: encoder)
+  }
+
   private static func key(for workspaceURL: URL) -> String {
-    let bytes = workspaceURL.standardizedFileURL.path.utf8
-    var hash: UInt64 = 14_695_981_039_346_656_037
-    for byte in bytes {
-      hash ^= UInt64(byte)
-      hash &*= 1_099_511_628_211
-    }
-    return prefix + String(hash, radix: 16)
+    prefix + CalciteStateStorage.stableIdentifier(workspaceURL.standardizedFileURL.path)
   }
 }

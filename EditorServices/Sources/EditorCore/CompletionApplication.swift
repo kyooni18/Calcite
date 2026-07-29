@@ -63,6 +63,37 @@ public struct CompletionTabStop: Hashable, Sendable {
   }
 }
 
+public struct PlannedCompletionApplication: Hashable, Sendable {
+  public var completion: Completion
+  public var edits: [TextEdit]
+  public var snapshot: TextSnapshot
+  public var insertedRange: EditorTextRange
+  public var tabStops: [CompletionTabStop]
+  public var initialSelection: EditorTextRange
+  public var finalCursor: TextPosition
+  public var command: EditorCommand?
+
+  public init(
+    completion: Completion,
+    edits: [TextEdit],
+    snapshot: TextSnapshot,
+    insertedRange: EditorTextRange,
+    tabStops: [CompletionTabStop],
+    initialSelection: EditorTextRange,
+    finalCursor: TextPosition,
+    command: EditorCommand? = nil
+  ) {
+    self.completion = completion
+    self.edits = edits
+    self.snapshot = snapshot
+    self.insertedRange = insertedRange
+    self.tabStops = tabStops
+    self.initialSelection = initialSelection
+    self.finalCursor = finalCursor
+    self.command = command
+  }
+}
+
 public struct CompletionApplicationResult: Hashable, Sendable {
   public var appliedEdits: [AppliedTextEdit]
   public var snapshot: TextSnapshot
@@ -131,6 +162,88 @@ extension CompletionUtilities {
     var validation = TextBuffer(text: snapshot.text, version: snapshot.version)
     _ = try validation.apply(edits)
     return .init(edits: edits, primaryRange: primaryRange, expansion: expansion)
+  }
+
+  public static func plannedApplication(
+    for completion: Completion,
+    in snapshot: TextSnapshot,
+    at position: TextPosition,
+    replacing replacementRange: EditorTextRange? = nil,
+    snippetVariables: [String: String] = [:]
+  ) throws -> PlannedCompletionApplication {
+    let plan = try applicationPlan(
+      for: completion,
+      in: snapshot,
+      at: position,
+      replacing: replacementRange,
+      snippetVariables: snippetVariables
+    )
+    let primaryNSRange = try snapshot.nsRange(for: plan.primaryRange)
+    var insertionOffset = primaryNSRange.location
+    for edit in plan.edits.dropFirst() {
+      let range = try snapshot.nsRange(for: edit.range)
+      let precedes =
+        range.location < primaryNSRange.location && NSMaxRange(range) <= primaryNSRange.location
+      let atStart =
+        primaryNSRange.length > 0 && range.location == primaryNSRange.location && range.length == 0
+      if precedes || atStart {
+        let (updated, overflow) = insertionOffset.addingReportingOverflow(
+          edit.replacement.utf16.count - range.length
+        )
+        guard !overflow, updated >= 0 else {
+          throw TextBufferError.invalidUTF16Offset(insertionOffset)
+        }
+        insertionOffset = updated
+      }
+    }
+
+    var preview = TextBuffer(text: snapshot.text, version: snapshot.version)
+    _ = try preview.apply(plan.edits)
+    let previewSnapshot = preview.snapshot
+    let insertedStart = try previewSnapshot.position(atUTF16Offset: insertionOffset)
+    let (insertedEndOffset, insertedOverflow) = insertionOffset.addingReportingOverflow(
+      plan.expansion.text.utf16.count
+    )
+    guard !insertedOverflow else {
+      throw TextBufferError.invalidUTF16Offset(insertionOffset)
+    }
+    let insertedEnd = try previewSnapshot.position(atUTF16Offset: insertedEndOffset)
+    let tabStops = try plan.expansion.tabStops.map { stop in
+      CompletionTabStop(
+        index: stop.index,
+        ranges: try stop.ranges.map { range in
+          let (start, startOverflow) = insertionOffset.addingReportingOverflow(range.location)
+          let (end, endOverflow) = insertionOffset.addingReportingOverflow(NSMaxRange(range))
+          guard !startOverflow, !endOverflow else {
+            throw TextBufferError.invalidUTF16Offset(insertionOffset)
+          }
+          return EditorTextRange(
+            start: try previewSnapshot.position(atUTF16Offset: start),
+            end: try previewSnapshot.position(atUTF16Offset: end)
+          )
+        },
+        choices: stop.choices
+      )
+    }
+    let (cursorOffset, cursorOverflow) = insertionOffset.addingReportingOverflow(
+      plan.expansion.finalCursorUTF16Offset
+    )
+    guard !cursorOverflow else {
+      throw TextBufferError.invalidUTF16Offset(insertionOffset)
+    }
+    let finalCursor = try previewSnapshot.position(atUTF16Offset: cursorOffset)
+    let selection =
+      tabStops.first?.ranges.first ?? EditorTextRange(start: finalCursor, end: finalCursor)
+    return PlannedCompletionApplication(
+      completion: completion,
+      edits: plan.edits,
+      snapshot: previewSnapshot,
+      insertedRange: EditorTextRange(start: insertedStart, end: insertedEnd),
+      tabStops: tabStops,
+      initialSelection: selection,
+      finalCursor: finalCursor,
+      command: completion.command
+    )
   }
 
   public static func inferredIdentifierRange(

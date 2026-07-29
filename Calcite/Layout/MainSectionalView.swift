@@ -290,10 +290,10 @@ private struct MainSectionLayoutNodeView: View {
       switch node.splitAxis ?? .horizontal {
       case .horizontal:
         HSplitView { splitChildren }
-          .background(splitAutosaveInstaller)
+          .background(splitAutosaveInstaller.allowsHitTesting(false))
       case .vertical:
         VSplitView { splitChildren }
-          .background(splitAutosaveInstaller)
+          .background(splitAutosaveInstaller.allowsHitTesting(false))
       }
     }
   }
@@ -312,59 +312,128 @@ private struct MainSectionLayoutNodeView: View {
   }
 
   private var splitAutosaveInstaller: some View {
-    MainSectionSplitAutosaveInstaller(
-      autosaveName: layout.splitAutosaveName(
+    let childIDs = visibleChildren.map(\.id)
+    let defaultSecondaryFraction = windowSession.layoutProfile.defaultSecondaryFraction(
+      for: node.splitAxis,
+      childCount: visibleChildren.count
+    )
+    return MainSectionSplitGeometryInstaller(
+      splitID: node.id,
+      childIDs: childIDs,
+      isGeometryEnabled: visibleChildren.allSatisfy(\.hasVisibleContent),
+      fractions: layout.splitFractions(
         for: node.id,
-        visibleGeometrySignature: node.geometryVisibilitySignature(visibleOnly: true),
-        fullGeometrySignature: node.geometryVisibilitySignature(visibleOnly: false)
+        visibleChildIDs: childIDs,
+        defaultSecondaryFraction: defaultSecondaryFraction.map { Double($0) }
       ),
-      defaultSecondaryFraction: windowSession.layoutProfile.defaultSecondaryFraction(
-        for: node.splitAxis,
-        childCount: visibleChildren.count
-      )
+      onFractionsChanged: { fractions in
+        layout.updateSplitFractions(
+          splitID: node.id,
+          visibleChildIDs: childIDs,
+          fractions: fractions
+        )
+      }
     )
   }
 }
 
-/// Installs a stable autosave name on the native split view so its divider positions survive
-/// tab additions, tab removals, and temporary sidebar hiding.
+/// Bridges SwiftUI's `HSplitView` / `VSplitView` to the controller-owned geometry model. AppKit
+/// remains responsible for interactive divider dragging, while persisted fractions are keyed by
+/// stable split and child IDs instead of by temporary SwiftUI view identity.
 @MainActor
-private struct MainSectionSplitAutosaveInstaller: NSViewRepresentable {
-  let autosaveName: String
-  let defaultSecondaryFraction: CGFloat?
+private struct MainSectionSplitGeometryInstaller: NSViewRepresentable {
+  let splitID: UUID
+  let childIDs: [UUID]
+  let isGeometryEnabled: Bool
+  let fractions: [Double]
+  let onFractionsChanged: ([Double]) -> Void
 
-  func makeNSView(context: Context) -> MainSectionSplitAutosaveLocatorView {
-    MainSectionSplitAutosaveLocatorView(
-      autosaveName: autosaveName,
-      defaultSecondaryFraction: defaultSecondaryFraction
+  func makeNSView(context: Context) -> MainSectionSplitGeometryLocatorView {
+    MainSectionSplitGeometryLocatorView(
+      splitID: splitID,
+      childIDs: childIDs,
+      isGeometryEnabled: isGeometryEnabled,
+      fractions: fractions,
+      onFractionsChanged: onFractionsChanged
     )
   }
 
   func updateNSView(
-    _ nsView: MainSectionSplitAutosaveLocatorView,
+    _ nsView: MainSectionSplitGeometryLocatorView,
     context: Context
   ) {
-    nsView.autosaveName = autosaveName
-    nsView.defaultSecondaryFraction = defaultSecondaryFraction
+    nsView.splitID = splitID
+    nsView.childIDs = childIDs
+    nsView.isGeometryEnabled = isGeometryEnabled
+    nsView.fractions = fractions
+    nsView.onFractionsChanged = onFractionsChanged
     nsView.scheduleInstallation()
   }
 }
 
 @MainActor
-private final class MainSectionSplitAutosaveLocatorView: NSView {
-  var autosaveName: String
-  var defaultSecondaryFraction: CGFloat?
-  private var didInstallDefaultPosition = false
+private final class MainSectionSplitGeometryLocatorView: NSView {
+  var splitID: UUID
+  var childIDs: [UUID]
+  var isGeometryEnabled: Bool {
+    didSet {
+      if oldValue != isGeometryEnabled { lastAppliedSignature = "" }
+    }
+  }
+  var fractions: [Double]
+  var onFractionsChanged: ([Double]) -> Void
 
-  init(autosaveName: String, defaultSecondaryFraction: CGFloat?) {
-    self.autosaveName = autosaveName
-    self.defaultSecondaryFraction = defaultSecondaryFraction
+  private weak var installedSplitView: NSSplitView?
+  private var willResizeObserver: NSObjectProtocol?
+  private var resizeObserver: NSObjectProtocol?
+  private var captureWorkItem: DispatchWorkItem?
+  private var geometryReleaseWorkItem: DispatchWorkItem?
+  private var geometryApplyGeneration: UInt64 = 0
+  private var isApplyingGeometry = false
+  private var isUserResizing = false
+  private var lastAppliedSignature = ""
+
+  init(
+    splitID: UUID,
+    childIDs: [UUID],
+    isGeometryEnabled: Bool,
+    fractions: [Double],
+    onFractionsChanged: @escaping ([Double]) -> Void
+  ) {
+    self.splitID = splitID
+    self.childIDs = childIDs
+    self.isGeometryEnabled = isGeometryEnabled
+    self.fractions = fractions
+    self.onFractionsChanged = onFractionsChanged
     super.init(frame: .zero)
   }
 
   @available(*, unavailable)
   required init?(coder: NSCoder) {
     fatalError("init(coder:) has not been implemented")
+  }
+
+  override func viewWillMove(toWindow newWindow: NSWindow?) {
+    if newWindow == nil {
+      tearDownObservation()
+    }
+    super.viewWillMove(toWindow: newWindow)
+  }
+
+  private func tearDownObservation() {
+    captureWorkItem?.cancel()
+    captureWorkItem = nil
+    geometryReleaseWorkItem?.cancel()
+    geometryReleaseWorkItem = nil
+    if let willResizeObserver {
+      NotificationCenter.default.removeObserver(willResizeObserver)
+      self.willResizeObserver = nil
+    }
+    if let resizeObserver {
+      NotificationCenter.default.removeObserver(resizeObserver)
+      self.resizeObserver = nil
+    }
+    installedSplitView = nil
   }
 
   override func viewDidMoveToSuperview() {
@@ -377,38 +446,173 @@ private final class MainSectionSplitAutosaveLocatorView: NSView {
     scheduleInstallation()
   }
 
+  override var acceptsFirstResponder: Bool { false }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    // This view only discovers its containing NSSplitView. It must never become
+    // an input surface, otherwise it can swallow clicks intended for NSTextView.
+    nil
+  }
+
+  override func layout() {
+    super.layout()
+    scheduleInstallation()
+  }
+
   func scheduleInstallation() {
-    Task { @MainActor [weak self] in
-      self?.installAutosaveName()
+    // `updateNSView`, layout, and hierarchy callbacks already execute on the main actor.
+    // Applying synchronously avoids an old deferred installation targeting a rebuilt split view.
+    installAndApplyGeometry()
+  }
+
+  private func installAndApplyGeometry() {
+    guard let splitView = containingSplitView() else { return }
+    if installedSplitView !== splitView { installObserver(for: splitView) }
+    applyGeometry(to: splitView)
+  }
+
+  private func containingSplitView() -> NSSplitView? {
+    var candidate = superview
+    while let view = candidate {
+      if let splitView = view as? NSSplitView { return splitView }
+      candidate = view.superview
+    }
+    return nil
+  }
+
+  private func installObserver(for splitView: NSSplitView) {
+    if let willResizeObserver { NotificationCenter.default.removeObserver(willResizeObserver) }
+    if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+    installedSplitView = splitView
+    isUserResizing = false
+    lastAppliedSignature = ""
+    willResizeObserver = NotificationCenter.default.addObserver(
+      forName: NSSplitView.willResizeSubviewsNotification,
+      object: splitView,
+      queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, !self.isApplyingGeometry else { return }
+        self.isUserResizing = true
+      }
+    }
+    resizeObserver = NotificationCenter.default.addObserver(
+      forName: NSSplitView.didResizeSubviewsNotification,
+      object: splitView,
+      queue: .main
+    ) { [weak self, weak splitView] _ in
+      MainActor.assumeIsolated {
+        guard let self, let splitView, !self.isApplyingGeometry else { return }
+        self.scheduleGeometryCapture(from: splitView)
+      }
     }
   }
 
-  private func installAutosaveName() {
-    var candidate = superview
-    while let view = candidate {
-      if let splitView = view as? NSSplitView {
-        if splitView.autosaveName != autosaveName {
-          splitView.autosaveName = autosaveName
-        }
-        if !didInstallDefaultPosition,
-          let fraction = defaultSecondaryFraction,
-          splitView.bounds.height > 0,
-          splitView.arrangedSubviews.count == 2,
-          abs(splitView.arrangedSubviews[0].frame.height - splitView.bounds.height / 2) < 2
-        {
-          // HSplitView measures this divider from the lower edge. The first arranged view is
-          // above it, so its lower edge must sit at the bottom-panel fraction; using the
-          // complement makes the unrelated bottom panel consume almost the whole window.
-          splitView.setPosition(
-            splitView.bounds.height * fraction,
-            ofDividerAt: 0
-          )
-          didInstallDefaultPosition = true
-        }
-        return
+  private func scheduleGeometryCapture(from splitView: NSSplitView) {
+    captureWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self, weak splitView] in
+      MainActor.assumeIsolated {
+        guard let self, let splitView, !self.isApplyingGeometry,
+          self.installedSplitView === splitView
+        else { return }
+        self.captureGeometry(from: splitView)
+        self.isUserResizing = false
+        self.captureWorkItem = nil
       }
-      candidate = view.superview
     }
+    captureWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.045, execute: workItem)
+  }
+
+  private func applyGeometry(to splitView: NSSplitView) {
+    guard isGeometryEnabled, !isApplyingGeometry, !isUserResizing,
+      childIDs.count > 1,
+      splitView.arrangedSubviews.count == childIDs.count,
+      fractions.count == childIDs.count
+    else { return }
+
+    let boundsLength = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+    let dividerCount = normalizedDividerCount(childCount: childIDs.count)
+    let dividerTotal = splitView.dividerThickness * CGFloat(dividerCount)
+    let availableLength = boundsLength - dividerTotal
+    guard availableLength > 1 else { return }
+    let normalized = normalizedFractions(fractions)
+    let signature =
+      "\(splitID.uuidString)|\(childIDs.map(\.uuidString).joined(separator: ","))|"
+      + normalized.map { String(format: "%.6f", $0) }.joined(separator: ",")
+      + "|\(Int(boundsLength.rounded()))"
+    guard signature != lastAppliedSignature else { return }
+
+    geometryApplyGeneration &+= 1
+    let applyGeneration = geometryApplyGeneration
+    geometryReleaseWorkItem?.cancel()
+    isApplyingGeometry = true
+    var cumulative = 0.0
+    for dividerIndex in 0..<(normalized.count - 1) {
+      cumulative += normalized[dividerIndex]
+      let position: CGFloat
+      if splitView.isVertical {
+        // Left-to-right content: preceding content plus the preceding dividers.
+        position =
+          availableLength * cumulative
+          + splitView.dividerThickness * CGFloat(dividerIndex)
+      } else {
+        // Top-to-bottom content: AppKit measures from the lower edge, so count the content and
+        // dividers that remain below this divider.
+        let dividersBelow = normalized.count - dividerIndex - 2
+        position =
+          availableLength * (1 - cumulative)
+          + splitView.dividerThickness * CGFloat(dividersBelow)
+      }
+      splitView.setPosition(position, ofDividerAt: dividerIndex)
+    }
+    lastAppliedSignature = signature
+    let releaseWorkItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self, self.geometryApplyGeneration == applyGeneration else { return }
+        self.isApplyingGeometry = false
+        self.geometryReleaseWorkItem = nil
+      }
+    }
+    geometryReleaseWorkItem = releaseWorkItem
+    DispatchQueue.main.async(execute: releaseWorkItem)
+  }
+
+  private func captureGeometry(from splitView: NSSplitView) {
+    defer { isUserResizing = false }
+    guard isGeometryEnabled,
+      !isApplyingGeometry,
+      splitView.arrangedSubviews.count == childIDs.count,
+      childIDs.count > 1
+    else { return }
+    let sizes = splitView.arrangedSubviews.map { view in
+      Double(splitView.isVertical ? view.frame.width : view.frame.height)
+    }
+    let total = sizes.reduce(0, +)
+    guard total > 1 else { return }
+    let captured = sizes.map { $0 / total }
+    let normalizedCurrent = normalizedFractions(fractions)
+    guard
+      zip(captured, normalizedCurrent).contains(
+        where: { pair in abs(pair.0 - pair.1) > 0.001 }
+      )
+    else {
+      return
+    }
+    fractions = captured
+    lastAppliedSignature = ""
+    onFractionsChanged(captured)
+  }
+
+  private func normalizedDividerCount(childCount: Int) -> Int {
+    max(0, childCount - 1)
+  }
+
+  private func normalizedFractions(_ values: [Double]) -> [Double] {
+    let sanitized = values.map { $0.isFinite && $0 > 0 ? $0 : 0 }
+    let total = sanitized.reduce(0, +)
+    guard total > 0 else { return Array(repeating: 1 / Double(values.count), count: values.count) }
+    return sanitized.map { $0 / total }
   }
 }
 
@@ -421,8 +625,8 @@ private struct MainSectionKeyboardFocusInstaller: NSViewRepresentable {
   func makeNSView(context: Context) -> MainSectionKeyboardFocusLocatorView {
     MainSectionKeyboardFocusLocatorView(
       kind: kind,
-      isActive: isActive,
-      focusToken: focusToken
+      isActive: false,
+      focusToken: ""
     )
   }
 
@@ -430,9 +634,8 @@ private struct MainSectionKeyboardFocusInstaller: NSViewRepresentable {
     _ nsView: MainSectionKeyboardFocusLocatorView,
     context: Context
   ) {
-    let shouldFocus = isActive && (
-      !nsView.isActive || nsView.kind != kind || nsView.focusToken != focusToken
-    )
+    let shouldFocus =
+      isActive && (!nsView.isActive || nsView.kind != kind || nsView.focusToken != focusToken)
     nsView.kind = kind
     nsView.isActive = isActive
     nsView.focusToken = focusToken
@@ -446,6 +649,7 @@ private final class MainSectionKeyboardFocusLocatorView: NSView {
   var isActive: Bool
   var focusToken: String
   private var focusGeneration = UUID()
+  private var focusTask: Task<Void, Never>?
 
   init(kind: MainSectionKind, isActive: Bool, focusToken: String) {
     self.kind = kind
@@ -459,19 +663,26 @@ private final class MainSectionKeyboardFocusLocatorView: NSView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func viewDidMoveToWindow() {
-    super.viewDidMoveToWindow()
-    scheduleFocusIfNeeded()
+  deinit {
+    focusTask?.cancel()
   }
+
+  override var acceptsFirstResponder: Bool { false }
+
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
   func scheduleFocusIfNeeded() {
     guard isActive else { return }
     let generation = UUID()
     focusGeneration = generation
-    Task { @MainActor [weak self] in
+    focusTask?.cancel()
+    focusTask = Task { @MainActor [weak self] in
       await Task.yield()
-      guard let self, self.focusGeneration == generation, self.isActive else { return }
+      guard let self, !Task.isCancelled,
+        self.focusGeneration == generation, self.isActive
+      else { return }
       self.focusNearestInput()
+      self.focusTask = nil
     }
   }
 
@@ -500,7 +711,9 @@ private final class MainSectionKeyboardFocusLocatorView: NSView {
           < distanceSquared(from: rhs, to: locatorCenter, in: contentView)
       })
     else { return }
-    window.makeFirstResponder(target)
+    if window.firstResponder !== target {
+      window.makeFirstResponder(target)
+    }
   }
 
   private func descendantViews(in root: NSView) -> [NSView] {
@@ -578,7 +791,8 @@ private struct MainSectionLeafView: View {
       MainSectionKeyboardFocusInstaller(
         kind: selectedKind,
         isActive: layout.activeSectionID == sectionID,
-        focusToken: "\(selectedTab?.id.uuidString ?? "empty")|\(backend.activeDocumentID?.uuidString ?? "none")"
+        focusToken:
+          "\(selectedTab?.id.uuidString ?? "empty")|\(backend.activeDocumentID?.uuidString ?? "none")"
       )
     }
     .background(sectionBackground)

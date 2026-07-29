@@ -265,7 +265,7 @@ struct CalciteEditorStatusBar: View {
       HStack(spacing: 8) {
         modeBadge(status.label, color: status.isTemporary ? .orange : .accentColor)
         if let register = status.recordingRegister {
-          Text("recording @\(register)")
+          Text(verbatim: "recording @\(register)")
             .font(.system(.caption, design: .monospaced).weight(.semibold))
         } else if !status.pendingNotation.isEmpty {
           Text(status.pendingNotation)

@@ -330,6 +330,20 @@ public final class LanguageServiceRouter: LanguageIntelligenceProviding, @unchec
     try await storage.documentSymbols(uri: uri)
   }
 
+  public func workspaceSymbols(query: String) async throws -> [EditorWorkspaceSymbol] {
+    try await storage.workspaceSymbols(query: query)
+  }
+
+  public func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {
+    try await storage.notifyWorkspaceFileChanges(changes)
+  }
+
+  public func pullDiagnostics(uri: URL, previousResultID: String? = nil) async throws
+    -> DiagnosticBatch
+  {
+    try await storage.pullDiagnostics(uri: uri, previousResultID: previousResultID)
+  }
+
   public func codeActions(
     uri: URL, range: EditorTextRange, diagnostics: [Diagnostic], only: [String]?
   ) async throws -> [EditorCodeAction] {
@@ -866,6 +880,93 @@ private actor Storage {
     return try await merged(uri: uri, feature: "textDocument/documentSymbol") {
       try await $0.registration.service.documentSymbols(uri: uri)
     }
+  }
+
+  func workspaceSymbols(query: String) async throws -> [EditorWorkspaceSymbol] {
+    try ensureActive()
+    var result: [EditorWorkspaceSymbol] = []
+    var seen: Set<EditorWorkspaceSymbol> = []
+    for entry in orderedEntries(entries.values) {
+      do {
+        for symbol in try await entry.registration.service.workspaceSymbols(query: query) {
+          var key = symbol
+          key.serviceIdentifier = nil
+          guard seen.insert(key).inserted else { continue }
+          var routed = symbol
+          routed.serviceIdentifier = entry.registration.id.rawValue
+          result.append(routed)
+        }
+      } catch {
+        if try shouldContinue(after: error, entry: entry, feature: "workspace/symbol") {
+          continue
+        }
+      }
+    }
+    return result
+  }
+
+  func notifyWorkspaceFileChanges(_ changes: [EditorWorkspaceFileChange]) async throws {
+    try ensureActive()
+    guard !changes.isEmpty else { return }
+    for entry in orderedEntries(entries.values) {
+      do {
+        try await entry.registration.service.notifyWorkspaceFileChanges(changes)
+      } catch {
+        if try shouldContinue(
+          after: error, entry: entry, feature: "workspace/didChangeWatchedFiles")
+        {
+          continue
+        }
+      }
+    }
+  }
+
+  func pullDiagnostics(uri: URL, previousResultID: String?) async throws -> DiagnosticBatch {
+    try ensureActive()
+    let selected: [Entry]
+    if let document = documents[uri] {
+      selected = entries(for: document)
+    } else {
+      let fileExtension = uri.pathExtension.lowercased()
+      let scheme = (uri.scheme ?? "file").lowercased()
+      selected = orderedEntries(
+        entries.values.filter { entry in
+          let selector = entry.registration.selector
+          let extensionMatches =
+            selector.fileExtensions.isEmpty || selector.fileExtensions.contains(fileExtension)
+          let schemeMatches = selector.urlSchemes.isEmpty || selector.urlSchemes.contains(scheme)
+          return extensionMatches && schemeMatches
+        }
+      )
+    }
+    var diagnostics: [Diagnostic] = []
+    var seen: Set<Diagnostic> = []
+    var versions: [Int] = []
+    var successfulServiceIDs: [String] = []
+    for entry in selected {
+      do {
+        let batch = try await entry.registration.service.pullDiagnostics(
+          uri: uri, previousResultID: previousResultID)
+        successfulServiceIDs.append(entry.registration.id.rawValue)
+        if let version = batch.version { versions.append(version) }
+        for diagnostic in batch.diagnostics where seen.insert(diagnostic).inserted {
+          diagnostics.append(diagnostic)
+        }
+      } catch {
+        if try shouldContinue(after: error, entry: entry, feature: "textDocument/diagnostic") {
+          continue
+        }
+      }
+    }
+    guard !successfulServiceIDs.isEmpty else {
+      throw LanguageFeatureError.unsupported("textDocument/diagnostic")
+    }
+    return DiagnosticBatch(
+      uri: uri.standardizedFileURL,
+      version: versions.max(),
+      diagnostics: diagnostics,
+      serviceIdentifier: successfulServiceIDs.count == 1 ? successfulServiceIDs[0] : nil
+    )
   }
 
   func codeActions(

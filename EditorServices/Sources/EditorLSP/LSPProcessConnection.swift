@@ -5,6 +5,12 @@ import LanguageClient
 import LanguageServerProtocol
 import ProcessEnv
 
+#if canImport(Darwin)
+  import Darwin
+#elseif canImport(Glibc)
+  import Glibc
+#endif
+
 #if os(macOS) || os(Linux)
   public enum LSPExecutableResolutionError: Error, Equatable, Sendable {
     case emptyCommand
@@ -34,6 +40,101 @@ import ProcessEnv
       case .notExecutable:
         return "Fix the file permissions or select another executable."
       }
+    }
+  }
+
+  public enum LSPProcessTerminationReason: String, Hashable, Sendable {
+    case exit
+    case uncaughtSignal
+    case unknown
+  }
+
+  public struct LSPProcessTermination: Hashable, Sendable {
+    public let status: Int32
+    public let reason: LSPProcessTerminationReason
+    public let expected: Bool
+
+    public init(status: Int32, reason: LSPProcessTerminationReason, expected: Bool) {
+      self.status = status
+      self.reason = reason
+      self.expected = expected
+    }
+  }
+
+  final class LSPProcessTerminationRelay: @unchecked Sendable {
+    let events: AsyncStream<LSPProcessTermination>
+
+    private let lock = NSLock()
+    private let continuation: AsyncStream<LSPProcessTermination>.Continuation
+    private var process: Process?
+    private var terminationPending = false
+    private var expected = false
+    private var published = false
+
+    init() {
+      (events, continuation) = AsyncStream.makeStream(
+        of: LSPProcessTermination.self,
+        bufferingPolicy: .bufferingNewest(1)
+      )
+    }
+
+    func attach(_ process: Process) {
+      lock.lock()
+      self.process = process
+      let shouldPublish = terminationPending && !published
+      lock.unlock()
+      if shouldPublish { publishIfPossible() }
+    }
+
+    func markExpected() {
+      lock.lock()
+      expected = true
+      lock.unlock()
+    }
+
+    func processDidTerminate() {
+      lock.lock()
+      terminationPending = true
+      let shouldPublish = process != nil && !published
+      lock.unlock()
+      if shouldPublish { publishIfPossible() }
+    }
+
+    private func publishIfPossible() {
+      let event: LSPProcessTermination?
+      lock.lock()
+      if let process, terminationPending, !published {
+        published = true
+        let reason: LSPProcessTerminationReason =
+          switch process.terminationReason {
+          case .exit: .exit
+          case .uncaughtSignal: .uncaughtSignal
+          @unknown default: .unknown
+          }
+        event = LSPProcessTermination(
+          status: process.terminationStatus,
+          reason: reason,
+          expected: expected
+        )
+      } else {
+        event = nil
+      }
+      lock.unlock()
+      if let event { continuation.yield(event) }
+      if event != nil { continuation.finish() }
+    }
+  }
+
+  enum LSPProcessLifecycle {
+    static func terminate(_ process: Process) {
+      guard process.isRunning else { return }
+      #if canImport(Darwin)
+        _ = Darwin.kill(process.processIdentifier, SIGTERM)
+      #elseif canImport(Glibc)
+        _ = Glibc.kill(process.processIdentifier, SIGTERM)
+      #else
+        process.terminate()
+      #endif
     }
   }
 
@@ -178,8 +279,10 @@ import ProcessEnv
     public let executablePath: String
     public let processIdentifier: Int32
     public let standardError: AsyncStream<String>
+    public let terminationEvents: AsyncStream<LSPProcessTermination>
 
     private let process: Process
+    private let terminationRelay: LSPProcessTerminationRelay
 
     public init(
       workspaceURL: URL,
@@ -204,10 +307,14 @@ import ProcessEnv
         environment: configuration.environment,
         currentDirectoryURL: configuration.currentDirectoryURL ?? workspaceURL
       )
+      let terminationRelay = LSPProcessTerminationRelay()
       let result = try DataChannel.localProcessChannelWithStandardError(
         parameters: parameters,
-        terminationHandler: {}
+        terminationHandler: { terminationRelay.processDidTerminate() }
       )
+      terminationRelay.attach(result.process)
+      self.terminationRelay = terminationRelay
+      self.terminationEvents = terminationRelay.events
       self.process = result.process
       self.executablePath = path
       self.processIdentifier = result.process.processIdentifier
@@ -245,7 +352,8 @@ import ProcessEnv
     }
 
     deinit {
-      if process.isRunning { process.terminate() }
+      terminationRelay.markExpected()
+      LSPProcessLifecycle.terminate(process)
     }
 
     public var isRunning: Bool { process.isRunning }
@@ -255,17 +363,19 @@ import ProcessEnv
     }
 
     public func shutdown(timeout: Duration) async throws {
+      terminationRelay.markExpected()
       do {
         try await service.shutdown(timeout: timeout)
       } catch {
-        if process.isRunning { process.terminate() }
+        LSPProcessLifecycle.terminate(process)
         throw error
       }
-      if process.isRunning { process.terminate() }
+      LSPProcessLifecycle.terminate(process)
     }
 
     public func terminate() {
-      if process.isRunning { process.terminate() }
+      terminationRelay.markExpected()
+      LSPProcessLifecycle.terminate(process)
     }
   }
 #endif

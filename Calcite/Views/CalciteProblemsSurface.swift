@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
   struct CalciteProblemsSurface: View {
     private enum ProblemSelection: Hashable {
       case document(tabID: UUID, diagnosticOffset: Int)
+      case project(url: URL, diagnosticOffset: Int)
       case build(EditorBuildDiagnostic)
     }
 
@@ -33,6 +34,22 @@ import UniformTypeIdentifiers
             }
           }
         }
+        ForEach(controller.closedDocumentDiagnostics) { item in
+          Section(item.url.lastPathComponent) {
+            ForEach(Array(item.diagnostics.enumerated()), id: \.offset) { offset, diagnostic in
+              ProblemRow(
+                severity: diagnostic.severity,
+                message: diagnostic.message,
+                location:
+                  "\(relativePath(for: item.url)):\(diagnostic.range.start.line + 1)"
+              )
+              .tag(ProblemSelection.project(url: item.url, diagnosticOffset: offset))
+              .onTapGesture(count: 2) {
+                controller.openProjectDiagnostic(diagnostic, at: item.url)
+              }
+            }
+          }
+        }
         if !buildController.diagnostics.isEmpty {
           Section("Build") {
             ForEach(buildController.diagnostics, id: \.self) { diagnostic in
@@ -50,6 +67,7 @@ import UniformTypeIdentifiers
           }
         }
         if controller.tabs.allSatisfy({ $0.diagnostics.isEmpty })
+          && controller.closedDocumentDiagnostics.isEmpty
           && buildController.diagnostics.isEmpty
         {
           ContentUnavailableView(
@@ -76,6 +94,13 @@ import UniformTypeIdentifiers
           else { return nil }
           let diagnostic = tab.diagnostics[offset]
           return "\(tab.title):\(diagnostic.range.start.line + 1): \(diagnostic.message)"
+        case .project(let url, let offset):
+          guard let item = controller.closedDocumentDiagnostics.first(where: {
+            $0.url.standardizedFileURL == url.standardizedFileURL
+          }), item.diagnostics.indices.contains(offset) else { return nil }
+          let diagnostic = item.diagnostics[offset]
+          return
+            "\(relativePath(for: url)):\(diagnostic.range.start.line + 1): \(diagnostic.message)"
         case .build(let diagnostic):
           return
             "\(diagnostic.url.lastPathComponent):\(diagnostic.line):\(diagnostic.column): \(diagnostic.message)"
@@ -83,6 +108,13 @@ import UniformTypeIdentifiers
       }
       .sorted()
       .joined(separator: "\n")
+    }
+
+    private func relativePath(for url: URL) -> String {
+      let workspacePath = controller.workspaceURL.standardizedFileURL.path
+      let path = url.standardizedFileURL.path
+      guard path.hasPrefix(workspacePath + "/") else { return url.lastPathComponent }
+      return String(path.dropFirst(workspacePath.count + 1))
     }
 
     private func reveal(_ diagnostic: Diagnostic, in tab: EditorTab) {

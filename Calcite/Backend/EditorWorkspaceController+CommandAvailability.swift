@@ -51,7 +51,7 @@ extension EditorWorkspaceController {
       canCheck: EditorBuildTaskResolver.canExecute(
         projectPlan: projectPlan, activeFileURL: activeFileURL, kind: .check),
       isBuilding: isBuilding,
-      canStartDebug: activeTab != nil && !debugIsActive && !isBuilding,
+      canStartDebug: !debugIsActive && !isBuilding,
       debugIsActive: debugIsActive,
       debugIsRunning: debugIsRunning,
       debugIsPaused: debugIsPaused

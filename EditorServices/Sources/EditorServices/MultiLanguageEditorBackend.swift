@@ -255,9 +255,9 @@ import Foundation
 
         let backend = try await builder.build()
         for (server, connection) in connections {
-          Task { [weak backend] in
+          let task = Task { [weak backend] in
             for await line in connection.standardError {
-              guard let backend else { return }
+              guard let backend, !Task.isCancelled else { return }
               backend.reportLanguageServerMessage(
                 LanguageServerMessage(
                   kind: .log,
@@ -267,6 +267,23 @@ import Foundation
               )
             }
           }
+          backend.retainLifetimeTask(task)
+
+          let terminationTask = Task { [weak backend] in
+            for await event in connection.terminationEvents {
+              guard let backend, !Task.isCancelled, !event.expected else { return }
+              backend.reportLanguageServerMessage(
+                LanguageServerMessage(
+                  kind: .error,
+                  message:
+                    "Language server process terminated unexpectedly "
+                    + "(reason: \(event.reason.rawValue), status: \(event.status)).",
+                  serviceIdentifier: server.id.rawValue
+                )
+              )
+            }
+          }
+          backend.retainLifetimeTask(terminationTask)
         }
         do {
           for (server, connection) in connections {

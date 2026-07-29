@@ -138,7 +138,8 @@ nonisolated enum MainSectionPlacement: Equatable, Sendable {
   case after
 }
 
-nonisolated enum MainSectionalLayoutPreset: String, CaseIterable, Equatable, Identifiable, Sendable
+nonisolated enum MainSectionalLayoutPreset: String, CaseIterable, Codable, Equatable, Identifiable,
+  Sendable
 {
   case standard
   case editorFocus
@@ -398,6 +399,15 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
       return [self]
     case .split:
       return children.flatMap(\.sectionNodes)
+    }
+  }
+
+  var splitNodes: [MainSectionLayoutNode] {
+    switch type {
+    case .section:
+      return []
+    case .split:
+      return [self] + children.flatMap(\.splitNodes)
     }
   }
 
@@ -937,12 +947,32 @@ final class MainSectionalLayoutController: ObservableObject {
   @Published private(set) var canRedo = false
   @Published private(set) var swapSourceSectionID: UUID?
   @Published private(set) var activeSectionID: UUID?
+  @Published private(set) var splitGeometries: [UUID: MainSectionSplitGeometry]
+  @Published private(set) var layoutProfiles: [CalciteLayoutProfile]
+  @Published private(set) var activeLayoutProfileID: UUID?
+
+  private struct PersistedState: Codable {
+    var version: Int
+    var root: MainSectionLayoutNode
+    var splitGeometries: [UUID: MainSectionSplitGeometry]
+    var activeLayoutProfileID: UUID?
+  }
+
+  private struct LayoutSnapshot {
+    var root: MainSectionLayoutNode
+    var splitGeometries: [UUID: MainSectionSplitGeometry]
+    var activeLayoutProfileID: UUID?
+  }
 
   private let workspaceURL: URL
   private let defaults: UserDefaults
+  private let usesFileStorage: Bool
   private let includesSidebarByDefault: Bool
-  private var undoStack: [MainSectionLayoutNode] = []
-  private var redoStack: [MainSectionLayoutNode] = []
+  private let profileStore: CalciteLayoutProfileStore
+  private var undoStack: [LayoutSnapshot] = []
+  private var redoStack: [LayoutSnapshot] = []
+  private var pendingGeometrySnapshot: LayoutSnapshot?
+  private var geometryEditWorkItem: DispatchWorkItem?
 
   init(
     workspaceURL: URL,
@@ -952,16 +982,37 @@ final class MainSectionalLayoutController: ObservableObject {
   ) {
     self.workspaceURL = workspaceURL.standardizedFileURL
     self.defaults = defaults
+    self.usesFileStorage = defaults === UserDefaults.standard
     self.includesSidebarByDefault = includesSidebarByDefault
-    self.root =
-      Self.load(workspaceURL: workspaceURL, defaults: defaults)
+    let profileStore = CalciteLayoutProfileStore(defaults: defaults)
+    self.profileStore = profileStore
+
+    let persisted = Self.loadState(workspaceURL: workspaceURL, defaults: defaults)
+    let initialRoot =
+      persisted?.root
       ?? Self.makePreset(.standard, includesSidebar: includesSidebarByDefault)
+    self.root = initialRoot
+    self.splitGeometries = persisted?.splitGeometries ?? [:]
+    self.activeLayoutProfileID = persisted?.activeLayoutProfileID
+    self.layoutProfiles =
+      Self.builtInProfiles(includesSidebar: includesSidebarByDefault)
+      + profileStore.loadCustomProfiles()
+    self.activeSectionID = nil
+    reconcileSplitGeometries()
+    if activeLayoutProfileID.flatMap({ id in layoutProfiles.first(where: { $0.id == id }) }) == nil
+    {
+      activeLayoutProfileID = nil
+    }
     self.activeSectionID =
       root.sectionNodes.first {
         $0.hasVisibleContent && ($0.contains(kind: .workspace) || $0.contains(kind: .editor))
       }?.id
       ?? root.visibleSectionIDs.first
       ?? root.firstSectionID()
+  }
+
+  isolated deinit {
+    geometryEditWorkItem?.cancel()
   }
 
   var leafCount: Int { root.leafCount }
@@ -998,12 +1049,130 @@ final class MainSectionalLayoutController: ObservableObject {
 
   func splitAutosaveName(
     for splitID: UUID,
-    visibleGeometrySignature: String,
-    fullGeometrySignature: String
+    visibleGeometrySignature _: String,
+    fullGeometrySignature _: String
   ) -> String {
-    let base = splitAutosaveName(for: splitID)
-    guard visibleGeometrySignature != fullGeometrySignature else { return base }
-    return "\(base).visible.\(Self.stableIdentifier(visibleGeometrySignature))"
+    // Split identity must not change when a child is temporarily hidden. A visibility-specific
+    // autosave key caused AppKit to restore an unrelated divider position after every topology
+    // edit or fast-panel toggle.
+    splitAutosaveName(for: splitID)
+  }
+
+  func splitFractions(
+    for splitID: UUID,
+    visibleChildIDs: [UUID],
+    defaultSecondaryFraction: Double?
+  ) -> [Double] {
+    let fallback = Self.defaultFractions(
+      childCount: visibleChildIDs.count,
+      secondaryFraction: defaultSecondaryFraction
+    )
+    return splitGeometries[splitID]?.resolvedFractions(
+      for: visibleChildIDs,
+      fallback: fallback
+    ) ?? fallback
+  }
+
+  func updateSplitFractions(
+    splitID: UUID,
+    visibleChildIDs: [UUID],
+    fractions: [Double]
+  ) {
+    guard visibleChildIDs.count == fractions.count, !visibleChildIDs.isEmpty else { return }
+    var geometry = splitGeometries[splitID] ?? MainSectionSplitGeometry(splitID: splitID)
+    let previous = geometry
+    geometry.update(childIDs: visibleChildIDs, fractions: fractions)
+    guard geometry != previous else { return }
+    if pendingGeometrySnapshot == nil { pendingGeometrySnapshot = currentSnapshot() }
+    splitGeometries[splitID] = geometry
+    persist()
+    scheduleGeometryEditCommit()
+  }
+
+  var activeLayoutProfile: CalciteLayoutProfile? {
+    activeLayoutProfileID.flatMap { id in layoutProfiles.first(where: { $0.id == id }) }
+  }
+
+  var isActiveLayoutProfileModified: Bool {
+    guard let profile = activeLayoutProfile else { return false }
+    return profile.root != root || profile.splitGeometry != splitGeometries
+  }
+
+  @discardableResult
+  func saveCurrentLayoutProfile(named name: String? = nil) -> UUID {
+    let profileName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let resolvedName =
+      profileName.flatMap { $0.isEmpty ? nil : $0 }
+      ?? nextCustomProfileName()
+    let profile = CalciteLayoutProfile(
+      name: resolvedName,
+      root: root,
+      splitGeometry: splitGeometries,
+      sidebarVisible: root.contains(kind: .sidebar, visibleOnly: true)
+    )
+    layoutProfiles.append(profile)
+    activeLayoutProfileID = profile.id
+    persistCustomProfiles()
+    persist()
+    return profile.id
+  }
+
+  func updateActiveLayoutProfile() {
+    guard let activeLayoutProfileID,
+      let index = layoutProfiles.firstIndex(where: { $0.id == activeLayoutProfileID }),
+      !layoutProfiles[index].isBuiltIn
+    else { return }
+    layoutProfiles[index].root = root
+    layoutProfiles[index].splitGeometry = splitGeometries
+    layoutProfiles[index].sidebarVisible = root.contains(kind: .sidebar, visibleOnly: true)
+    persistCustomProfiles()
+    persist()
+  }
+
+  func renameLayoutProfile(id: UUID, to name: String) {
+    let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty,
+      let index = layoutProfiles.firstIndex(where: { $0.id == id }),
+      !layoutProfiles[index].isBuiltIn
+    else { return }
+    layoutProfiles[index].name = name
+    persistCustomProfiles()
+  }
+
+  @discardableResult
+  func duplicateLayoutProfile(id: UUID) -> UUID? {
+    guard var profile = layoutProfiles.first(where: { $0.id == id }) else { return nil }
+    profile.id = UUID()
+    profile.name = uniqueProfileName(base: "\(profile.name) Copy")
+    profile.builtInPreset = nil
+    layoutProfiles.append(profile)
+    activeLayoutProfileID = profile.id
+    persistCustomProfiles()
+    persist()
+    return profile.id
+  }
+
+  func deleteLayoutProfile(id: UUID) {
+    guard let profile = layoutProfiles.first(where: { $0.id == id }), !profile.isBuiltIn else {
+      return
+    }
+    layoutProfiles.removeAll { $0.id == id }
+    if activeLayoutProfileID == id { activeLayoutProfileID = nil }
+    persistCustomProfiles()
+    persist()
+  }
+
+  func applyLayoutProfile(id: UUID) {
+    guard let profile = layoutProfiles.first(where: { $0.id == id }) else { return }
+    pushUndoSnapshot()
+    redoStack.removeAll(keepingCapacity: true)
+    root = profile.root.normalized()
+    splitGeometries = profile.splitGeometry
+    activeLayoutProfileID = profile.id
+    reconcileSplitGeometries()
+    clearInvalidSelections()
+    persist()
+    refreshHistoryAvailability()
   }
 
   func contains(_ kind: MainSectionKind) -> Bool {
@@ -1394,27 +1563,31 @@ final class MainSectionalLayoutController: ObservableObject {
   }
 
   func applyPreset(_ preset: MainSectionalLayoutPreset) {
-    commit(Self.makePreset(preset, includesSidebar: includesSidebarByDefault))
+    if let profile = layoutProfiles.first(where: { $0.builtInPreset == preset }) {
+      applyLayoutProfile(id: profile.id)
+    } else {
+      commit(Self.makePreset(preset, includesSidebar: includesSidebarByDefault))
+    }
   }
 
   func reset() {
-    commit(Self.makePreset(.standard, includesSidebar: includesSidebarByDefault))
+    applyPreset(.standard)
   }
 
   func undo() {
+    finalizePendingGeometryEdit()
     guard let previous = undoStack.popLast() else { return }
-    redoStack.append(root)
-    root = previous
-    clearInvalidSelections()
+    redoStack.append(currentSnapshot())
+    restore(previous)
     persist()
     refreshHistoryAvailability()
   }
 
   func redo() {
+    finalizePendingGeometryEdit()
     guard let next = redoStack.popLast() else { return }
-    undoStack.append(root)
-    root = next
-    clearInvalidSelections()
+    undoStack.append(currentSnapshot())
+    restore(next)
     persist()
     refreshHistoryAvailability()
   }
@@ -1500,7 +1673,14 @@ final class MainSectionalLayoutController: ObservableObject {
   private func updateWithoutHistory(_ operation: (inout MainSectionLayoutNode) -> Bool) {
     var updated = root
     guard operation(&updated) else { return }
-    root = updated.normalized()
+    let normalized = updated.normalized()
+    splitGeometries = Self.migratedGeometries(
+      from: root,
+      geometries: splitGeometries,
+      to: normalized
+    )
+    root = normalized
+    reconcileSplitGeometries()
     clearInvalidSelections()
     persist()
   }
@@ -1508,13 +1688,102 @@ final class MainSectionalLayoutController: ObservableObject {
   private func commit(_ updated: MainSectionLayoutNode) {
     let normalized = updated.normalized()
     guard normalized != root else { return }
-    undoStack.append(root)
-    if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
+    pushUndoSnapshot()
     redoStack.removeAll(keepingCapacity: true)
+    splitGeometries = Self.migratedGeometries(
+      from: root,
+      geometries: splitGeometries,
+      to: normalized
+    )
     root = normalized
+    reconcileSplitGeometries()
     clearInvalidSelections()
     persist()
     refreshHistoryAvailability()
+  }
+
+  private func currentSnapshot() -> LayoutSnapshot {
+    LayoutSnapshot(
+      root: root,
+      splitGeometries: splitGeometries,
+      activeLayoutProfileID: activeLayoutProfileID
+    )
+  }
+
+  private func restore(_ snapshot: LayoutSnapshot) {
+    root = snapshot.root.normalized()
+    splitGeometries = snapshot.splitGeometries
+    activeLayoutProfileID = snapshot.activeLayoutProfileID
+    reconcileSplitGeometries()
+    clearInvalidSelections()
+  }
+
+  private func pushUndoSnapshot() {
+    finalizePendingGeometryEdit()
+    undoStack.append(currentSnapshot())
+    if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
+  }
+
+  private func scheduleGeometryEditCommit() {
+    geometryEditWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        self?.finalizePendingGeometryEdit()
+      }
+    }
+    geometryEditWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+  }
+
+  private func finalizePendingGeometryEdit() {
+    geometryEditWorkItem?.cancel()
+    geometryEditWorkItem = nil
+    guard let snapshot = pendingGeometrySnapshot else { return }
+    pendingGeometrySnapshot = nil
+    guard snapshot.splitGeometries != splitGeometries else { return }
+    undoStack.append(snapshot)
+    if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
+    redoStack.removeAll(keepingCapacity: true)
+    refreshHistoryAvailability()
+  }
+
+  private func reconcileSplitGeometries() {
+    let validSplitIDs = Set(root.splitNodes.map(\.id))
+    splitGeometries = splitGeometries.filter { validSplitIDs.contains($0.key) }
+
+    for split in root.splitNodes {
+      let childIDs = split.children.map(\.id)
+      let fallback = Self.defaultFractions(for: split)
+      var geometry =
+        splitGeometries[split.id]
+        ?? MainSectionSplitGeometry(splitID: split.id)
+      geometry.reconcile(with: childIDs, fallback: fallback)
+      geometry.collapsedChildIDs = Set(
+        split.children.compactMap { child in child.hasVisibleContent ? nil : child.id }
+      )
+      splitGeometries[split.id] = geometry
+    }
+  }
+
+  private func persistCustomProfiles() {
+    profileStore.saveCustomProfiles(layoutProfiles.filter { !$0.isBuiltIn })
+  }
+
+  private func nextCustomProfileName() -> String {
+    var number = 1
+    while layoutProfiles.contains(where: { $0.name == "Custom Layout \(number)" }) {
+      number += 1
+    }
+    return "Custom Layout \(number)"
+  }
+
+  private func uniqueProfileName(base: String) -> String {
+    guard layoutProfiles.contains(where: { $0.name == base }) else { return base }
+    var number = 2
+    while layoutProfiles.contains(where: { $0.name == "\(base) \(number)" }) {
+      number += 1
+    }
+    return "\(base) \(number)"
   }
 
   private func clearInvalidSelections() {
@@ -1535,8 +1804,23 @@ final class MainSectionalLayoutController: ObservableObject {
   }
 
   private func persist() {
-    guard let data = try? JSONEncoder().encode(root) else { return }
-    defaults.set(data, forKey: Self.storageKey(for: workspaceURL))
+    let state = PersistedState(
+      version: 2,
+      root: root,
+      splitGeometries: splitGeometries,
+      activeLayoutProfileID: activeLayoutProfileID
+    )
+    if usesFileStorage {
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+      try? CalciteStateStorage.save(
+        state,
+        to: CalciteStateStorage.workspaceURL(workspaceURL, filename: "layout.json"),
+        encoder: encoder
+      )
+    } else if let data = try? JSONEncoder().encode(state) {
+      defaults.set(data, forKey: Self.storageKey(for: workspaceURL))
+    }
   }
 
   private func refreshHistoryAvailability() {
@@ -1544,15 +1828,64 @@ final class MainSectionalLayoutController: ObservableObject {
     canRedo = !redoStack.isEmpty
   }
 
-  private static func load(
+  private static func loadState(
     workspaceURL: URL,
     defaults: UserDefaults
-  ) -> MainSectionLayoutNode? {
-    guard let data = defaults.data(forKey: storageKey(for: workspaceURL)),
-      let decoded = try? JSONDecoder().decode(MainSectionLayoutNode.self, from: data),
-      decoded.leafCount > 0
-    else { return nil }
-    return decoded.normalized()
+  ) -> PersistedState? {
+    let usesFileStorage = defaults === UserDefaults.standard
+    let legacyKey = storageKey(for: workspaceURL)
+    let data: Data?
+    if usesFileStorage {
+      let fileURL = CalciteStateStorage.workspaceURL(workspaceURL, filename: "layout.json")
+      if let state = CalciteStateStorage.load(PersistedState.self, from: fileURL),
+        state.root.leafCount > 0
+      {
+        return normalizedState(state)
+      }
+      data = defaults.data(forKey: legacyKey)
+    } else {
+      data = defaults.data(forKey: legacyKey)
+    }
+
+    guard let data else { return nil }
+    let migrated: PersistedState?
+    if let state = try? JSONDecoder().decode(PersistedState.self, from: data),
+      state.root.leafCount > 0
+    {
+      migrated = normalizedState(state)
+    } else if let root = try? JSONDecoder().decode(MainSectionLayoutNode.self, from: data),
+      root.leafCount > 0
+    {
+      migrated = PersistedState(
+        version: 2,
+        root: root.normalized(),
+        splitGeometries: [:],
+        activeLayoutProfileID: nil
+      )
+    } else {
+      migrated = nil
+    }
+
+    if usesFileStorage, let migrated {
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+      try? CalciteStateStorage.save(
+        migrated,
+        to: CalciteStateStorage.workspaceURL(workspaceURL, filename: "layout.json"),
+        encoder: encoder
+      )
+      defaults.removeObject(forKey: legacyKey)
+    }
+    return migrated
+  }
+
+  private static func normalizedState(_ state: PersistedState) -> PersistedState {
+    PersistedState(
+      version: max(2, state.version),
+      root: state.root.normalized(),
+      splitGeometries: state.splitGeometries,
+      activeLayoutProfileID: state.activeLayoutProfileID
+    )
   }
 
   private static func storageKey(for workspaceURL: URL) -> String {
@@ -1568,6 +1901,167 @@ final class MainSectionalLayoutController: ObservableObject {
       hash &*= 1_099_511_628_211
     }
     return String(hash, radix: 16)
+  }
+
+  private static func defaultFractions(
+    childCount: Int,
+    secondaryFraction: Double? = nil
+  ) -> [Double] {
+    guard childCount > 0 else { return [] }
+    if childCount == 2, let secondaryFraction {
+      let secondary = min(max(secondaryFraction, 0.08), 0.92)
+      return [1 - secondary, secondary]
+    }
+    return Array(repeating: 1 / Double(childCount), count: childCount)
+  }
+
+  private static func defaultFractions(for split: MainSectionLayoutNode) -> [Double] {
+    guard split.type == .split else { return [] }
+    if split.children.count == 2 {
+      if split.splitAxis == .vertical,
+        split.children[1].sectionKinds.contains(where: {
+          $0.isBottomPanelKind || $0 == .debug
+        })
+      {
+        return defaultFractions(childCount: 2, secondaryFraction: 0.22)
+      }
+      if split.splitAxis == .horizontal, split.children[0].contains(kind: .sidebar) {
+        return [0.22, 0.78]
+      }
+    }
+    return defaultFractions(childCount: split.children.count)
+  }
+
+  private static func geometryMap(
+    for root: MainSectionLayoutNode
+  ) -> [UUID: MainSectionSplitGeometry] {
+    Dictionary(
+      uniqueKeysWithValues: root.splitNodes.map { split in
+        let childIDs = split.children.map(\.id)
+        let fractions = defaultFractions(for: split)
+        return (
+          split.id,
+          MainSectionSplitGeometry(
+            splitID: split.id,
+            childFractions: Dictionary(uniqueKeysWithValues: zip(childIDs, fractions)),
+            collapsedChildIDs: []
+          )
+        )
+      })
+  }
+
+  /// Carries divider fractions across topology edits. Fractions are first matched by descendant
+  /// section identity, so wrapping a section in a new split or collapsing a split back to one
+  /// child does not resize its siblings. Newly inserted siblings divide only the nearest matched
+  /// child's existing share; removed children donate their share to the nearest survivor.
+  private static func migratedGeometries(
+    from oldRoot: MainSectionLayoutNode,
+    geometries oldGeometries: [UUID: MainSectionSplitGeometry],
+    to newRoot: MainSectionLayoutNode
+  ) -> [UUID: MainSectionSplitGeometry] {
+    let oldSplits = Dictionary(uniqueKeysWithValues: oldRoot.splitNodes.map { ($0.id, $0) })
+    var result: [UUID: MainSectionSplitGeometry] = [:]
+
+    for newSplit in newRoot.splitNodes {
+      let newChildIDs = newSplit.children.map(\.id)
+      guard let oldSplit = oldSplits[newSplit.id] else {
+        var geometry = MainSectionSplitGeometry(splitID: newSplit.id)
+        geometry.update(childIDs: newChildIDs, fractions: defaultFractions(for: newSplit))
+        result[newSplit.id] = geometry
+        continue
+      }
+
+      let oldChildIDs = oldSplit.children.map(\.id)
+      let oldFractions =
+        oldGeometries[newSplit.id]?.resolvedFractions(
+          for: oldChildIDs,
+          fallback: defaultFractions(for: oldSplit)
+        ) ?? defaultFractions(for: oldSplit)
+      let oldSectionSets = oldSplit.children.map { Set($0.sectionNodes.map(\.id)) }
+      let newSectionSets = newSplit.children.map { Set($0.sectionNodes.map(\.id)) }
+      var allocations = Array(repeating: 0.0, count: newSplit.children.count)
+
+      for oldIndex in oldSplit.children.indices {
+        let matches = newSplit.children.indices.filter {
+          !oldSectionSets[oldIndex].isDisjoint(with: newSectionSets[$0])
+        }
+        guard !matches.isEmpty else { continue }
+        let share = oldFractions[oldIndex] / Double(matches.count)
+        for newIndex in matches {
+          allocations[newIndex] += share
+        }
+      }
+
+      // A removed child gives its old space to the nearest remaining child rather than forcing a
+      // full equal-size reset of the split.
+      for oldIndex in oldSplit.children.indices
+      where newSplit.children.indices.allSatisfy({
+        oldSectionSets[oldIndex].isDisjoint(with: newSectionSets[$0])
+      }) {
+        guard !allocations.isEmpty else { continue }
+        let target =
+          allocations.indices.min { lhs, rhs in
+            abs(lhs - oldIndex) < abs(rhs - oldIndex)
+          } ?? 0
+        allocations[target] += oldFractions[oldIndex]
+      }
+
+      // A directly inserted child has no old descendant identity. Split only the closest
+      // survivor's share, which keeps every unrelated divider position stable.
+      var cursor = 0
+      while cursor < allocations.count {
+        guard allocations[cursor] == 0 else {
+          cursor += 1
+          continue
+        }
+        let start = cursor
+        while cursor < allocations.count, allocations[cursor] == 0 { cursor += 1 }
+        let end = cursor
+        let candidates = allocations.indices.filter { allocations[$0] > 0 }
+        guard
+          let donor = candidates.min(by: { lhs, rhs in
+            let lhsDistance = min(abs(lhs - start), abs(lhs - (end - 1)))
+            let rhsDistance = min(abs(rhs - start), abs(rhs - (end - 1)))
+            if lhsDistance != rhsDistance { return lhsDistance < rhsDistance }
+            return lhs < rhs
+          })
+        else {
+          allocations = defaultFractions(for: newSplit)
+          break
+        }
+        let insertedCount = end - start
+        let share = allocations[donor] / Double(insertedCount + 1)
+        allocations[donor] = share
+        for index in start..<end { allocations[index] = share }
+      }
+
+      var geometry = oldGeometries[newSplit.id] ?? MainSectionSplitGeometry(splitID: newSplit.id)
+      geometry.update(childIDs: newChildIDs, fractions: allocations)
+      result[newSplit.id] = geometry
+    }
+    return result
+  }
+
+  private static func builtInProfiles(
+    includesSidebar: Bool
+  ) -> [CalciteLayoutProfile] {
+    let identifiers: [MainSectionalLayoutPreset: UUID] = [
+      .standard: UUID(uuidString: "00000000-0000-0000-0000-000000000101")!,
+      .editorFocus: UUID(uuidString: "00000000-0000-0000-0000-000000000102")!,
+      .sideBySide: UUID(uuidString: "00000000-0000-0000-0000-000000000103")!,
+      .debugging: UUID(uuidString: "00000000-0000-0000-0000-000000000104")!,
+    ]
+    return MainSectionalLayoutPreset.allCases.map { preset in
+      let root = makePreset(preset, includesSidebar: includesSidebar)
+      return CalciteLayoutProfile(
+        id: identifiers[preset]!,
+        name: preset.title,
+        root: root,
+        splitGeometry: geometryMap(for: root),
+        sidebarVisible: root.contains(kind: .sidebar, visibleOnly: true),
+        builtInPreset: preset
+      )
+    }
   }
 
   private static func makePreset(

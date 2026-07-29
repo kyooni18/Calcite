@@ -14,6 +14,21 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
     logicalLineStart: Int,
     text: String
   ) -> Int? {
+    MainActor.assumeIsolated {
+      visualColumnOnMainActor(
+        atUTF16Offset: offset,
+        logicalLineStart: logicalLineStart,
+        text: text
+      )
+    }
+  }
+
+  @MainActor
+  private func visualColumnOnMainActor(
+    atUTF16Offset offset: Int,
+    logicalLineStart: Int,
+    text: String
+  ) -> Int? {
     guard let textView = validTextView(for: text),
       let caret = layoutRect(at: offset, in: textView)
     else { return nil }
@@ -22,6 +37,25 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
   }
 
   func utf16Offset(
+    inLogicalLineStartingAt lineStart: Int,
+    atVisualColumn column: Int,
+    contentEnd: Int,
+    text: String,
+    roundForward: Bool
+  ) -> Int? {
+    MainActor.assumeIsolated {
+      utf16OffsetOnMainActor(
+        inLogicalLineStartingAt: lineStart,
+        atVisualColumn: column,
+        contentEnd: contentEnd,
+        text: text,
+        roundForward: roundForward
+      )
+    }
+  }
+
+  @MainActor
+  private func utf16OffsetOnMainActor(
     inLogicalLineStartingAt lineStart: Int,
     atVisualColumn column: Int,
     contentEnd: Int,
@@ -54,6 +88,16 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
     logicalLineStart _: Int,
     text: String
   ) -> Int? {
+    MainActor.assumeIsolated {
+      visualWidthOnMainActor(atUTF16Offset: offset, text: text)
+    }
+  }
+
+  @MainActor
+  private func visualWidthOnMainActor(
+    atUTF16Offset offset: Int,
+    text: String
+  ) -> Int? {
     guard let textView = validTextView(for: text),
       let rect = layoutRect(at: offset, in: textView)
     else { return nil }
@@ -62,6 +106,23 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
   }
 
   func moveVertically(
+    fromUTF16Offset offset: Int,
+    direction: Int,
+    preferredColumn: Int?,
+    text: String
+  ) -> VimVisualMovement? {
+    MainActor.assumeIsolated {
+      moveVerticallyOnMainActor(
+        fromUTF16Offset: offset,
+        direction: direction,
+        preferredColumn: preferredColumn,
+        text: text
+      )
+    }
+  }
+
+  @MainActor
+  private func moveVerticallyOnMainActor(
     fromUTF16Offset offset: Int,
     direction: Int,
     preferredColumn: Int?,
@@ -102,11 +163,13 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
     return VimVisualMovement(utf16Offset: character, preferredColumn: currentColumn)
   }
 
+  @MainActor
   private func validTextView(for text: String) -> NSTextView? {
     guard let textView, textView.string == text else { return nil }
     return textView
   }
 
+  @MainActor
   private func layoutRect(at rawOffset: Int, in textView: NSTextView) -> NSRect? {
     guard let layoutManager = textView.layoutManager,
       let textContainer = textView.textContainer
@@ -132,6 +195,7 @@ final class CalciteVimGeometryProvider: @unchecked Sendable, VimVisualGeometryPr
     return glyphRect
   }
 
+  @MainActor
   private func visualLineFragment(at offset: Int, in textView: NSTextView) -> NSRect? {
     guard let layoutManager = textView.layoutManager,
       let textContainer = textView.textContainer
