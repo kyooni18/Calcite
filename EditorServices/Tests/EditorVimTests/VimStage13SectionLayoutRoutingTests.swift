@@ -50,7 +50,7 @@ final class VimStage13SectionLayoutRoutingTests: XCTestCase {
     )
     XCTAssertEqual(
       try engine.executeNotation("<C-W>l").hostRequests,
-      [.custom("vim-window-right:1")]
+      [.focusWindow(direction: .right, count: 1)]
     )
     XCTAssertEqual(
       try engine.execute(.ex("wincmd v")).hostRequests,

@@ -4,11 +4,13 @@ import EditorVim
 @MainActor
 struct CalciteProblemsView: View {
   @ObservedObject var backend: CalciteBackend
+  @ObservedObject var windowSession: CalciteBackendWindowSession
 
   var body: some View {
     CalciteProblemsSurface(
       controller: backend.controller,
-      buildController: backend.buildController
+      buildController: backend.buildController,
+      windowSession: windowSession
     )
   }
 }

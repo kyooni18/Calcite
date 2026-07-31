@@ -38,6 +38,7 @@ public final class DAPProcessConnection: @unchecked Sendable {
   private let transportContinuation: AsyncStream<String>.Continuation
   private let terminationContinuation: AsyncStream<DAPProcessTermination>.Continuation
   private let terminationState = TerminationState()
+  private var processGroupID: Int32?
 
   public init(
     executableURL: URL,
@@ -96,6 +97,7 @@ public final class DAPProcessConnection: @unchecked Sendable {
       Task { await session.disconnect() }
     }
     try process.run()
+    processGroupID = Self.createProcessGroup(for: process.processIdentifier)
     startReaders()
   }
 
@@ -104,7 +106,7 @@ public final class DAPProcessConnection: @unchecked Sendable {
   /// Stops the child process and all pipe readers. This method is idempotent.
   public func terminate() {
     guard terminationState.beginTermination() else { return }
-    Self.terminateProcess(process)
+    terminateProcessTree()
     try? input.close()
     try? output.close()
     try? errorOutput.close()
@@ -117,15 +119,50 @@ public final class DAPProcessConnection: @unchecked Sendable {
     terminationContinuation.finish()
   }
 
-  private static func terminateProcess(_ process: Process) {
+  private func terminateProcessTree() {
     guard process.isRunning else { return }
+    signalProcess(SIGINT)
+    Self.waitBriefly(for: process, microseconds: 100_000)
+    guard process.isRunning else { return }
+    signalProcess(SIGTERM)
+    Self.waitBriefly(for: process, microseconds: 250_000)
+    guard process.isRunning else { return }
+    signalProcess(SIGKILL)
+  }
+
+  private func signalProcess(_ signal: Int32) {
     #if canImport(Darwin)
-      _ = Darwin.kill(process.processIdentifier, SIGTERM)
+      if let processGroupID {
+        _ = Darwin.kill(-processGroupID, signal)
+      } else {
+        _ = Darwin.kill(process.processIdentifier, signal)
+      }
     #elseif canImport(Glibc)
-      _ = Glibc.kill(process.processIdentifier, SIGTERM)
+      if let processGroupID {
+        _ = Glibc.kill(-processGroupID, signal)
+      } else {
+        _ = Glibc.kill(process.processIdentifier, signal)
+      }
     #else
       process.terminate()
     #endif
+  }
+
+  private static func createProcessGroup(for processID: Int32) -> Int32? {
+    #if canImport(Darwin) || canImport(Glibc)
+      if setpgid(processID, processID) == 0 || getpgid(processID) == processID {
+        return processID
+      }
+    #endif
+    return nil
+  }
+
+  private static func waitBriefly(for process: Process, microseconds: useconds_t) {
+    var remaining = microseconds
+    while process.isRunning, remaining > 0 {
+      usleep(min(25_000, remaining))
+      remaining -= min(25_000, remaining)
+    }
   }
 
   private func startReaders() {

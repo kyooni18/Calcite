@@ -334,19 +334,57 @@ final class EditorTab: ObservableObject, Identifiable {
   }
 
   func submitVimTransaction(
-    _ transaction: VimEditTransaction,
-    selectionAfter: NSRange,
+    _ submittedTransaction: VimEditTransaction,
+    selectionAfter submittedSelection: NSRange,
     suggestionDelay: Double
   ) {
     guard !isClosing, !isClosed else { return }
-    let expectedRevision = transaction.baseRevision?.value
-    guard expectedRevision == nil || expectedRevision == textRevision else {
-      errorMessage = "Vim edit was rejected because the document revision changed."
+
+    let baseRevision = submittedTransaction.baseRevision ?? VimDocumentRevision(textRevision)
+    let prepared: VimPreparedCommit
+    do {
+      prepared = try VimTransactionCoordinator().prepare(
+        submittedTransaction,
+        base: VimTransactionSnapshot(
+          revision: baseRevision,
+          text: submittedTransaction.beforeState.text
+        ),
+        current: VimTransactionSnapshot(
+          revision: VimDocumentRevision(textRevision),
+          text: text
+        )
+      )
+    } catch let error as VimDocumentTransactionError {
+      switch error {
+      case .conflict(.staleRevision):
+        errorMessage = "Vim edit was rejected because the document revision changed."
+      case .conflict(.overlappingExternalEdit):
+        errorMessage = "Vim edit conflicted with another document change."
+      case .conflict(.invalidEdit):
+        errorMessage = "Vim edit transaction is invalid."
+      case .conflict(.authoritativeTextMismatch):
+        errorMessage = "Vim edit did not match the authoritative document."
+      }
+      return
+    } catch {
+      errorMessage = error.localizedDescription
       return
     }
-    guard transaction.beforeState.text == text else {
-      errorMessage = "Vim edit was rejected because its base text is stale."
-      return
+
+    let transaction = prepared.transaction
+    let selectionAfter: NSRange
+    switch prepared.disposition {
+    case .accepted:
+      selectionAfter = submittedSelection
+    case .rebased:
+      if let selection = transaction.afterState.selection {
+        selectionAfter = NSRange(
+          location: selection.lowerBound,
+          length: selection.upperBound - selection.lowerBound
+        )
+      } else {
+        selectionAfter = NSRange(location: transaction.afterState.cursor, length: 0)
+      }
     }
 
     let baseSnapshot = TextSnapshot(text: text)
@@ -356,7 +394,10 @@ final class EditorTab: ObservableObject, Identifiable {
         replacement: $0.replacement
       )
     }
-    guard !edits.isEmpty, Self.applying(edits, to: text) == transaction.afterState.text else {
+    guard !edits.isEmpty,
+      VimTransactionCoordinator.applying(transaction.baseEdits, to: text)
+        == transaction.afterState.text
+    else {
       errorMessage = "Vim edit transaction is invalid."
       return
     }
@@ -787,6 +828,25 @@ final class EditorTab: ObservableObject, Identifiable {
     return try await pipeline.documentSymbols()
   }
 
+  func documentSymbolAtSelection() async throws -> EditorDocumentSymbol? {
+    let symbols = try await documentSymbols()
+    let selectedLine = max(0, lineNumber(atUTF16Offset: selectedRange.location) - 1)
+    func candidates(in values: [EditorDocumentSymbol]) -> [EditorDocumentSymbol] {
+      values.flatMap { symbol in
+        let contains =
+          symbol.range.start.line <= selectedLine
+          && selectedLine <= symbol.range.end.line
+        return (contains ? [symbol] : []) + candidates(in: symbol.children)
+      }
+    }
+    return candidates(in: symbols).min { lhs, rhs in
+      let lhsSpan = lhs.range.end.line - lhs.range.start.line
+      let rhsSpan = rhs.range.end.line - rhs.range.start.line
+      if lhsSpan != rhsSpan { return lhsSpan < rhsSpan }
+      return lhs.range.start.utf16Column > rhs.range.start.utf16Column
+    }
+  }
+
   func hoverAtSelection() async throws -> HoverResult? {
     await mutationQueue.waitForIdle()
     return try await pipeline.hover(atUTF16Offset: navigationUTF16Offset)
@@ -847,6 +907,10 @@ final class EditorTab: ObservableObject, Identifiable {
     return min(caret, source.length - 1)
   }
 
+  func updateBreakpoints(_ values: Set<Int>) {
+    breakpoints = values
+  }
+
   func toggleBreakpointAtCurrentLine() {
     let line = currentLine
     if breakpoints.contains(line) {
@@ -863,16 +927,23 @@ final class EditorTab: ObservableObject, Identifiable {
     from oldSnapshot: TextSnapshot,
     to newSnapshot: TextSnapshot
   ) {
-    guard !breakpoints.isEmpty else { return }
+    let records = EditorBreakpointStore.loadRecords(for: url)
+    guard !records.isEmpty else {
+      breakpoints = []
+      return
+    }
+
     let editEnd = NSMaxRange(editedRange)
     let delta = replacementUTF16Length - editedRange.length
-    var mapped: Set<Int> = []
-    for line in breakpoints {
+    var lineMapping: [Int: Int] = [:]
+
+    for line in Set(records.map(\.effectiveLine)) {
       guard
         let oldOffset = try? oldSnapshot.utf16Offset(
           of: TextPosition(line: max(0, line - 1), utf16Column: 0)
         )
       else { continue }
+
       let newOffset: Int
       if oldOffset < editedRange.location {
         newOffset = oldOffset
@@ -883,13 +954,21 @@ final class EditorTab: ObservableObject, Identifiable {
         // which follows the surviving line content when new lines were inserted before it.
         newOffset = editedRange.location + replacementUTF16Length
       }
+
       let clamped = min(max(0, newOffset), newSnapshot.utf16Count)
       if let position = try? newSnapshot.position(atUTF16Offset: clamped) {
-        mapped.insert(position.line + 1)
+        lineMapping[line] = position.line + 1
       }
     }
-    breakpoints = mapped
-    EditorBreakpointStore.save(mapped, for: url)
+
+    let remapped = EditorBreakpointStore.remapRecords(
+      for: url,
+      lineMapping: lineMapping,
+      in: newSnapshot.text
+    )
+    breakpoints = Set(
+      remapped.filter(\.isEnabled).map(\.effectiveLine).filter { $0 > 0 }
+    )
   }
 
   func updateSelection(_ range: NSRange) {

@@ -45,10 +45,6 @@ private struct EditorLLDBDebugLanguageStrategy: EditorDebugLanguageStrategy {
     values["program"] = .string(program)
     values["sourceLanguages"] = .array([.string(language.rawValue)])
 
-    // Calcite does not yet expose a DAP runInTerminal host to EditorServices.
-    // CodeLLDB's console target keeps the debug launch fully functional instead
-    // of advertising an unsupported reverse request and stalling at launch.
-    values["terminal"] = .string("console")
   }
 
 }
@@ -80,7 +76,6 @@ private struct EditorPythonDebugLanguageStrategy: EditorDebugLanguageStrategy {
   ) {
     values["program"] = .string(program)
     values["justMyCode"] = .bool(false)
-    values["console"] = .string("internalConsole")
   }
 }
 

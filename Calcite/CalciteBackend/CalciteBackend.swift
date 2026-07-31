@@ -28,6 +28,8 @@ final class CalciteBackend: ObservableObject, Identifiable {
 
   private var startupTask: Task<WorkspaceLifecycleState, Never>?
   private var shutdownTask: Task<Bool, Never>?
+  private var pendingWindowPresentationSnapshots: [WorkspaceWindowPresentationSnapshot] = []
+  private var pendingActivePresentationWindowID: UUID?
   private var observations = Set<AnyCancellable>()
 
   /// Returns the active backend for a project, creating one only when needed.
@@ -192,6 +194,46 @@ final class CalciteBackend: ObservableObject, Identifiable {
 
   // MARK: - Window sessions
 
+  func captureRuntimePresentationSnapshot() -> WorkspacePresentationSnapshot {
+    WorkspacePresentationSnapshot(
+      activeWindowSessionID: activeWindowSessionID,
+      windows: windowSessions.map { $0.captureRuntimePresentationSnapshot() }
+    )
+  }
+
+  func restoreRuntimePresentationSnapshot(_ snapshot: WorkspacePresentationSnapshot) {
+    guard !snapshot.windows.isEmpty else { return }
+
+    var unusedSnapshots = snapshot.windows
+    var unusedSessions = windowSessions
+    var restoredWindowIDs: [UUID: UUID] = [:]
+
+    for session in windowSessions {
+      guard let index = unusedSnapshots.firstIndex(where: { $0.windowSessionID == session.id })
+      else { continue }
+      let value = unusedSnapshots.remove(at: index)
+      unusedSessions.removeAll { $0 === session }
+      restoredWindowIDs[value.windowSessionID] = session.id
+      session.restoreRuntimePresentationSnapshot(value)
+    }
+
+    for session in unusedSessions where !unusedSnapshots.isEmpty {
+      let value = unusedSnapshots.removeFirst()
+      restoredWindowIDs[value.windowSessionID] = session.id
+      session.restoreRuntimePresentationSnapshot(value)
+    }
+
+    pendingWindowPresentationSnapshots = unusedSnapshots
+    pendingActivePresentationWindowID = snapshot.activeWindowSessionID
+    if let storedActiveID = snapshot.activeWindowSessionID,
+      let restoredActiveID = restoredWindowIDs[storedActiveID],
+      let session = windowSessions.first(where: { $0.id == restoredActiveID })
+    {
+      pendingActivePresentationWindowID = nil
+      setActiveWindowSession(session)
+    }
+  }
+
   @discardableResult
   func makeWindowSession(
     defaults: UserDefaults = .standard,
@@ -209,6 +251,14 @@ final class CalciteBackend: ObservableObject, Identifiable {
       setActiveWindowSession(session)
     }
     session.reconcileDocuments()
+    if !pendingWindowPresentationSnapshots.isEmpty {
+      let value = pendingWindowPresentationSnapshots.removeFirst()
+      session.restoreRuntimePresentationSnapshot(value)
+      if pendingActivePresentationWindowID == value.windowSessionID {
+        pendingActivePresentationWindowID = nil
+        setActiveWindowSession(session)
+      }
+    }
     return session
   }
 
@@ -510,6 +560,12 @@ final class CalciteBackend: ObservableObject, Identifiable {
   // MARK: - Observation and routing
 
   private func configureControllerCallbacks() {
+    controller.capturePresentationSnapshot = { [weak self] in
+      self?.captureRuntimePresentationSnapshot() ?? .empty
+    }
+    controller.restorePresentationSnapshot = { [weak self] snapshot in
+      self?.restoreRuntimePresentationSnapshot(snapshot)
+    }
     controller.onVimSplit = { [weak self] horizontal in
       self?.activeWindowSession?.receiveVimSplit(horizontal: horizontal)
     }

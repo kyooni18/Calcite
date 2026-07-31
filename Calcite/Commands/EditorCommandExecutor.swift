@@ -69,6 +69,10 @@ final class EditorCommandExecutor: ObservableObject {
       runBuildTask(.build)
     case .run:
       runBuildTask(.run)
+    case .runCurrentFile:
+      selectActiveDocument()
+      delegate?.commandPresentSection(.buildOutput)
+      controller.runCurrentFile()
     case .test:
       runBuildTask(.test)
     case .check:
@@ -82,6 +86,20 @@ final class EditorCommandExecutor: ObservableObject {
       selectActiveDocument()
       delegate?.commandPresentSection(.debug)
       controller.startDebugging()
+    case .startDebugCurrentFile:
+      selectActiveDocument()
+      delegate?.commandPresentSection(.debug)
+      controller.startDebuggingCurrentFile()
+    case .startLiveDebug:
+      selectActiveDocument()
+      delegate?.commandPresentSection(.debug)
+      controller.startLiveDebugging()
+    case .startLiveDebugCurrentFile:
+      selectActiveDocument()
+      delegate?.commandPresentSection(.debug)
+      controller.startLiveDebuggingCurrentFile()
+    case .stopLiveDebug:
+      controller.stopLiveDebugging()
     case .stopDebug:
       controller.stopDebugging()
     case .continueDebug:

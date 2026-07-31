@@ -108,15 +108,10 @@ struct CalciteEditorView: View {
     profile.vim.ensureNavigationMappings()
     let vimController: VimKeymapController?
     if editorInterface.usesCalciteVim {
-      vimController = windowSession.vimSessionCoordinator.controller(
-        for: VimWindowID(editorSession.id),
-        displaying: VimBufferID(tab.id),
-        text: tab.text,
-        cursor: editorSession.selection(for: tab).location,
-        name: tab.url.path,
-        leader: profile.vim.normalizedLeader,
-        localLeader: profile.vim.normalizedLeader,
-        tabWidth: profile.behavior.tabWidth,
+      vimController = windowSession.vimController(
+        for: editorSession,
+        displaying: tab,
+        profile: profile,
         attachment: isActiveDocument ? .activate : .retain
       )
     } else {

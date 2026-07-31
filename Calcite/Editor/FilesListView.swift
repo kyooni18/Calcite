@@ -25,6 +25,7 @@ final class ProjectFileTreeModel: ObservableObject {
   private var monitorTask: Task<Void, Never>?
   private var eventReloadTask: Task<Void, Never>?
   private var fileSystemMonitor: ProjectFileSystemMonitor?
+  private var pendingFileSystemChanges = ProjectFileChangeBatch()
   private var loadGeneration: UInt64 = 0
   private var structureFingerprint: Int?
   private var projectContextFingerprint: Int?
@@ -47,8 +48,8 @@ final class ProjectFileTreeModel: ObservableObject {
   func start() {
     reload()
     if fileSystemMonitor == nil {
-      fileSystemMonitor = ProjectFileSystemMonitor(rootURL: rootURL) { [weak self] in
-        Task { @MainActor [weak self] in self?.scheduleEventReload() }
+      fileSystemMonitor = ProjectFileSystemMonitor(rootURL: rootURL) { [weak self] batch in
+        Task { @MainActor [weak self] in self?.scheduleEventReload(batch) }
       }
     }
     guard monitorTask == nil else { return }
@@ -69,15 +70,45 @@ final class ProjectFileTreeModel: ObservableObject {
     eventReloadTask = nil
     fileSystemMonitor?.stop()
     fileSystemMonitor = nil
+    pendingFileSystemChanges = ProjectFileChangeBatch()
   }
 
-  private func scheduleEventReload() {
+  private func scheduleEventReload(_ batch: ProjectFileChangeBatch) {
+    pendingFileSystemChanges.merge(batch)
     eventReloadTask?.cancel()
     eventReloadTask = Task { [weak self] in
       try? await Task.sleep(for: .milliseconds(220))
       guard let self, !Task.isCancelled else { return }
+      let changes = self.pendingFileSystemChanges
+      self.pendingFileSystemChanges = ProjectFileChangeBatch()
+      guard self.requiresTreeRefresh(for: changes) else { return }
       await self.refreshIfChanged()
     }
+  }
+
+  private func requiresTreeRefresh(for batch: ProjectFileChangeBatch) -> Bool {
+    if batch.requiresFullRescan || batch.rootWasMovedOrDeleted { return true }
+    let paths = batch.changedPaths.union(batch.removedPaths).union(batch.renamedPaths)
+    guard !paths.isEmpty else { return false }
+    return paths.contains { !isIgnoredEventPath($0) }
+  }
+
+  private func isIgnoredEventPath(_ url: URL) -> Bool {
+    let rootPath = rootURL.standardizedFileURL.path
+    let path = url.standardizedFileURL.path
+    guard path == rootPath || path.hasPrefix(rootPath + "/") else { return false }
+    let relativePath = path.dropFirst(rootPath.count)
+    let components = relativePath.split(separator: "/").map(String.init)
+    if components.contains(".git") { return true }
+    if !includesBuildArtifacts,
+      components.contains(where: {
+        $0 == ".build" || $0 == "DerivedData" || $0 == "node_modules"
+      })
+    {
+      return true
+    }
+    if !includesDSStore, url.lastPathComponent == ".DS_Store" { return true }
+    return false
   }
 
   func setIncludesIgnoredFiles(_ includesIgnoredFiles: Bool) {

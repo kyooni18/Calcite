@@ -15,6 +15,8 @@ public actor DAPClient {
   private let session: DAPSession
   public nonisolated let requestTimeout: Duration
   private var eventTask: Task<Void, Never>?
+  private var reverseRequestTask: Task<Void, Never>?
+  private let reverseRequestHandler: (any DAPReverseRequestHandler)?
   private let eventContinuation: AsyncStream<DAPEvent>.Continuation
   public nonisolated let events: AsyncStream<DAPEvent>
   public private(set) var state: DebugSessionState = .disconnected
@@ -23,19 +25,56 @@ public actor DAPClient {
   public init(session: DAPSession, requestTimeout: Duration = .seconds(30)) {
     self.session = session
     self.requestTimeout = requestTimeout
+    reverseRequestHandler = nil
+    (events, eventContinuation) = AsyncStream.makeStream(of: DAPEvent.self)
+  }
+
+  public init(
+    session: DAPSession,
+    requestTimeout: Duration = .seconds(30),
+    reverseRequestHandler: (any DAPReverseRequestHandler)?
+  ) {
+    self.session = session
+    self.requestTimeout = requestTimeout
+    self.reverseRequestHandler = reverseRequestHandler
     (events, eventContinuation) = AsyncStream.makeStream(of: DAPEvent.self)
   }
 
   deinit {
     eventTask?.cancel()
+    reverseRequestTask?.cancel()
     eventContinuation.finish()
   }
 
   public func startEventMonitoring() {
-    guard eventTask == nil else { return }
-    eventTask = Task { [session] in
-      for await event in session.events {
-        self.handle(event)
+    if eventTask == nil {
+      eventTask = Task { [session] in
+        for await event in session.events {
+          self.handle(event)
+        }
+      }
+    }
+    if reverseRequestTask == nil {
+      reverseRequestTask = Task { [session, reverseRequestHandler] in
+        for await request in session.reverseRequests {
+          let response: DAPReverseRequestResponse
+          if let reverseRequestHandler {
+            response = await reverseRequestHandler.handleReverseRequest(request)
+          } else {
+            response = .failed(
+              "The client does not support the reverse request \(request.command).")
+          }
+          do {
+            try await session.respond(
+              to: request,
+              success: response.success,
+              message: response.message,
+              body: response.body
+            )
+          } catch {
+            // The adapter may have disconnected while the host was preparing a response.
+          }
+        }
       }
     }
   }
@@ -97,6 +136,11 @@ public actor DAPClient {
       capabilities?.supportsHitConditionalBreakpoints != true
     {
       throw DebugClientError.unsupportedCapability("supportsHitConditionalBreakpoints")
+    }
+    if arguments.breakpoints.contains(where: { $0.logMessage != nil }),
+      capabilities?.supportsLogPoints != true
+    {
+      throw DebugClientError.unsupportedCapability("supportsLogPoints")
     }
     let body: SetBreakpointsResponseBody = try await request(
       command: "setBreakpoints", arguments: arguments)

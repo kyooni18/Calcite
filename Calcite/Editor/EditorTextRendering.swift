@@ -32,12 +32,14 @@ private final class EditorInsertionCaretView: NSView {
 
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-  func showImmediately() {
+  func showImmediately(blinks: Bool = true) {
     blinkTimer?.invalidate()
+    blinkTimer = nil
     alphaValue = 1
     isHidden = false
     needsDisplay = true
 
+    guard blinks else { return }
     let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
       MainActor.assumeIsolated {
         guard let self, !self.isHidden else { return }
@@ -102,9 +104,9 @@ final class CodeEditorTextView: NSTextView {
       refreshInsertionPointRendering()
     }
   }
-  /// Visual mode owns a selected range, but Vim still needs a cursor at its
-  /// active endpoint. `NSTextView` only exposes the range, so the native Vim
-  /// coordinator supplies that endpoint separately while Visual mode is active.
+  /// VimEngine owns the cursor in non-insert modes. `NSTextView` exposes only
+  /// its projected selection, so the native Vim coordinator supplies the actual
+  /// engine endpoint separately for Normal, Replace, and Visual rendering.
   var vimCursorLocation: Int? {
     didSet {
       guard oldValue != vimCursorLocation else { return }
@@ -127,7 +129,12 @@ final class CodeEditorTextView: NSTextView {
       refreshInsertionPointRendering()
     }
   }
-  private let customCursorView = EditorInsertionCaretView(frame: .zero)
+  private let customCursorView: EditorInsertionCaretView = {
+    let view = EditorInsertionCaretView(frame: .zero)
+    view.wantsLayer = true
+    view.layer?.masksToBounds = false
+    return view
+  }()
   private var virtualMarkedText: NSAttributedString?
   private var isDiscardingMarkedText = false
   private enum InlineDiagnosticHitAction {
@@ -175,6 +182,15 @@ final class CodeEditorTextView: NSTextView {
   /// leave normal mode with both the native and custom carets hidden.
   override var shouldDrawInsertionPoint: Bool { usesNativeInsertionPoint }
 
+  override func drawInsertionPoint(
+    in rect: NSRect,
+    color: NSColor,
+    turnedOn flag: Bool
+  ) {
+    guard usesNativeInsertionPoint else { return }
+    super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
+  }
+
   private var usesNativeInsertionPoint: Bool {
     !requiresPresentationAwareInsertionPoint
       && vimCursorStyle == nil
@@ -197,6 +213,23 @@ final class CodeEditorTextView: NSTextView {
     return result
   }
 
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    refreshInsertionPointRendering()
+  }
+
+  override func layout() {
+    super.layout()
+    refreshCustomInsertionPoint()
+    refreshGeometryDiagnostics()
+  }
+
+  override func setFrameSize(_ newSize: NSSize) {
+    super.setFrameSize(newSize)
+    refreshCustomInsertionPoint()
+    refreshGeometryDiagnostics()
+  }
+
   func refreshInsertionPointRendering() {
     insertionPointColor = usesNativeInsertionPoint ? editorCursorColor : .clear
     if usesNativeInsertionPoint {
@@ -210,8 +243,9 @@ final class CodeEditorTextView: NSTextView {
   }
 
   func refreshCustomInsertionPoint() {
+    let ownsKeyboardFocus = window?.firstResponder === self
     guard !usesNativeInsertionPoint,
-      window?.firstResponder === self,
+      ownsKeyboardFocus || vimCursorLocation != nil,
       selectedRange().length == 0 || vimCursorLocation != nil,
       let cursorRect = customInsertionPointRect()
     else {
@@ -220,11 +254,13 @@ final class CodeEditorTextView: NSTextView {
     }
     if customCursorView.superview !== self {
       customCursorView.hide()
-      addSubview(customCursorView)
+      addSubview(customCursorView, positioned: .above, relativeTo: nil)
     }
     customCursorView.color = editorCursorColor
-    customCursorView.frame = cursorRect
-    customCursorView.showImmediately()
+    customCursorView.frame = cursorRect.integral
+    customCursorView.layer?.zPosition = 10_000
+    customCursorView.showImmediately(blinks: vimCursorLocation == nil)
+    refreshGeometryDiagnostics()
   }
 
   func customInsertionPointRect() -> NSRect? {
@@ -294,17 +330,24 @@ final class CodeEditorTextView: NSTextView {
     case .line:
       cursorRect.size.width = max(1.5, min(2, lineHeight * 0.12))
     case .block:
-      let characterWidth = max(2, font?.maximumAdvancement.width ?? cursorRect.width)
+      let characterWidth = editorCursorCellWidth(fallback: cursorRect.width)
       // A Vim block occupies exactly one editor cell. The glyph bounding rect
       // can span a tab, ligature, or fallback run and must not widen the cursor.
       cursorRect.size.width = characterWidth
     case .underline:
       cursorRect.origin.y = cursorRect.maxY - 2
       cursorRect.size.height = 2
-      let characterWidth = max(2, font?.maximumAdvancement.width ?? cursorRect.width)
+      let characterWidth = editorCursorCellWidth(fallback: cursorRect.width)
       cursorRect.size.width = characterWidth
     }
     return cursorRect
+  }
+
+  private func editorCursorCellWidth(fallback: CGFloat) -> CGFloat {
+    guard let font else { return max(2, fallback) }
+    let measured = ("M" as NSString).size(withAttributes: [.font: font]).width
+    guard measured.isFinite, measured > 0 else { return max(2, fallback) }
+    return max(2, measured)
   }
 
   override func drawBackground(in rect: NSRect) {
@@ -1287,7 +1330,21 @@ final class CodeTextScrollView: NSScrollView {
         || abs(textView.frame.height - target.height) > 0.5
     else { return }
 
+    let previousOrigin = contentView.bounds.origin
     textView.setFrameSize(target)
+    let maximumX = max(0, target.width - viewport.width)
+    let maximumY = max(0, target.height - viewport.height)
+    let restoredOrigin = NSPoint(
+      x: target.width <= viewport.width + 0.5
+        ? 0 : min(max(previousOrigin.x, 0), maximumX),
+      y: min(max(previousOrigin.y, 0), maximumY)
+    )
+    if abs(contentView.bounds.origin.x - restoredOrigin.x) > 0.5
+      || abs(contentView.bounds.origin.y - restoredOrigin.y) > 0.5
+    {
+      contentView.scroll(to: restoredOrigin)
+      reflectScrolledClipView(contentView)
+    }
     verticalRulerView?.needsDisplay = true
   }
 }
@@ -1361,6 +1418,7 @@ struct EditorTextStyler {
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.editorCursorStyle = profile.surface.cursorStyle
       codeTextView.editorCursorColor = profile.surface.cursor.nsColor
+      codeTextView.geometryDiagnosticsEnabled = profile.behavior.showGeometryDiagnostics
       codeTextView.refreshInsertionPointRendering()
       codeTextView.errorLineRanges = errorLineRanges(
         in: textView.string,

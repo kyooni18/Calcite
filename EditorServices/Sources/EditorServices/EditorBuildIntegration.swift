@@ -39,6 +39,8 @@ public struct EditorBuildCommand: Hashable, Codable, Sendable, Identifiable {
   public var arguments: [String]
   public var workingDirectory: URL
   public var environment: [String: String]
+  /// Optional executable artifact emitted by this task. Relative paths use `workingDirectory`.
+  public var artifactPath: String?
 
   public init(
     id: String,
@@ -49,6 +51,28 @@ public struct EditorBuildCommand: Hashable, Codable, Sendable, Identifiable {
     workingDirectory: URL,
     environment: [String: String] = [:]
   ) {
+    self.init(
+      id: id,
+      title: title,
+      kind: kind,
+      executable: executable,
+      arguments: arguments,
+      workingDirectory: workingDirectory,
+      environment: environment,
+      artifactPath: nil
+    )
+  }
+
+  public init(
+    id: String,
+    title: String,
+    kind: EditorBuildTaskKind,
+    executable: String,
+    arguments: [String],
+    workingDirectory: URL,
+    environment: [String: String] = [:],
+    artifactPath: String?
+  ) {
     self.id = id
     self.title = title
     self.kind = kind
@@ -56,6 +80,7 @@ public struct EditorBuildCommand: Hashable, Codable, Sendable, Identifiable {
     self.arguments = arguments
     self.workingDirectory = workingDirectory.standardizedFileURL
     self.environment = environment
+    self.artifactPath = artifactPath
   }
 
   /// Creates a direct command from an argv-style array whose first item is the executable.
@@ -74,12 +99,34 @@ public struct EditorBuildCommand: Hashable, Codable, Sendable, Identifiable {
       executable: arguments.first ?? "",
       arguments: Array(arguments.dropFirst()),
       workingDirectory: workingDirectory,
-      environment: environment
+      environment: environment,
+      artifactPath: nil
+    )
+  }
+
+  public init(
+    id: String,
+    title: String,
+    kind: EditorBuildTaskKind,
+    arguments: [String],
+    workingDirectory: URL,
+    environment: [String: String] = [:],
+    artifactPath: String?
+  ) {
+    self.init(
+      id: id,
+      title: title,
+      kind: kind,
+      executable: arguments.first ?? "",
+      arguments: Array(arguments.dropFirst()),
+      workingDirectory: workingDirectory,
+      environment: environment,
+      artifactPath: artifactPath
     )
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, title, kind, executable, arguments, workingDirectory, environment
+    case id, title, kind, executable, arguments, workingDirectory, environment, artifactPath
   }
 
   public init(from decoder: Decoder) throws {
@@ -91,6 +138,7 @@ public struct EditorBuildCommand: Hashable, Codable, Sendable, Identifiable {
     arguments = try container.decode([String].self, forKey: .arguments)
     workingDirectory = try container.decode(URL.self, forKey: .workingDirectory).standardizedFileURL
     environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+    artifactPath = try container.decodeIfPresent(String.self, forKey: .artifactPath)
   }
 }
 
@@ -230,97 +278,77 @@ public enum EditorBuildDiscovery {
   /// Creates build/run commands for a standalone source file. Compiled artifacts are
   /// hidden and include the extension so files such as main.c and main.swift cannot collide.
   public static func singleFilePlan(fileURL: URL) -> EditorBuildPlan? {
-    let file = fileURL.standardizedFileURL
-    let root = file.deletingLastPathComponent()
-    let source = file.path
-    let stem = file.deletingPathExtension().lastPathComponent
-    let ext = file.pathExtension.lowercased()
-    let artifactStem = ".calcite-\(stem)-\(ext.isEmpty ? "file" : ext)"
-    let output = root.appendingPathComponent(artifactStem).path
+    EditorSingleFileProviderRegistry.resolve(fileURL: fileURL).plan
+  }
 
-    switch ext {
-    case "py", "pyw":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "python", title: file.lastPathComponent)
-    case "swift":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "swiftc", stem: stem)
-    case "rs":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "rustc", stem: stem)
-    case "c":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "cc", stem: stem)
-    case "cc", "cpp", "cxx", "c++":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "c++", stem: stem)
-    case "m":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "clang", stem: stem,
-        compilerArguments: ["-framework", "Foundation"]
-      )
-    case "mm":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "clang++", stem: stem,
-        compilerArguments: ["-framework", "Foundation"]
-      )
-    case "go":
-      return compiledFilePlan(
-        root: root, source: source, output: output, compiler: "go", stem: stem,
-        compilerArguments: ["build", "-o"], placesOutputBeforeSource: true
-      )
-    case "zig":
-      return EditorBuildPlan(
-        projectKind: .generic,
-        commands: [
-          command(
-            "file-build", "Build \(stem)", .build, "zig",
-            ["build-exe", source, "-femit-bin=\(output)"], root),
-          command("file-run", "Run \(stem)", .run, output, [], root),
-        ])
-    case "java":
-      return EditorBuildPlan(
-        projectKind: .generic,
-        commands: [
-          command("file-build", "Build \(stem)", .build, "javac", [source], root),
-          command("file-run", "Run \(stem)", .run, "java", ["-cp", root.path, stem], root),
-        ])
-    case "kt":
-      let jar = output + ".jar"
-      return EditorBuildPlan(
-        projectKind: .generic,
-        commands: [
-          command(
-            "file-build", "Build \(stem)", .build, "kotlinc",
-            [source, "-include-runtime", "-d", jar], root),
-          command("file-run", "Run \(stem)", .run, "java", ["-jar", jar], root),
-        ])
-    case "kts":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "kotlinc", arguments: ["-script"],
-        title: file.lastPathComponent)
-    case "js", "mjs", "cjs":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "node", title: file.lastPathComponent)
-    case "ts", "tsx":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "tsx", title: file.lastPathComponent)
-    case "lua":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "lua", title: file.lastPathComponent)
-    case "rb":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "ruby", title: file.lastPathComponent)
-    case "php":
-      return interpretedFilePlan(
-        root: root, source: source, executable: "php", title: file.lastPathComponent)
-    case "sh", "bash", "zsh":
-      return interpretedFilePlan(
-        root: root, source: source, executable: ext == "sh" ? "/bin/sh" : ext,
-        title: file.lastPathComponent)
-    default:
-      return nil
+  public static func singleFileResolution(
+    fileURL: URL,
+    workspaceURL: URL? = nil
+  ) -> EditorSingleFileResolution {
+    EditorSingleFileProviderRegistry.resolve(
+      fileURL: fileURL,
+      workspaceURL: workspaceURL
+    )
+  }
+
+  private static var singleFileCacheRoot: URL {
+    let base =
+      FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+      ?? FileManager.default.temporaryDirectory
+    return
+      base
+      .appendingPathComponent("Calcite", isDirectory: true)
+      .appendingPathComponent("SingleFileExecution", isDirectory: true)
+  }
+
+  private static func stableFileIdentity(_ file: URL) -> String {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    let data = (try? Data(contentsOf: file)) ?? Data()
+    for byte in Data(file.standardizedFileURL.path.utf8) + data {
+      hash ^= UInt64(byte)
+      hash &*= 0x100_0000_01b3
     }
+    return String(format: "%016llx", hash)
+  }
+
+  private static func shebangExecutable(in file: URL) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+    defer { try? handle.close() }
+    guard let data = try? handle.read(upToCount: 512),
+      let firstLine = String(data: data, encoding: .utf8)?.split(separator: "\n").first,
+      firstLine.hasPrefix("#!")
+    else { return nil }
+    let words = firstLine.dropFirst(2).split(whereSeparator: \.isWhitespace).map(String.init)
+    guard let first = words.first else { return nil }
+    if URL(fileURLWithPath: first).lastPathComponent == "env", words.count > 1 {
+      return words[1]
+    }
+    return first
+  }
+
+  private static func javaMainType(in file: URL) -> String? {
+    guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+
+    func capture(_ pattern: String) -> String? {
+      guard
+        let expression = try? NSRegularExpression(
+          pattern: pattern, options: [.anchorsMatchLines]
+        )
+      else { return nil }
+      let fullRange = NSRange(location: 0, length: (text as NSString).length)
+      guard let match = expression.firstMatch(in: text, range: fullRange),
+        match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound
+      else { return nil }
+      return (text as NSString).substring(with: match.range(at: 1))
+    }
+
+    let packageName = capture(#"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;"#)
+    guard
+      let typeName = capture(
+        #"^\s*(?:public\s+)?(?:final\s+)?(?:class|record|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"#
+      )
+    else { return nil }
+    return packageName.map { "\($0).\(typeName)" } ?? typeName
   }
 
   private static func interpretedFilePlan(

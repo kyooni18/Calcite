@@ -28,7 +28,12 @@ final class WorkspaceLifecycleCoordinator: ObservableObject {
     shouldStartTerminal: Bool,
     onReady: (EditorWorkspaceController?) -> Void
   ) async {
-    guard state == .idle else { return }
+    switch state {
+    case .idle, .failed:
+      break
+    case .starting, .running, .stopping, .stopped:
+      return
+    }
     state = .starting
 
     let controller = controller

@@ -177,6 +177,26 @@ extension SwiftEditorBackendError: LocalizedError {
   }
 }
 
+public struct EditorDebugEventEnvelope: Sendable {
+  public var generation: UInt64
+  public var event: DAPEvent
+
+  public init(generation: UInt64, event: DAPEvent) {
+    self.generation = generation
+    self.event = event
+  }
+}
+
+public struct EditorDebugTextEnvelope: Sendable {
+  public var generation: UInt64
+  public var text: String
+
+  public init(generation: UInt64, text: String) {
+    self.generation = generation
+    self.text = text
+  }
+}
+
 /// A single high-level façade for constructing a Swift editor backend.
 ///
 /// `SwiftEditorBackend` owns document buffers, one syntax parser per document,
@@ -207,8 +227,11 @@ public final class SwiftEditorBackend: @unchecked Sendable {
   public let diagnostics: AsyncStream<DiagnosticBatch>
   public let languageServerMessages: AsyncStream<LanguageServerMessage>
   public let debugEvents: AsyncStream<DAPEvent>
+  public let debugEventEnvelopes: AsyncStream<EditorDebugEventEnvelope>
   public let debugAdapterStandardError: AsyncStream<String>
+  public let debugAdapterStandardErrorEnvelopes: AsyncStream<EditorDebugTextEnvelope>
   public let debugTransportErrors: AsyncStream<String>
+  public let debugTransportErrorEnvelopes: AsyncStream<EditorDebugTextEnvelope>
 
   private let diagnosticContinuation: AsyncStream<DiagnosticBatch>.Continuation
   private let languageServerMessageContinuation: AsyncStream<LanguageServerMessage>.Continuation
@@ -217,8 +240,13 @@ public final class SwiftEditorBackend: @unchecked Sendable {
   private var languageServerMessageTask: Task<Void, Never>?
   private let lifetimeTaskStore = BackendLifetimeTaskStore()
   private let debugEventContinuation: AsyncStream<DAPEvent>.Continuation
+  private let debugEventEnvelopeContinuation: AsyncStream<EditorDebugEventEnvelope>.Continuation
   private let debugStandardErrorContinuation: AsyncStream<String>.Continuation
+  private let debugStandardErrorEnvelopeContinuation:
+    AsyncStream<EditorDebugTextEnvelope>.Continuation
   private let debugTransportErrorContinuation: AsyncStream<String>.Continuation
+  private let debugTransportErrorEnvelopeContinuation:
+    AsyncStream<EditorDebugTextEnvelope>.Continuation
   private let runtime: Runtime
   // Retains process-backed objects whose deinitializers terminate their child processes.
   private let retainedObjects: [AnyObject]
@@ -277,10 +305,16 @@ public final class SwiftEditorBackend: @unchecked Sendable {
       of: LanguageServerMessage.self)
     self.diagnosticBroadcaster = DiagnosticBroadcaster()
     (debugEvents, debugEventContinuation) = AsyncStream.makeStream(of: DAPEvent.self)
+    (debugEventEnvelopes, debugEventEnvelopeContinuation) = AsyncStream.makeStream(
+      of: EditorDebugEventEnvelope.self)
     (debugAdapterStandardError, debugStandardErrorContinuation) = AsyncStream.makeStream(
       of: String.self)
+    (debugAdapterStandardErrorEnvelopes, debugStandardErrorEnvelopeContinuation) =
+      AsyncStream.makeStream(of: EditorDebugTextEnvelope.self)
     (debugTransportErrors, debugTransportErrorContinuation) = AsyncStream.makeStream(
       of: String.self)
+    (debugTransportErrorEnvelopes, debugTransportErrorEnvelopeContinuation) =
+      AsyncStream.makeStream(of: EditorDebugTextEnvelope.self)
     self.retainedObjects = retainedObjects
     let externalSourceIndex = ExternalSourceIndex(
       workspaceURL: workspaceURL,
@@ -301,8 +335,11 @@ public final class SwiftEditorBackend: @unchecked Sendable {
       languageServerShutdown: languageServerShutdown,
       diagnosticBroadcaster: diagnosticBroadcaster,
       debugEventContinuation: debugEventContinuation,
+      debugEventEnvelopeContinuation: debugEventEnvelopeContinuation,
       debugStandardErrorContinuation: debugStandardErrorContinuation,
-      debugTransportErrorContinuation: debugTransportErrorContinuation
+      debugStandardErrorEnvelopeContinuation: debugStandardErrorEnvelopeContinuation,
+      debugTransportErrorContinuation: debugTransportErrorContinuation,
+      debugTransportErrorEnvelopeContinuation: debugTransportErrorEnvelopeContinuation
     )
     if let source = languageService?.diagnostics {
       let continuation = diagnosticContinuation
@@ -338,8 +375,11 @@ public final class SwiftEditorBackend: @unchecked Sendable {
     let broadcaster = diagnosticBroadcaster
     Task { await broadcaster.finish() }
     debugEventContinuation.finish()
+    debugEventEnvelopeContinuation.finish()
     debugStandardErrorContinuation.finish()
+    debugStandardErrorEnvelopeContinuation.finish()
     debugTransportErrorContinuation.finish()
+    debugTransportErrorEnvelopeContinuation.finish()
   }
 
   #if os(macOS) || os(Linux)
@@ -1136,8 +1176,30 @@ public final class SwiftEditorBackend: @unchecked Sendable {
       clientName: "EditorServices"
     )
   ) async throws -> Capabilities {
+    try await startDebugger(
+      session: session,
+      initializeArguments: initializeArguments,
+      reverseRequestHandler: nil
+    )
+  }
+
+  /// Installs an already-created DAP session with a host for adapter reverse requests.
+  @discardableResult
+  public func startDebugger(
+    session: DAPSession,
+    initializeArguments: InitializeArguments = .init(
+      adapterID: "lldb",
+      clientID: "EditorServices",
+      clientName: "EditorServices"
+    ),
+    reverseRequestHandler: (any DAPReverseRequestHandler)?
+  ) async throws -> Capabilities {
     try await runtime.startDebugger(
-      session: session, connection: nil, initializeArguments: initializeArguments)
+      session: session,
+      connection: nil,
+      initializeArguments: initializeArguments,
+      reverseRequestHandler: reverseRequestHandler
+    )
   }
 
   #if os(macOS) || os(Linux)
@@ -1145,6 +1207,15 @@ public final class SwiftEditorBackend: @unchecked Sendable {
     @discardableResult
     public func startDebugger(
       process configuration: DebugAdapterProcessConfiguration
+    ) async throws -> Capabilities {
+      try await startDebugger(process: configuration, reverseRequestHandler: nil)
+    }
+
+    /// Starts a local DAP process with a host for adapter reverse requests.
+    @discardableResult
+    public func startDebugger(
+      process configuration: DebugAdapterProcessConfiguration,
+      reverseRequestHandler: (any DAPReverseRequestHandler)?
     ) async throws -> Capabilities {
       let connection = try DAPProcessConnection(
         executableURL: configuration.executableURL,
@@ -1156,13 +1227,37 @@ public final class SwiftEditorBackend: @unchecked Sendable {
         return try await runtime.startDebugger(
           session: connection.session,
           connection: connection,
-          initializeArguments: configuration.initializeArguments
+          initializeArguments: configuration.initializeArguments,
+          reverseRequestHandler: reverseRequestHandler
         )
       } catch {
         connection.terminate()
         throw error
       }
     }
+    public func adoptPreparedDebugger(
+      _ prepared: EditorPreparedDebugSession
+    ) async throws {
+      try await runtime.adoptPreparedDebugger(prepared)
+    }
+
+    /// Atomically installs an initialized replacement session, then disconnects
+    /// the previous adapter. The replacement is consumed before the active
+    /// session is detached, so a consumed/invalid prepared session cannot tear
+    /// down a working debugger.
+    public func replaceWithPreparedDebugger(
+      _ prepared: EditorPreparedDebugSession,
+      disconnectArguments: DisconnectArguments = .init(
+        restart: true,
+        terminateDebuggee: true
+      )
+    ) async throws {
+      try await runtime.replaceWithPreparedDebugger(
+        prepared,
+        disconnectArguments: disconnectArguments
+      )
+    }
+
     /// Resolves and starts the locally installed `lldb-dap` adapter.
     @discardableResult
     public func startLLDBDebugger(
@@ -1175,6 +1270,28 @@ public final class SwiftEditorBackend: @unchecked Sendable {
         clientName: "EditorServices"
       )
     ) async throws -> Capabilities {
+      try await startLLDBDebugger(
+        executablePath: executablePath,
+        arguments: arguments,
+        environment: environment,
+        initializeArguments: initializeArguments,
+        reverseRequestHandler: nil
+      )
+    }
+
+    /// Resolves and starts `lldb-dap` with a host for adapter reverse requests.
+    @discardableResult
+    public func startLLDBDebugger(
+      executablePath: String? = nil,
+      arguments: [String] = [],
+      environment: [String: String] = ProcessInfo.processInfo.environment,
+      initializeArguments: InitializeArguments = .init(
+        adapterID: "lldb",
+        clientID: "EditorServices",
+        clientName: "EditorServices"
+      ),
+      reverseRequestHandler: (any DAPReverseRequestHandler)?
+    ) async throws -> Capabilities {
       let path = try LLDBDAPResolver.resolve(
         explicitPath: executablePath,
         environment: environment
@@ -1186,9 +1303,15 @@ public final class SwiftEditorBackend: @unchecked Sendable {
           environment: environment,
           currentDirectoryURL: workspaceURL,
           initializeArguments: initializeArguments
-        ))
+        ),
+        reverseRequestHandler: reverseRequestHandler
+      )
     }
   #endif
+
+  public func currentDebugSessionGeneration() async -> UInt64 {
+    await runtime.currentDebugSessionGeneration()
+  }
 
   public func debugState() async throws -> DebugSessionState {
     try await runtime.debugState()
@@ -1442,8 +1565,13 @@ private actor Runtime {
   private let languageServerShutdown: SwiftEditorBackend.LanguageServerShutdown
   private let diagnosticBroadcaster: DiagnosticBroadcaster
   private let debugEventContinuation: AsyncStream<DAPEvent>.Continuation
+  private let debugEventEnvelopeContinuation: AsyncStream<EditorDebugEventEnvelope>.Continuation
   private let debugStandardErrorContinuation: AsyncStream<String>.Continuation
+  private let debugStandardErrorEnvelopeContinuation:
+    AsyncStream<EditorDebugTextEnvelope>.Continuation
   private let debugTransportErrorContinuation: AsyncStream<String>.Continuation
+  private let debugTransportErrorEnvelopeContinuation:
+    AsyncStream<EditorDebugTextEnvelope>.Continuation
   private var contextualCompletionProvider = ContextualCompletionProvider()
   private var completionUsageHistory = CompletionUsageHistory()
 
@@ -1456,6 +1584,7 @@ private actor Runtime {
   private var sourceMonitorRequiresFullScan = false
   private var debugConnection: DAPProcessConnection?
   private var debugClient: DAPClient?
+  private var debugSessionGeneration: UInt64 = 0
   private var debugEventTask: Task<Void, Never>?
   private var debugStandardErrorTask: Task<Void, Never>?
   private var debugTransportErrorTask: Task<Void, Never>?
@@ -1477,8 +1606,11 @@ private actor Runtime {
     languageServerShutdown: @escaping SwiftEditorBackend.LanguageServerShutdown,
     diagnosticBroadcaster: DiagnosticBroadcaster,
     debugEventContinuation: AsyncStream<DAPEvent>.Continuation,
+    debugEventEnvelopeContinuation: AsyncStream<EditorDebugEventEnvelope>.Continuation,
     debugStandardErrorContinuation: AsyncStream<String>.Continuation,
-    debugTransportErrorContinuation: AsyncStream<String>.Continuation
+    debugStandardErrorEnvelopeContinuation: AsyncStream<EditorDebugTextEnvelope>.Continuation,
+    debugTransportErrorContinuation: AsyncStream<String>.Continuation,
+    debugTransportErrorEnvelopeContinuation: AsyncStream<EditorDebugTextEnvelope>.Continuation
   ) {
     self.languageID = languageID
     self.languageService = languageService
@@ -1492,8 +1624,11 @@ private actor Runtime {
     self.languageServerShutdown = languageServerShutdown
     self.diagnosticBroadcaster = diagnosticBroadcaster
     self.debugEventContinuation = debugEventContinuation
+    self.debugEventEnvelopeContinuation = debugEventEnvelopeContinuation
     self.debugStandardErrorContinuation = debugStandardErrorContinuation
+    self.debugStandardErrorEnvelopeContinuation = debugStandardErrorEnvelopeContinuation
     self.debugTransportErrorContinuation = debugTransportErrorContinuation
+    self.debugTransportErrorEnvelopeContinuation = debugTransportErrorEnvelopeContinuation
   }
 
   func startSourceWorkspaceMonitoring(every interval: Duration) {
@@ -2776,42 +2911,115 @@ private actor Runtime {
   func startDebugger(
     session: DAPSession,
     connection: DAPProcessConnection?,
-    initializeArguments: InitializeArguments
+    initializeArguments: InitializeArguments,
+    reverseRequestHandler: (any DAPReverseRequestHandler)?
   ) async throws -> Capabilities {
     try ensureActive()
     guard debugClient == nil else { throw SwiftEditorBackendError.debuggerAlreadyRunning }
-    let client = DAPClient(session: session)
+    let client = DAPClient(
+      session: session,
+      reverseRequestHandler: reverseRequestHandler
+    )
     do {
       let capabilities = try await client.initialize(initializeArguments)
-      debugClient = client
-      debugConnection = connection
-      let eventContinuation = debugEventContinuation
-      debugEventTask = Task {
-        for await event in client.events { eventContinuation.yield(event) }
-      }
-      if let connection {
-        let standardErrorContinuation = debugStandardErrorContinuation
-        let transportErrorContinuation = debugTransportErrorContinuation
-        debugStandardErrorTask = Task {
-          for await line in connection.standardError { standardErrorContinuation.yield(line) }
-        }
-        debugTransportErrorTask = Task {
-          for await error in connection.transportErrors { transportErrorContinuation.yield(error) }
-        }
-        debugTerminationTask = Task {
-          for await termination in connection.terminationEvents {
-            guard !termination.expected else { continue }
-            transportErrorContinuation.yield(
-              "DAP process terminated unexpectedly (reason: \(termination.reason.rawValue), status: \(termination.status))."
-            )
-          }
-        }
-      }
+      installDebugClient(client, connection: connection)
       return capabilities
     } catch {
       connection?.terminate()
       throw error
     }
+  }
+
+  func adoptPreparedDebugger(_ prepared: EditorPreparedDebugSession) async throws {
+    try ensureActive()
+    guard debugClient == nil else { throw SwiftEditorBackendError.debuggerAlreadyRunning }
+    let (client, connection) = try await prepared.consume()
+    installDebugClient(client, connection: connection)
+  }
+
+  func replaceWithPreparedDebugger(
+    _ prepared: EditorPreparedDebugSession,
+    disconnectArguments: DisconnectArguments
+  ) async throws {
+    try ensureActive()
+    // Consume first. If the prepared session was discarded or already adopted,
+    // the current debugger remains completely untouched.
+    let (replacementClient, replacementConnection) = try await prepared.consume()
+    let previousClient = debugClient
+    let previousConnection = debugConnection
+    detachDebugObservers()
+    debugClient = nil
+    debugConnection = nil
+    installDebugClient(replacementClient, connection: replacementConnection)
+
+    guard let previousClient else {
+      previousConnection?.terminate()
+      return
+    }
+    do {
+      try await previousClient.disconnect(disconnectArguments)
+    } catch {
+      // The replacement is already active. A failed old-adapter disconnect must
+      // not roll the new session back or leak its process tree.
+    }
+    previousConnection?.terminate()
+  }
+
+  private func installDebugClient(
+    _ client: DAPClient,
+    connection: DAPProcessConnection?
+  ) {
+    debugSessionGeneration &+= 1
+    let generation = debugSessionGeneration
+    debugClient = client
+    debugConnection = connection
+    let eventContinuation = debugEventContinuation
+    let eventEnvelopeContinuation = debugEventEnvelopeContinuation
+    debugEventTask = Task {
+      for await event in client.events {
+        eventContinuation.yield(event)
+        eventEnvelopeContinuation.yield(
+          EditorDebugEventEnvelope(generation: generation, event: event)
+        )
+      }
+    }
+    if let connection {
+      let standardErrorContinuation = debugStandardErrorContinuation
+      let standardErrorEnvelopeContinuation = debugStandardErrorEnvelopeContinuation
+      let transportErrorContinuation = debugTransportErrorContinuation
+      let transportErrorEnvelopeContinuation = debugTransportErrorEnvelopeContinuation
+      debugStandardErrorTask = Task {
+        for await line in connection.standardError {
+          standardErrorContinuation.yield(line)
+          standardErrorEnvelopeContinuation.yield(
+            EditorDebugTextEnvelope(generation: generation, text: line)
+          )
+        }
+      }
+      debugTransportErrorTask = Task {
+        for await error in connection.transportErrors {
+          transportErrorContinuation.yield(error)
+          transportErrorEnvelopeContinuation.yield(
+            EditorDebugTextEnvelope(generation: generation, text: error)
+          )
+        }
+      }
+      debugTerminationTask = Task {
+        for await termination in connection.terminationEvents {
+          guard !termination.expected else { continue }
+          let message =
+            "DAP process terminated unexpectedly (reason: \(termination.reason.rawValue), status: \(termination.status))."
+          transportErrorContinuation.yield(message)
+          transportErrorEnvelopeContinuation.yield(
+            EditorDebugTextEnvelope(generation: generation, text: message)
+          )
+        }
+      }
+    }
+  }
+
+  func currentDebugSessionGeneration() -> UInt64 {
+    debugSessionGeneration
   }
 
   func debugState() async throws -> DebugSessionState {
@@ -2983,8 +3191,11 @@ private actor Runtime {
     }
     do { try await languageServerShutdown() } catch { if firstError == nil { firstError = error } }
     debugEventContinuation.finish()
+    debugEventEnvelopeContinuation.finish()
     debugStandardErrorContinuation.finish()
+    debugStandardErrorEnvelopeContinuation.finish()
     debugTransportErrorContinuation.finish()
+    debugTransportErrorEnvelopeContinuation.finish()
     await diagnosticBroadcaster.finish()
 
     let result: Result<Void, any Error> = firstError.map(Result.failure) ?? .success(())
@@ -3013,7 +3224,7 @@ private actor Runtime {
     }
   }
 
-  private func clearDebuggerState() {
+  private func detachDebugObservers() {
     debugEventTask?.cancel()
     debugStandardErrorTask?.cancel()
     debugTransportErrorTask?.cancel()
@@ -3022,6 +3233,10 @@ private actor Runtime {
     debugStandardErrorTask = nil
     debugTransportErrorTask = nil
     debugTerminationTask = nil
+  }
+
+  private func clearDebuggerState() {
+    detachDebugObservers()
     debugConnection?.terminate()
     debugConnection = nil
     debugClient = nil

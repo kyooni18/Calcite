@@ -3,6 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 #if os(macOS)
+  @MainActor
   struct CalciteProblemsSurface: View {
     private enum ProblemSelection: Hashable {
       case document(tabID: UUID, diagnosticOffset: Int)
@@ -12,6 +13,7 @@ import UniformTypeIdentifiers
 
     @ObservedObject var controller: EditorWorkspaceController
     @ObservedObject var buildController: EditorBuildController
+    @ObservedObject var windowSession: CalciteBackendWindowSession
     @State private var selection: Set<ProblemSelection> = []
 
     var body: some View {
@@ -45,7 +47,7 @@ import UniformTypeIdentifiers
               )
               .tag(ProblemSelection.project(url: item.url, diagnosticOffset: offset))
               .onTapGesture(count: 2) {
-                controller.openProjectDiagnostic(diagnostic, at: item.url)
+                openProjectDiagnostic(diagnostic, at: item.url)
               }
             }
           }
@@ -61,7 +63,7 @@ import UniformTypeIdentifiers
               )
               .tag(ProblemSelection.build(diagnostic))
               .onTapGesture(count: 2) {
-                controller.openBuildDiagnostic(diagnostic)
+                openBuildDiagnostic(diagnostic)
               }
             }
           }
@@ -120,7 +122,41 @@ import UniformTypeIdentifiers
     private func reveal(_ diagnostic: Diagnostic, in tab: EditorTab) {
       let snapshot = TextSnapshot(text: tab.text)
       if let range = try? snapshot.nsRange(for: diagnostic.range) {
-        tab.updateSelection(range)
+        _ = windowSession.revealSelection(range, in: tab.id)
+      }
+    }
+
+    private func openProjectDiagnostic(_ diagnostic: Diagnostic, at url: URL) {
+      Task { @MainActor in
+        guard let editor = await windowSession.openDocument(at: url),
+          let tab = editor.document
+        else { return }
+        let snapshot = TextSnapshot(text: tab.text)
+        guard let range = try? snapshot.nsRange(for: diagnostic.range) else { return }
+        _ = windowSession.revealSelection(
+          range,
+          in: tab.id,
+          preferredEditorSessionID: editor.id
+        )
+      }
+    }
+
+    private func openBuildDiagnostic(_ diagnostic: EditorBuildDiagnostic) {
+      Task { @MainActor in
+        guard let editor = await windowSession.openDocument(at: diagnostic.url),
+          let tab = editor.document
+        else { return }
+        let snapshot = TextSnapshot(text: tab.text)
+        let position = TextPosition(
+          line: max(0, diagnostic.line - 1),
+          utf16Column: max(0, diagnostic.column - 1)
+        )
+        guard let offset = try? snapshot.utf16Offset(of: position) else { return }
+        _ = windowSession.revealSelection(
+          NSRange(location: offset, length: 0),
+          in: tab.id,
+          preferredEditorSessionID: editor.id
+        )
       }
     }
   }

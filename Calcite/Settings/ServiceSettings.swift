@@ -203,9 +203,11 @@ struct EditorProfileSettingsView: View {
         VStack(alignment: .leading, spacing: 3) {
           Text(profile.themeMetadata.importedName ?? "Custom")
             .font(.headline)
-          Text("Import VS Code, TextMate, Vim, Neovim JSON/Lua, theme folders, or VSIX archives")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+          Text(
+            "Import VS Code, TextMate, Sublime, Xcode, Vim, Neovim, theme folders, VSIX, or ZIP archives"
+          )
+          .font(.caption)
+          .foregroundStyle(.secondary)
         }
         Spacer()
         Button("Import Theme…", systemImage: "square.and.arrow.down") {
@@ -353,12 +355,12 @@ struct EditorProfileSettingsView: View {
 
   private func importTheme() {
     let panel = NSOpenPanel()
-    panel.title = "Import Editor Theme, Theme Folder, or VSIX"
+    panel.title = "Import Editor Theme, Theme Folder, VSIX, or ZIP"
     panel.prompt = "Import"
     panel.allowsMultipleSelection = false
     panel.canChooseDirectories = true
     panel.canChooseFiles = true
-    panel.allowedContentTypes = [.json, .xmlPropertyList, .plainText, .data, .directory]
+    panel.allowedContentTypes = [.json, .xmlPropertyList, .plainText, .data, .directory, .zip]
     guard panel.runModal() == .OK, let url = panel.url else { return }
     loadTheme(from: url, preferredVariantPath: nil)
   }
@@ -375,7 +377,7 @@ struct EditorProfileSettingsView: View {
     var temporaryURL: URL?
     do {
       let importURL: URL
-      if sourceURL.pathExtension.lowercased() == "vsix" {
+      if ["vsix", "zip"].contains(sourceURL.pathExtension.lowercased()) {
         let extracted = try extractVSIX(sourceURL)
         temporaryURL = extracted
         let extensionRoot = extracted.appendingPathComponent("extension", isDirectory: true)
@@ -483,16 +485,24 @@ struct EditorProfileSettingsView: View {
     let destination = FileManager.default.temporaryDirectory
       .appendingPathComponent("CalciteTheme-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-    process.arguments = ["-x", "-k", url.path, destination.path]
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      try? FileManager.default.removeItem(at: destination)
-      throw CocoaError(.fileReadCorruptFile)
+    let tools: [(String, [String])] = [
+      ("/usr/bin/ditto", ["-x", "-k", url.path, destination.path]),
+      ("/usr/bin/unzip", ["-q", url.path, "-d", destination.path]),
+    ]
+    for (tool, arguments) in tools where FileManager.default.isExecutableFile(atPath: tool) {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: tool)
+      process.arguments = arguments
+      do {
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus == 0 { return destination }
+      } catch {
+        continue
+      }
     }
-    return destination
+    try? FileManager.default.removeItem(at: destination)
+    throw CocoaError(.fileReadCorruptFile)
   }
 
   private var typography: some View {
@@ -614,6 +624,11 @@ struct EditorProfileSettingsView: View {
         "Show Inline Diagnostic Messages", isOn: $profile.behavior.showInlineDiagnosticMessages
       )
       .disabled(!profile.behavior.showDiagnostics)
+      Toggle(
+        "Editor Geometry Diagnostics",
+        isOn: $profile.behavior.showGeometryDiagnostics
+      )
+      .help("Shows TextKit glyph, cursor, inset, and viewport geometry over the active editor.")
       Divider()
       Toggle("Auto-close Brackets and Quotes", isOn: $profile.typing.closePairs)
       Toggle("Surround Selected Text", isOn: $profile.typing.surroundSelection)
@@ -936,7 +951,10 @@ private struct ThemeEditorPreview: View {
         onShowQuickHelp: {},
         onShowFind: { _ in },
         zoomScale: 1,
+        horizontalScrollOffset: 0,
+        verticalScrollOffset: 0,
         onZoomChange: { _ in },
+        onScrollChange: { _, _ in },
         onVimStateChange: {},
         onCaretRectChange: { _ in }
       )
@@ -1208,6 +1226,7 @@ private struct EditorDebugSettingsView: View {
       TextField("Working Directory", text: $controller.debugConfiguration.workingDirectory)
       Toggle("Stop on Entry", isOn: $controller.debugConfiguration.stopOnEntry)
       Toggle("Build Before Launch", isOn: $controller.debugConfiguration.buildBeforeLaunch)
+      Toggle("Live Debug on File Changes", isOn: $controller.isLiveDebugEnabled)
       Text(
         "The adapter is selected from the active tab's detected language. Manual adapter paths remain available under Services."
       )

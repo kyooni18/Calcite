@@ -9,7 +9,6 @@ struct CalciteEditorSurface: View {
   @ObservedObject var editorSession: CalciteBackendWindowSession.EditorSession
   let isActiveDocument: Bool
   let onActivate: () -> Void
-  @State private var zoomScale: CGFloat = 1
   @State private var vimPresentationRevision: UInt64 = 0
   @State private var showsFind = false
   @State private var showsReplace = false
@@ -129,7 +128,6 @@ struct CalciteEditorSurface: View {
           onActivate()
           let selection = selectedRange(forLine: line, in: tab.text)
           editorSession.updateSelection(selection, for: tab)
-          tab.updateSelection(selection)
           tab.toggleBreakpointAtCurrentLine()
         },
         onAcceptCompletion: tab.acceptSelectedCompletion,
@@ -148,7 +146,12 @@ struct CalciteEditorSurface: View {
           showsReplace = replace
         },
         zoomScale: effectiveZoomScale,
+        horizontalScrollOffset: effectiveHorizontalScrollOffset,
+        verticalScrollOffset: effectiveVerticalScrollOffset,
         onZoomChange: { updateZoom(by: $0) },
+        onScrollChange: { horizontal, vertical in
+          editorSession.updateScroll(horizontal: horizontal, vertical: vertical)
+        },
         onVimStateChange: {
           vimPresentationRevision &+= 1
           if let snapshot = vimController?.historySnapshot {
@@ -190,10 +193,17 @@ struct CalciteEditorSurface: View {
       }
 
       if profile.behavior.showDiagnostics {
-        EditorDiagnosticOverlay(tab: tab, onShowQuickFixes: onShowQuickFixes)
-          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-          .padding(.top, 10)
-          .padding(.trailing, 12)
+        EditorDiagnosticOverlay(
+          tab: tab,
+          onShowQuickFixes: onShowQuickFixes,
+          onRevealSelection: { range in
+            onActivate()
+            editorSession.updateSelection(range, for: tab)
+          }
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .padding(.top, 10)
+        .padding(.trailing, 12)
       }
 
       if showsFind {
@@ -229,8 +239,24 @@ struct CalciteEditorSurface: View {
   }
 
   private var effectiveZoomScale: CGFloat {
-    guard profile.vim.enabled, let vimController else { return zoomScale }
+    guard profile.vim.enabled, let vimController else {
+      return CGFloat(editorSession.zoomScale)
+    }
     return CGFloat(vimController.engine.windowPresentationState.zoomScale)
+  }
+
+  private var effectiveHorizontalScrollOffset: Double {
+    guard profile.vim.enabled, let vimController else {
+      return editorSession.horizontalScrollOffset
+    }
+    return vimController.engine.windowPresentationState.horizontalScrollOffset
+  }
+
+  private var effectiveVerticalScrollOffset: Double {
+    guard profile.vim.enabled, let vimController else {
+      return editorSession.verticalScrollOffset
+    }
+    return vimController.engine.windowPresentationState.verticalScrollOffset
   }
 
   private func replace(range: NSRange, with value: String) {
@@ -259,11 +285,10 @@ struct CalciteEditorSurface: View {
 
   private func setZoom(_ value: CGFloat) {
     let clamped = min(2, max(0.5, value))
+    editorSession.updateZoom(Double(clamped))
     if profile.vim.enabled, let vimController {
       vimController.engine.updateWindowPresentation(zoomScale: Double(clamped))
       vimPresentationRevision &+= 1
-    } else {
-      zoomScale = clamped
     }
   }
 
@@ -293,6 +318,7 @@ struct CalciteEditorSurface: View {
 private struct EditorDiagnosticOverlay: View {
   @ObservedObject var tab: EditorTab
   let onShowQuickFixes: (Diagnostic) -> Void
+  let onRevealSelection: (NSRange) -> Void
   /// Keep the chosen detail level when this overlay is recreated for a new error.
   @AppStorage("calcite.editorDiagnosticOverlay.isExpanded") private var isExpanded = true
   @AppStorage("calcite.editorDiagnosticOverlay.expandedWidth") private var expandedWidth = 390.0
@@ -548,7 +574,7 @@ private struct EditorDiagnosticOverlay: View {
   private func reveal(_ diagnostic: Diagnostic) {
     let snapshot = TextSnapshot(text: tab.text)
     guard let range = try? snapshot.nsRange(for: diagnostic.range) else { return }
-    tab.updateSelection(range)
+    onRevealSelection(range)
   }
 
   private func diagnosticSymbol(_ severity: Diagnostic.Severity) -> String {
@@ -611,7 +637,10 @@ struct CodeTextEditor: NSViewRepresentable {
   let onShowQuickHelp: () -> Void
   let onShowFind: (Bool) -> Void
   let zoomScale: CGFloat
+  let horizontalScrollOffset: Double
+  let verticalScrollOffset: Double
   let onZoomChange: (CGFloat) -> Void
+  let onScrollChange: (Double, Double) -> Void
   let onVimStateChange: () -> Void
   let onCaretRectChange: (CGRect) -> Void
   var onActivate: () -> Void = {}
@@ -723,6 +752,7 @@ struct CodeTextEditor: NSViewRepresentable {
     context.coordinator.updateSurfaceActivation(in: textView)
     context.coordinator.scheduleCaretPublication(for: textView)
     scrollView.requestDocumentSizeSync()
+    context.coordinator.restoreScrollPosition(in: scrollView, force: true)
     return scrollView
   }
 
@@ -736,6 +766,9 @@ struct CodeTextEditor: NSViewRepresentable {
     context.coordinator.beginRepresentableUpdate()
     defer { context.coordinator.endRepresentableUpdate() }
     guard let textView = scrollView.documentView as? NSTextView else { return }
+    if bindingChanged {
+      (textView as? CodeEditorTextView)?.discardMarkedTextState()
+    }
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.languageID = languageID
       codeTextView.requiresPresentationAwareInsertionPoint = usesRichMarkdownPresentation
@@ -836,6 +869,7 @@ struct CodeTextEditor: NSViewRepresentable {
     }
     context.coordinator.updateSurfaceActivation(in: textView)
     context.coordinator.scheduleCaretPublication(for: textView)
+    context.coordinator.restoreScrollPosition(in: scrollView, force: bindingChanged)
   }
 
   private var usesRichMarkdownPresentation: Bool {
@@ -990,6 +1024,10 @@ struct CodeTextEditor: NSViewRepresentable {
     private var wasActiveSurface = false
     private let vimGeometryProvider = CalciteVimGeometryProvider()
     private struct VimDocumentComposition {
+      var documentID: UUID?
+      var controllerID: ObjectIdentifier?
+      var bindingGeneration: UInt64
+      var baseRevision: UInt64
       var baseText: String
       var baseSelection: NSRange
       var replacementRange: NSRange
@@ -1012,12 +1050,19 @@ struct CodeTextEditor: NSViewRepresentable {
     private var lastAppliedVimNativeRanges: [NSRange]?
     private var representableUpdateDepth = 0
     private var deferredSelection: NSRange?
+    private var deferredScrollPosition: CGPoint?
     private var hasDeferredVimStateChange = false
     private var publicationFlushTask: Task<Void, Never>?
     private var presentationState: PresentationState?
     private var styledSelection: NSRange?
     private weak var observedTextView: NSTextView?
     private weak var observedClipView: NSClipView?
+    private var lastObservedParentScrollPosition: CGPoint
+    private var lastPublishedScrollPosition: CGPoint?
+    private var suppressesScrollPublication = true
+    private var scrollInteractionRevision: UInt64 = 0
+    private var scrollRestorationTask: Task<Void, Never>?
+    private var vimWindowRestorationTask: Task<Void, Never>?
     private var caretPublicationTask: Task<Void, Never>?
     private var lastPublishedCaretRect: CGRect?
 
@@ -1042,11 +1087,17 @@ struct CodeTextEditor: NSViewRepresentable {
       )
       self.boundDocumentID = parent.documentID
       self.boundVimControllerID = parent.sharedVimController.map(ObjectIdentifier.init)
+      self.lastObservedParentScrollPosition = CGPoint(
+        x: CGFloat(parent.horizontalScrollOffset),
+        y: CGFloat(parent.verticalScrollOffset)
+      )
       self.wasActiveSurface = false
     }
 
     isolated deinit {
       caretPublicationTask?.cancel()
+      scrollRestorationTask?.cancel()
+      vimWindowRestorationTask?.cancel()
       publicationFlushTask?.cancel()
       NotificationCenter.default.removeObserver(self)
     }
@@ -1063,16 +1114,180 @@ struct CodeTextEditor: NSViewRepresentable {
         name: NSView.boundsDidChangeNotification,
         object: clipView
       )
+      NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(commitEditorStateForExecution(_:)),
+        name: .calciteCommitEditorStateForExecution,
+        object: nil
+      )
+      if let scrollView = clipView.enclosingScrollView {
+        NotificationCenter.default.addObserver(
+          self,
+          selector: #selector(scrollViewWillStartLiveScroll(_:)),
+          name: NSScrollView.willStartLiveScrollNotification,
+          object: scrollView
+        )
+      }
+    }
+
+    @objc private func commitEditorStateForExecution(_ notification: Notification) {
+      guard notification.name == .calciteCommitEditorStateForExecution,
+        let textView = observedTextView
+      else { return }
+
+      if textView.hasMarkedText() {
+        textView.unmarkText()
+      }
+      handleObservedTextChange(in: textView)
+      flushDeferredPublicationsForExecution()
+    }
+
+    private func flushDeferredPublicationsForExecution() {
+      publicationFlushTask?.cancel()
+      publicationFlushTask = nil
+      guard representableUpdateDepth == 0 else { return }
+
+      let selection = deferredSelection
+      let scrollPosition = deferredScrollPosition
+      let publishesVimState = hasDeferredVimStateChange
+      clearDeferredPublications()
+
+      if let selection { parent.onSelectionChange(selection) }
+      if let scrollPosition {
+        parent.onScrollChange(Double(scrollPosition.x), Double(scrollPosition.y))
+      }
+      if publishesVimState { parent.onVimStateChange() }
+    }
+
+    @objc private func scrollViewWillStartLiveScroll(_ notification: Notification) {
+      guard let scrollView = notification.object as? NSScrollView,
+        scrollView.contentView === observedClipView
+      else { return }
+      cancelPendingScrollRestoreForUserInteraction()
+    }
+
+    private func cancelPendingScrollRestoreForUserInteraction() {
+      scrollInteractionRevision &+= 1
+      scrollRestorationTask?.cancel()
+      scrollRestorationTask = nil
+      vimWindowRestorationTask?.cancel()
+      vimWindowRestorationTask = nil
+      suppressesScrollPublication = false
     }
 
     @objc private func clipViewBoundsDidChange(_ notification: Notification) {
-      guard notification.object as? NSClipView === observedClipView,
+      guard let clipView = observedClipView,
+        notification.object as? NSClipView === clipView,
         let textView = observedTextView
       else { return }
+      let origin = clipView.bounds.origin
+      let position = CGPoint(
+        x: normalizedHorizontalScrollOffset(origin.x, in: textView),
+        y: max(0, origin.y)
+      )
+      if let event = NSApp.currentEvent,
+        event.type == .scrollWheel || event.type == .leftMouseDragged
+      {
+        cancelPendingScrollRestoreForUserInteraction()
+      }
+      guard !suppressesScrollPublication else {
+        scheduleCaretPublication(for: textView)
+        return
+      }
+      publishScrollPosition(position)
       if parent.isActiveSurface, parent.profile.vim.enabled, let controller = vimController {
         updateVimViewport(controller, in: textView)
       }
       scheduleCaretPublication(for: textView)
+    }
+
+    func restoreScrollPosition(in scrollView: NSScrollView, force: Bool) {
+      guard !parent.profile.vim.enabled else {
+        scrollRestorationTask?.cancel()
+        scrollRestorationTask = nil
+        suppressesScrollPublication = false
+        return
+      }
+
+      let targetTextView = observedTextView ?? (scrollView.documentView as? NSTextView)
+      let target = CGPoint(
+        x: targetTextView.map {
+          normalizedHorizontalScrollOffset(CGFloat(parent.horizontalScrollOffset), in: $0)
+        } ?? CGFloat(max(0, parent.horizontalScrollOffset)),
+        y: CGFloat(max(0, parent.verticalScrollOffset))
+      )
+      guard force else { return }
+      lastObservedParentScrollPosition = target
+
+      scrollRestorationTask?.cancel()
+      let generation = bindingGeneration
+      let interactionRevision = scrollInteractionRevision
+      scrollRestorationTask = Task { @MainActor [weak self, weak scrollView] in
+        await Task.yield()
+        guard let self, let scrollView, !Task.isCancelled,
+          generation == self.bindingGeneration,
+          interactionRevision == self.scrollInteractionRevision
+        else { return }
+
+        self.suppressesScrollPublication = true
+        (scrollView as? CodeTextScrollView)?.synchronizeDocumentSize()
+        let clipView = scrollView.contentView
+        let requested = NSRect(
+          x: target.x,
+          y: target.y,
+          width: clipView.bounds.width,
+          height: clipView.bounds.height
+        )
+        let constrained = clipView.constrainBoundsRect(requested)
+        let restored = CGPoint(
+          x: targetTextView.map {
+            self.normalizedHorizontalScrollOffset(constrained.origin.x, in: $0)
+          } ?? max(0, constrained.origin.x),
+          y: max(0, constrained.origin.y)
+        )
+        clipView.scroll(to: restored)
+        scrollView.reflectScrolledClipView(clipView)
+        self.lastPublishedScrollPosition = restored
+        self.suppressesScrollPublication = false
+        self.scrollRestorationTask = nil
+        if let textView = self.observedTextView ?? (scrollView.documentView as? NSTextView) {
+          if self.parent.profile.vim.enabled, let controller = self.vimController {
+            self.updateVimViewport(controller, in: textView)
+          }
+          self.scheduleCaretPublication(for: textView)
+        }
+        if !Self.nearlyEqual(restored, target) {
+          self.lastObservedParentScrollPosition = restored
+          self.parent.onScrollChange(Double(restored.x), Double(restored.y))
+        }
+      }
+    }
+
+    private func normalizedHorizontalScrollOffset(
+      _ value: CGFloat,
+      in textView: NSTextView
+    ) -> CGFloat {
+      let lineFragmentPadding = textView.textContainer?.lineFragmentPadding ?? 0
+      let snapThreshold = max(1, textView.textContainerInset.width + lineFragmentPadding + 1)
+      return value <= snapThreshold ? 0 : max(0, value)
+    }
+
+    private static func nearlyEqual(_ lhs: CGPoint, _ rhs: CGPoint) -> Bool {
+      abs(lhs.x - rhs.x) <= 0.5 && abs(lhs.y - rhs.y) <= 0.5
+    }
+
+    private func publishScrollPosition(_ position: CGPoint) {
+      guard lastPublishedScrollPosition.map({ !Self.nearlyEqual($0, position) }) ?? true else {
+        return
+      }
+      lastPublishedScrollPosition = position
+      lastObservedParentScrollPosition = position
+      if representableUpdateDepth > 0 {
+        deferredScrollPosition = position
+        scheduleDeferredPublicationsIfNeeded()
+      } else {
+        parent.onScrollChange(Double(position.x), Double(position.y))
+      }
     }
 
     func updateSurfaceActivation(in textView: NSTextView) {
@@ -1119,7 +1334,20 @@ struct CodeTextEditor: NSViewRepresentable {
         return false
       }
 
+      if let vimController, vimController.isComposingText {
+        _ = try? vimController.handle(event: .compositionCancelled)
+      }
+      vimDocumentComposition = nil
+      vimVirtualCompositionText = ""
+
       bindingGeneration &+= 1
+      scrollInteractionRevision &+= 1
+      scrollRestorationTask?.cancel()
+      scrollRestorationTask = nil
+      vimWindowRestorationTask?.cancel()
+      vimWindowRestorationTask = nil
+      suppressesScrollPublication = true
+      lastPublishedScrollPosition = nil
       publicationFlushTask?.cancel()
       publicationFlushTask = nil
       clearDeferredPublications()
@@ -1298,7 +1526,22 @@ struct CodeTextEditor: NSViewRepresentable {
       }
 
       guard let controller = vimController else { return }
-      guard parent.isActiveSurface else {
+
+      // Apply the mode shape before the active-surface guard. SwiftUI can bind a
+      // text view while its section activation update is still in flight; leaving
+      // the style untouched during that window lets NSTextView restore its native
+      // caret and it can remain visible after the surface becomes active.
+      let currentMode = controller.engine.state.mode
+      CalciteVimCursorPresenter.apply(
+        mode: currentMode,
+        profile: parent.profile,
+        to: textView
+      )
+      if !parent.isActiveSurface {
+        if let codeTextView = textView as? CodeEditorTextView {
+          codeTextView.vimCursorLocation = nil
+          codeTextView.refreshInsertionPointRendering()
+        }
         surfaceTransition = .idle
         return
       }
@@ -1458,6 +1701,12 @@ struct CodeTextEditor: NSViewRepresentable {
         }
 
         guard mode == .insert || mode == .replace else { return false }
+        if let composition = vimDocumentComposition,
+          !compositionMatchesCurrentBinding(composition)
+        {
+          discardStaleVimComposition(in: textView, controller: controller)
+          return true
+        }
         if vimDocumentComposition == nil {
           let baseText = controller.engine.state.text
           let baseSelection = Self.clampedRange(textView.selectedRange(), in: baseText)
@@ -1467,6 +1716,10 @@ struct CodeTextEditor: NSViewRepresentable {
             in: baseText
           )
           vimDocumentComposition = VimDocumentComposition(
+            documentID: boundDocumentID,
+            controllerID: boundVimControllerID,
+            bindingGeneration: bindingGeneration,
+            baseRevision: renderedTextRevision,
             baseText: baseText,
             baseSelection: baseSelection,
             replacementRange: targetRange,
@@ -1499,6 +1752,13 @@ struct CodeTextEditor: NSViewRepresentable {
       }
       configureVim(for: textView)
       guard let controller = vimController, controller.isComposingText else { return false }
+
+      if let composition = vimDocumentComposition,
+        !compositionMatchesCurrentBinding(composition)
+      {
+        discardStaleVimComposition(in: textView, controller: controller)
+        return true
+      }
 
       let committedText = vimDocumentComposition?.currentText ?? vimVirtualCompositionText
       if committedText.isEmpty {
@@ -1552,6 +1812,13 @@ struct CodeTextEditor: NSViewRepresentable {
       isCompositionCommit: Bool
     ) -> Bool {
       let documentComposition = vimDocumentComposition
+      if let documentComposition,
+        !compositionMatchesCurrentBinding(documentComposition)
+      {
+        discardStaleVimComposition(in: textView, controller: controller)
+        return true
+      }
+
       let sourceText: String
       let effectiveRange: NSRange
       if let documentComposition {
@@ -1640,6 +1907,37 @@ struct CodeTextEditor: NSViewRepresentable {
       pendingPresentationRange = composition.replacementRange
       parent.applyPresentation(to: textView, affectedRange: composition.replacementRange)
       scheduleCaretPublication(for: textView)
+    }
+
+    private func compositionMatchesCurrentBinding(
+      _ composition: VimDocumentComposition
+    ) -> Bool {
+      composition.documentID == boundDocumentID
+        && composition.controllerID == boundVimControllerID
+        && composition.bindingGeneration == bindingGeneration
+        && composition.baseRevision == renderedTextRevision
+    }
+
+    /// Drops an IME callback that belongs to an older document binding or
+    /// revision. Restoring its captured base text here would overwrite the
+    /// authoritative document that replaced it.
+    private func discardStaleVimComposition(
+      in textView: NSTextView,
+      controller: VimKeymapController
+    ) {
+      (textView as? CodeEditorTextView)?.discardMarkedTextState()
+      vimDocumentComposition = nil
+      vimVirtualCompositionText = ""
+      _ = try? controller.handle(event: .compositionCancelled)
+      _ = controller.reconcileExternalText(
+        textView.string,
+        cursor: textView.selectedRange().location
+      )
+      synchronizedVimTextRevision = parent.textRevision
+      publishVimMode(controller.engine.state.mode)
+      publishVimPrompt(controller.prompt)
+      publishVimInteraction(controller.interactionSnapshot)
+      publishVimInputSource(textView.inputContext?.selectedKeyboardInputSource)
     }
 
     private func cancelVimComposition(
@@ -1829,6 +2127,7 @@ struct CodeTextEditor: NSViewRepresentable {
 
     func handleObservedTextChange(in textView: NSTextView) {
       guard !isApplyingExternalUpdate else { return }
+      cancelPendingScrollRestoreForUserInteraction()
       guard vimDocumentComposition == nil else {
         pendingEdit = nil
         return
@@ -1887,6 +2186,9 @@ struct CodeTextEditor: NSViewRepresentable {
         vimDocumentComposition == nil,
         let textView = notification.object as? NSTextView
       else { return }
+      if !parent.profile.vim.enabled {
+        cancelPendingScrollRestoreForUserInteraction()
+      }
       if parent.profile.vim.enabled {
         let currentRanges = textView.selectedRanges.map(\.rangeValue)
         let isPointerSelection =
@@ -1929,6 +2231,7 @@ struct CodeTextEditor: NSViewRepresentable {
 
     func handleNativePointerSelection(_ range: NSRange, in textView: NSTextView) {
       guard parent.isActiveSurface, surfaceTransition == .idle else { return }
+      cancelPendingScrollRestoreForUserInteraction()
       guard parent.profile.vim.enabled else {
         publishSelection(range)
         return
@@ -2064,11 +2367,15 @@ struct CodeTextEditor: NSViewRepresentable {
       )
       guard let codeTextView = textView as? CodeEditorTextView else { return }
       switch mode {
-      case .visualCharacter, .visualLine:
+      case .normal, .replace, .visualCharacter, .visualLine:
         codeTextView.vimCursorLocation = vimController?.engine.state.cursor
-      case .normal, .insert, .replace, .commandLine, .search:
+      case .insert, .commandLine, .search:
         codeTextView.vimCursorLocation = nil
       }
+      // A view can be rebound or hidden without changing either property. Force
+      // a renderer refresh so an unchanged mode still recreates the block or
+      // underline cursor after AppKit removed the old cursor subview.
+      codeTextView.refreshInsertionPointRendering()
     }
 
     private func publishVimMode(_ mode: VimMode) {
@@ -2099,12 +2406,13 @@ struct CodeTextEditor: NSViewRepresentable {
 
     private func clearDeferredPublications() {
       deferredSelection = nil
+      deferredScrollPosition = nil
       hasDeferredVimStateChange = false
     }
 
     private func scheduleDeferredPublicationsIfNeeded() {
       guard publicationFlushTask == nil,
-        deferredSelection != nil || hasDeferredVimStateChange
+        deferredSelection != nil || deferredScrollPosition != nil || hasDeferredVimStateChange
       else { return }
 
       let generation = bindingGeneration
@@ -2122,11 +2430,15 @@ struct CodeTextEditor: NSViewRepresentable {
         }
 
         let selection = self.deferredSelection
+        let scrollPosition = self.deferredScrollPosition
         let publishesVimState = self.hasDeferredVimStateChange
         self.clearDeferredPublications()
         self.publicationFlushTask = nil
 
         if let selection { self.parent.onSelectionChange(selection) }
+        if let scrollPosition {
+          self.parent.onScrollChange(Double(scrollPosition.x), Double(scrollPosition.y))
+        }
         if publishesVimState { self.parent.onVimStateChange() }
       }
     }
@@ -2140,8 +2452,10 @@ struct CodeTextEditor: NSViewRepresentable {
       }
       if let clipView = textView.enclosingScrollView?.contentView {
         controller.engine.updateWindowPresentation(
-          horizontalScrollOffset: Double(clipView.bounds.origin.x),
-          verticalScrollOffset: Double(clipView.bounds.origin.y)
+          horizontalScrollOffset: Double(
+            normalizedHorizontalScrollOffset(clipView.bounds.origin.x, in: textView)
+          ),
+          verticalScrollOffset: Double(max(0, clipView.bounds.origin.y))
         )
       }
     }
@@ -2152,22 +2466,36 @@ struct CodeTextEditor: NSViewRepresentable {
     ) {
       guard let scrollView = textView.enclosingScrollView else { return }
       let state = controller.engine.windowPresentationState
-      Task { @MainActor [weak self, weak textView, weak scrollView] in
+      let generation = bindingGeneration
+      let interactionRevision = scrollInteractionRevision
+      let controllerID = ObjectIdentifier(controller)
+      vimWindowRestorationTask?.cancel()
+      vimWindowRestorationTask = Task { @MainActor [weak self, weak textView, weak scrollView] in
         await Task.yield()
         guard let self, self.parent.isActiveSurface,
-          let textView, let scrollView, textView.superview != nil
+          let textView, let scrollView, textView.superview != nil,
+          generation == self.bindingGeneration,
+          interactionRevision == self.scrollInteractionRevision,
+          self.vimController.map(ObjectIdentifier.init) == controllerID
         else { return }
         let clipView = scrollView.contentView
         let requested = NSRect(
-          x: CGFloat(state.horizontalScrollOffset),
-          y: CGFloat(state.verticalScrollOffset),
+          x: self.normalizedHorizontalScrollOffset(
+            CGFloat(state.horizontalScrollOffset), in: textView
+          ),
+          y: CGFloat(max(0, state.verticalScrollOffset)),
           width: clipView.bounds.width,
           height: clipView.bounds.height
         )
         let constrained = clipView.constrainBoundsRect(requested)
-        clipView.scroll(to: constrained.origin)
+        let restoredOrigin = CGPoint(
+          x: self.normalizedHorizontalScrollOffset(constrained.origin.x, in: textView),
+          y: max(0, constrained.origin.y)
+        )
+        clipView.scroll(to: restoredOrigin)
         scrollView.reflectScrolledClipView(clipView)
         self.updateVimViewport(controller, in: textView)
+        self.vimWindowRestorationTask = nil
       }
     }
 
@@ -2322,39 +2650,29 @@ struct CodeTextEditor: NSViewRepresentable {
       let primarySelection = selectionPresentation.primaryRange
       if state.text != textView.string {
         let sourceText = textView.string
-        var transaction = resolvedTransaction(for: execution, sourceText: sourceText)
+        guard var transaction = resolvedTransaction(for: execution, sourceText: sourceText) else {
+          assertionFailure("Vim produced a text change without a valid transaction.")
+          controller.synchronize(
+            text: sourceText,
+            cursor: textView.selectedRange().location
+          )
+          publishVimMode(controller.engine.state.mode)
+          scheduleCaretPublication(for: textView)
+          return
+        }
         transaction.baseRevision = VimDocumentRevision(parent.textRevision)
-        var edits = transaction.sequentialEdits.map {
+        let edits = transaction.sequentialEdits.map {
           (range: $0.range, replacement: $0.replacement)
         }
-        if !Self.edits(edits, transform: sourceText, into: state.text) {
-          let fallback = Self.singleEdit(from: sourceText, to: state.text)
-          edits = [
-            (
-              range: fallback.range.location..<NSMaxRange(fallback.range),
-              replacement: fallback.replacement
-            )
-          ]
-          transaction = VimEditTransaction(
-            baseRevision: VimDocumentRevision(parent.textRevision),
-            origin: .vim,
-            beforeState: VimState(
-              text: sourceText,
-              cursor: textView.selectedRange().location,
-              mode: controller.engine.state.mode
-            ),
-            afterState: state,
-            sequentialEdits: edits.map {
-              VimTransactionEdit(range: $0.0, replacement: $0.1)
-            },
-            baseEdits: edits.map {
-              VimTransactionEdit(range: $0.0, replacement: $0.1)
-            },
-            repeatMetadata: VimRepeatMetadata(
-              isRepeatable: false,
-              finishesInInsertMode: state.mode == .insert || state.mode == .replace
-            )
+        guard Self.edits(edits, transform: sourceText, into: state.text) else {
+          assertionFailure("Vim transaction edits do not produce the reported state.")
+          controller.synchronize(
+            text: sourceText,
+            cursor: textView.selectedRange().location
           )
+          publishVimMode(controller.engine.state.mode)
+          scheduleCaretPublication(for: textView)
+          return
         }
 
         isApplyingExternalUpdate = true
@@ -2457,29 +2775,14 @@ struct CodeTextEditor: NSViewRepresentable {
     private func resolvedTransaction(
       for execution: VimExecutionResult,
       sourceText: String
-    ) -> VimEditTransaction {
-      if let transaction = execution.transaction,
+    ) -> VimEditTransaction? {
+      guard let transaction = execution.transaction,
         transaction.beforeState.text == sourceText,
-        transaction.afterState.text == execution.state.text
-      {
-        return transaction
-      }
-      let fallback = Self.singleEdit(from: sourceText, to: execution.state.text)
-      let edit = VimTransactionEdit(
-        range: fallback.range.location..<NSMaxRange(fallback.range),
-        replacement: fallback.replacement
-      )
-      return VimEditTransaction(
-        origin: .vim,
-        beforeState: VimState(text: sourceText, cursor: 0, mode: execution.state.mode),
-        afterState: execution.state,
-        sequentialEdits: [edit],
-        baseEdits: [edit],
-        repeatMetadata: VimRepeatMetadata(
-          isRepeatable: false,
-          finishesInInsertMode: execution.state.mode == .insert || execution.state.mode == .replace
-        )
-      )
+        transaction.afterState.text == execution.state.text,
+        VimTransactionCoordinator.applying(transaction.baseEdits, to: sourceText)
+          == execution.state.text
+      else { return nil }
+      return transaction
     }
 
     private static func edits(

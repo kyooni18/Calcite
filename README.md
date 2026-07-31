@@ -21,3 +21,24 @@ Cargo, Rustup, Homebrew, mise, asdf, Swiftly, and user-local executables are res
 ## EditorServices
 
 Public integration notes and configuration are in [`EditorServices/README.md`](EditorServices/README.md). Third-party credits and licenses are listed in [`EditorServices/THIRD_PARTY_NOTICES.md`](EditorServices/THIRD_PARTY_NOTICES.md).
+
+## Verification
+
+Run the package tests before opening the app project:
+
+```sh
+cd EditorServices
+swift test --parallel
+```
+
+The `CalciteTests` target contains AppKit/SwiftUI integration regressions and must be run with
+Xcode on macOS.
+
+## Source archive
+
+Create a clean source archive without Git internals, AppleDouble files, build products, or Xcode
+user state:
+
+```sh
+./Scripts/package-source.sh /path/to/Calcite-source.tar.gz
+```

@@ -45,7 +45,7 @@ public struct VimHostCapabilities: Hashable, Sendable {
     case .quit, .closeWindow, .closeTab: return .quit
     case .openFile: return .openFile
     case .switchBuffer: return .buffers
-    case .split: return .splits
+    case .split, .focusWindow, .cycleWindow, .focusPreviousWindow, .closeOtherWindows, .newWindow: return .splits
     case .nextTab, .previousTab, .newTab: return .tabs
     case .scroll: return .scrolling
     case .definition: return .definition

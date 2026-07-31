@@ -8,6 +8,7 @@ enum WorkspaceTaskKey: Hashable, Sendable, CustomStringConvertible {
   case buildLaunch
   case debugOperation
   case debugInspection
+  case liveDebug
   case backendMessages
   case backendDiagnostics
   case sourceWorkspaceEvents
@@ -26,6 +27,7 @@ enum WorkspaceTaskKey: Hashable, Sendable, CustomStringConvertible {
     case .buildLaunch: return "build-launch"
     case .debugOperation: return "debug-operation"
     case .debugInspection: return "debug-inspection"
+    case .liveDebug: return "live-debug"
     case .backendMessages: return "backend-messages"
     case .backendDiagnostics: return "backend-diagnostics"
     case .sourceWorkspaceEvents: return "source-workspace-events"
@@ -173,29 +175,39 @@ enum WorkspaceRuntimeState: Equatable, Sendable {
   case idle
   case starting(UUID)
   case running
-  case reconfiguring(UUID)
+  case preparingReconfiguration(UUID)
+  case committingReconfiguration(UUID)
   case shuttingDown
   case terminated
   case failed(String)
 
   func permitsTransition(to next: WorkspaceRuntimeState) -> Bool {
     switch (self, next) {
-    case (.idle, .starting), (.idle, .reconfiguring), (.idle, .shuttingDown),
-      (.idle, .terminated):
+    case (.idle, .starting), (.idle, .preparingReconfiguration),
+      (.idle, .shuttingDown), (.idle, .terminated):
       return true
-    case (.starting, .running), (.starting, .reconfiguring), (.starting, .failed),
-      (.starting, .shuttingDown), (.starting, .idle):
+    case (.starting, .running), (.starting, .preparingReconfiguration),
+      (.starting, .failed), (.starting, .shuttingDown), (.starting, .idle):
       return true
-    case (.running, .reconfiguring), (.running, .shuttingDown), (.running, .failed): return true
-    case (.reconfiguring, .running), (.reconfiguring, .failed),
-      (.reconfiguring, .shuttingDown), (.reconfiguring, .idle):
+    case (.running, .preparingReconfiguration), (.running, .shuttingDown),
+      (.running, .failed):
       return true
-    case (.failed, .starting), (.failed, .reconfiguring), (.failed, .shuttingDown),
-      (.failed, .idle):
+    case (.preparingReconfiguration, .committingReconfiguration),
+      (.preparingReconfiguration, .running), (.preparingReconfiguration, .failed),
+      (.preparingReconfiguration, .shuttingDown), (.preparingReconfiguration, .idle):
       return true
-    case (.shuttingDown, .terminated), (.shuttingDown, .failed): return true
-    case (.terminated, .terminated): return true
-    default: return self == next
+    case (.committingReconfiguration, .running), (.committingReconfiguration, .failed),
+      (.committingReconfiguration, .shuttingDown):
+      return true
+    case (.failed, .starting), (.failed, .preparingReconfiguration),
+      (.failed, .shuttingDown), (.failed, .idle), (.failed, .running):
+      return true
+    case (.shuttingDown, .terminated), (.shuttingDown, .failed):
+      return true
+    case (.terminated, .terminated):
+      return true
+    default:
+      return self == next
     }
   }
 }

@@ -6,6 +6,11 @@ struct EditorSessionRecoveryInput: Sendable {
   var diskModificationTime: TimeInterval?
 }
 
+struct EditorSessionOpenDocumentInput: Sendable {
+  var id: UUID
+  var url: URL
+}
+
 nonisolated struct EditorRecoveredDocument: Codable, Equatable, Sendable {
   var relativePath: String
   var text: String
@@ -40,11 +45,17 @@ struct EditorWorkspaceRestoration: Codable, Equatable, Sendable {
   var openRelativePaths: [String] = []
   var selectedRelativePath: String?
   var recoveredDocuments: [EditorRecoveredDocument] = []
+  var documentIdentifiersByRelativePath: [String: UUID]?
+  var presentation: WorkspacePresentationSnapshot?
+
+  func documentID(forRelativePath path: String) -> UUID? {
+    documentIdentifiersByRelativePath?[path]
+  }
 }
 
 actor EditorWorkspaceSessionStore {
   private struct StoredState: Codable {
-    var schemaVersion = 1
+    var schemaVersion = 2
     var restoration = EditorWorkspaceRestoration()
   }
 
@@ -68,12 +79,20 @@ actor EditorWorkspaceSessionStore {
 
   @discardableResult
   func save(
-    openURLs: [URL],
+    openDocuments: [EditorSessionOpenDocumentInput],
     selectedURL: URL?,
-    recoveredDocuments: [EditorSessionRecoveryInput]
+    recoveredDocuments: [EditorSessionRecoveryInput],
+    presentation: WorkspacePresentationSnapshot?
   ) throws -> EditorWorkspaceSessionSaveReport {
-    let openPaths = uniqueRelativePaths(openURLs)
+    let openPaths = uniqueRelativePaths(openDocuments.map(\.url))
     let selectedPath = selectedURL.flatMap(relativePath)
+    let openPathSet = Set(openPaths)
+    let documentIdentifiers = Dictionary(
+      uniqueKeysWithValues: openDocuments.compactMap { value -> (String, UUID)? in
+        guard let path = relativePath(value.url), openPathSet.contains(path) else { return nil }
+        return (path, value.id)
+      }
+    )
 
     var report = EditorWorkspaceSessionSaveReport()
     var recoveries: [EditorRecoveredDocument] = []
@@ -110,13 +129,32 @@ actor EditorWorkspaceSessionStore {
       )
     }
 
-    state.restoration = EditorWorkspaceRestoration(
-      openRelativePaths: openPaths,
-      selectedRelativePath: selectedPath,
-      recoveredDocuments: recoveries.reversed()
+    state = StoredState(
+      schemaVersion: 2,
+      restoration: EditorWorkspaceRestoration(
+        openRelativePaths: openPaths,
+        selectedRelativePath: selectedPath,
+        recoveredDocuments: recoveries.reversed(),
+        documentIdentifiersByRelativePath: documentIdentifiers,
+        presentation: presentation
+      )
     )
     try persist()
     return report
+  }
+
+  @discardableResult
+  func save(
+    openURLs: [URL],
+    selectedURL: URL?,
+    recoveredDocuments: [EditorSessionRecoveryInput]
+  ) throws -> EditorWorkspaceSessionSaveReport {
+    try save(
+      openDocuments: openURLs.map { EditorSessionOpenDocumentInput(id: UUID(), url: $0) },
+      selectedURL: selectedURL,
+      recoveredDocuments: recoveredDocuments,
+      presentation: nil
+    )
   }
 
   func clear() throws {
@@ -166,10 +204,18 @@ actor EditorWorkspaceSessionStore {
       Self.isSafeRelativePath($0.relativePath)
         && $0.text.utf8.count <= Self.maximumDocumentBytes
     }
+    let limitedPaths = Array(openPaths.prefix(Self.maximumDocumentCount))
+    let allowedPathSet = Set(limitedPaths)
+    let identifiers = restoration.documentIdentifiersByRelativePath?.filter { path, _ in
+      allowedPathSet.contains(path) && Self.isSafeRelativePath(path)
+    }
+    let presentation = restoration.presentation.map(Self.sanitizePresentation)
     return EditorWorkspaceRestoration(
-      openRelativePaths: Array(openPaths.prefix(Self.maximumDocumentCount)),
+      openRelativePaths: limitedPaths,
       selectedRelativePath: selected,
-      recoveredDocuments: Array(recoveries.prefix(Self.maximumDocumentCount))
+      recoveredDocuments: Array(recoveries.prefix(Self.maximumDocumentCount)),
+      documentIdentifiersByRelativePath: identifiers,
+      presentation: presentation
     )
   }
 
@@ -199,8 +245,54 @@ actor EditorWorkspaceSessionStore {
     ) ?? StoredState()
   }
 
-  private static func storageURL(for workspaceURL: URL) -> URL {
+  nonisolated static func storageURL(for workspaceURL: URL) -> URL {
     CalciteStateStorage.workspaceURL(workspaceURL, filename: "session.json")
+  }
+
+  nonisolated private static func sanitizePresentation(
+    _ value: WorkspacePresentationSnapshot
+  ) -> WorkspacePresentationSnapshot {
+    let windows = value.windows.prefix(16).map { window in
+      let editors = window.editors.prefix(64).map { editor in
+        WorkspaceEditorPresentationSnapshot(
+          editorSessionID: editor.editorSessionID,
+          documentID: editor.documentID,
+          selectedRange: WorkspaceTextRangeSnapshot(editor.selectedRange.nsRange),
+          horizontalScrollOffset: max(0, editor.horizontalScrollOffset),
+          verticalScrollOffset: max(0, editor.verticalScrollOffset),
+          zoomScale: min(max(editor.zoomScale, 0.5), 2),
+          documentPresentations: editor.documentPresentations.prefix(100).map { state in
+            WorkspaceDocumentPresentationSnapshot(
+              documentID: state.documentID,
+              selectedRange: WorkspaceTextRangeSnapshot(state.selectedRange.nsRange),
+              horizontalScrollOffset: max(0, state.horizontalScrollOffset),
+              verticalScrollOffset: max(0, state.verticalScrollOffset),
+              zoomScale: min(max(state.zoomScale, 0.5), 2)
+            )
+          }
+        )
+      }
+      let editorIDs = Set(editors.map(\.editorSessionID))
+      let assignments = window.sectionAssignments.prefix(256).filter {
+        editorIDs.contains($0.editorSessionID)
+      }
+      return WorkspaceWindowPresentationSnapshot(
+        windowSessionID: window.windowSessionID,
+        activeEditorSessionID: window.activeEditorSessionID.flatMap {
+          editorIDs.contains($0) ? $0 : nil
+        },
+        activeSectionID: window.activeSectionID,
+        editors: editors,
+        sectionAssignments: Array(assignments)
+      )
+    }
+    let windowIDs = Set(windows.map(\.windowSessionID))
+    return WorkspacePresentationSnapshot(
+      activeWindowSessionID: value.activeWindowSessionID.flatMap {
+        windowIDs.contains($0) ? $0 : nil
+      },
+      windows: Array(windows)
+    )
   }
 
   nonisolated private static func fingerprint(_ data: Data) -> String {

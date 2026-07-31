@@ -174,11 +174,11 @@ final class VimStage12StateOwnershipTests: XCTestCase {
     )
     XCTAssertEqual(
       try engine.executeNotation("<C-W>h").hostRequests,
-      [.custom("vim-window-left:1")]
+      [.focusWindow(direction: .left, count: 1)]
     )
     XCTAssertEqual(
       try engine.executeNotation("3<C-W>w").hostRequests,
-      [.custom("vim-window-next:3")]
+      [.cycleWindow(direction: .next, count: 3)]
     )
     XCTAssertEqual(
       try engine.executeNotation("<C-^>").hostRequests,

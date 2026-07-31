@@ -1347,7 +1347,7 @@ private struct MainSectionContentView: View {
       )
 
     case .problems:
-      CalciteProblemsView(backend: backend)
+      CalciteProblemsView(backend: backend, windowSession: windowSession)
 
     case .buildOutput:
       CalciteBuildOutputView(backend: backend)

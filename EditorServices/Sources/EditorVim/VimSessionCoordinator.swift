@@ -62,6 +62,50 @@ public struct VimBufferSnapshot: Hashable, Sendable {
 }
 
 @_spi(Calcite)
+public struct VimViewRuntimeSnapshot: Hashable, Sendable, Codable {
+  public var cursor: Int
+  public var mode: VimMode
+  public var visualAnchor: Int?
+  public var visualSelectionShape: VimSelectionShape
+  public var preferredColumn: Int?
+  public var preferredVisualColumn: Int?
+  public var inputSourceIdentifier: String?
+  public var horizontalScrollOffset: Double
+  public var verticalScrollOffset: Double
+  public var zoomScale: Double
+  public var viewportTopLine: Int
+  public var viewportBottomLine: Int
+
+  public init(
+    cursor: Int,
+    mode: VimMode,
+    visualAnchor: Int? = nil,
+    visualSelectionShape: VimSelectionShape = .character,
+    preferredColumn: Int? = nil,
+    preferredVisualColumn: Int? = nil,
+    inputSourceIdentifier: String? = nil,
+    horizontalScrollOffset: Double = 0,
+    verticalScrollOffset: Double = 0,
+    zoomScale: Double = 1,
+    viewportTopLine: Int = 1,
+    viewportBottomLine: Int = 20
+  ) {
+    self.cursor = max(0, cursor)
+    self.mode = mode
+    self.visualAnchor = visualAnchor.map { max(0, $0) }
+    self.visualSelectionShape = visualSelectionShape
+    self.preferredColumn = preferredColumn.map { max(0, $0) }
+    self.preferredVisualColumn = preferredVisualColumn.map { max(0, $0) }
+    self.inputSourceIdentifier = inputSourceIdentifier
+    self.horizontalScrollOffset = max(0, horizontalScrollOffset)
+    self.verticalScrollOffset = max(0, verticalScrollOffset)
+    self.zoomScale = min(max(zoomScale, 0.5), 2)
+    self.viewportTopLine = max(1, viewportTopLine)
+    self.viewportBottomLine = max(self.viewportTopLine, viewportBottomLine)
+  }
+}
+
+@_spi(Calcite)
 public enum VimControllerAttachment: Hashable, Sendable {
   case activate
   case retain
@@ -156,12 +200,14 @@ extension VimEngine {
         preconditionFailure("Buffer must be registered before attaching a Vim view")
       }
 
-      var window = sessionStorage.windows[windowID]
+      var window =
+        sessionStorage.windows[windowID]
         ?? VimEngineWindowRecord(
           currentBuffer: nil,
           alternateBuffer: nil,
           tabPageID: tabPageID,
-          views: [:]
+          views: [:],
+          viewMRU: []
         )
 
       let viewID: VimViewID
@@ -179,9 +225,13 @@ extension VimEngine {
         )
       }
 
-      if attachment == .activate, window.currentBuffer != bufferID {
-        if let current = window.currentBuffer { window.alternateBuffer = current }
+      if attachment == .activate {
+        if window.currentBuffer != bufferID, let current = window.currentBuffer {
+          window.alternateBuffer = current
+        }
         window.currentBuffer = bufferID
+        window.viewMRU.removeAll { $0 == bufferID }
+        window.viewMRU.insert(bufferID, at: 0)
       }
       if let tabPageID { window.tabPageID = tabPageID }
       sessionStorage.windows[windowID] = window
@@ -229,9 +279,12 @@ extension VimEngine {
           cursor: 0
         )
       }
-      guard window.currentBuffer != bufferID else { return true }
-      if let current = window.currentBuffer { window.alternateBuffer = current }
+      if window.currentBuffer != bufferID, let current = window.currentBuffer {
+        window.alternateBuffer = current
+      }
       window.currentBuffer = bufferID
+      window.viewMRU.removeAll { $0 == bufferID }
+      window.viewMRU.insert(bufferID, at: 0)
       sessionStorage.windows[windowID] = window
       return true
     }
@@ -256,13 +309,30 @@ extension VimEngine {
       if let viewID = window.views.removeValue(forKey: bufferID) {
         sessionStorage.views.removeValue(forKey: viewID)
       }
-      if window.alternateBuffer == bufferID { window.alternateBuffer = nil }
+      window.viewMRU.removeAll { $0 == bufferID }
+
+      let usable: (VimBufferID) -> Bool = { candidate in
+        guard window.views[candidate] != nil,
+          let info = self.sessionStorage.buffers[candidate]?.info
+        else { return false }
+        return info.isLoaded && info.isListed
+      }
+
+      let previousAlternate = window.alternateBuffer
+      if window.alternateBuffer == bufferID || window.alternateBuffer.map(usable) != true {
+        window.alternateBuffer = nil
+      }
+
       if window.currentBuffer == bufferID {
-        if let alternate = window.alternateBuffer, window.views[alternate] != nil {
-          window.currentBuffer = alternate
-          window.alternateBuffer = nil
-        } else {
-          window.currentBuffer = window.views.keys.first
+        let replacement =
+          previousAlternate.flatMap { usable($0) ? $0 : nil }
+          ?? window.viewMRU.first(where: usable)
+          ?? sessionStorage.bufferOrder.first(where: usable)
+        window.currentBuffer = replacement
+        window.alternateBuffer = nil
+        if let replacement {
+          window.viewMRU.removeAll { $0 == replacement }
+          window.viewMRU.insert(replacement, at: 0)
         }
       }
       sessionStorage.windows[windowID] = window
@@ -277,7 +347,14 @@ extension VimEngine {
   }
 
   func unloadSessionBuffer(_ bufferID: VimBufferID) {
-    updateSessionBufferMetadata(id: bufferID, isLoaded: false)
+    lock.withLock {
+      guard var record = sessionStorage.buffers[bufferID] else { return }
+      record.info.isLoaded = false
+      sessionStorage.buffers[bufferID] = record
+      for windowID in Array(sessionStorage.windows.keys) {
+        detachSessionBuffer(bufferID, from: windowID)
+      }
+    }
   }
 
   func wipeSessionBuffer(_ bufferID: VimBufferID) {
@@ -294,6 +371,82 @@ extension VimEngine {
     lock.withLock {
       guard let storage = sessionStorage.buffers[bufferID]?.state else { return nil }
       return VimBufferSnapshot(text: storage.authoritativeText, revision: storage.revision)
+    }
+  }
+
+  func sessionViewRuntimeSnapshot(
+    windowID: VimWindowID,
+    bufferID: VimBufferID
+  ) -> VimViewRuntimeSnapshot? {
+    lock.withLock {
+      guard let viewID = sessionStorage.windows[windowID]?.views[bufferID] else { return nil }
+      return withView(viewID) {
+        VimViewRuntimeSnapshot(
+          cursor: state.cursor,
+          mode: state.mode,
+          visualAnchor: visualAnchor,
+          visualSelectionShape: visualSelectionShape,
+          preferredColumn: preferredColumn,
+          preferredVisualColumn: preferredVisualColumn,
+          inputSourceIdentifier: windowStateStorage.inputSourceIdentifier,
+          horizontalScrollOffset: windowStateStorage.horizontalScrollOffset,
+          verticalScrollOffset: windowStateStorage.verticalScrollOffset,
+          zoomScale: windowStateStorage.zoomScale,
+          viewportTopLine: windowStateStorage.viewportTopLine,
+          viewportBottomLine: windowStateStorage.viewportBottomLine
+        )
+      }
+    }
+  }
+
+  @discardableResult
+  func restoreSessionViewRuntimeSnapshot(
+    _ snapshot: VimViewRuntimeSnapshot,
+    windowID: VimWindowID,
+    bufferID: VimBufferID
+  ) -> Bool {
+    lock.withLock {
+      guard let viewID = sessionStorage.windows[windowID]?.views[bufferID] else { return false }
+      return withView(viewID) {
+        state.cursor = normalizedVimUTF16Offset(snapshot.cursor, in: state.text)
+        switch snapshot.mode {
+        case .commandLine, .search:
+          // Prompt buffers and mapping timers are intentionally transient.
+          // Restoring only their mode would leave the window in a prompt state
+          // with no prompt to edit, so resume in Normal mode instead.
+          state.mode = .normal
+        case .normal, .insert, .replace, .visualCharacter, .visualLine:
+          state.mode = snapshot.mode
+        }
+        visualAnchor = snapshot.visualAnchor.map { normalizedVimUTF16Offset($0, in: state.text) }
+        visualSelectionShape = snapshot.visualSelectionShape
+        preferredColumn = snapshot.preferredColumn
+        preferredVisualColumn = snapshot.preferredVisualColumn
+
+        switch state.mode {
+        case .visualCharacter, .visualLine:
+          if visualAnchor == nil { visualAnchor = state.cursor }
+          updateVisualSelection()
+        case .normal, .insert, .replace, .commandLine, .search:
+          state.selection = nil
+          if state.mode != .commandLine && state.mode != .search {
+            visualAnchor = nil
+            visualSelectionShape = .character
+          }
+        }
+        normalizeCursorForMode()
+
+        windowStateStorage.inputSourceIdentifier = snapshot.inputSourceIdentifier
+        windowStateStorage.horizontalScrollOffset = max(0, snapshot.horizontalScrollOffset)
+        windowStateStorage.verticalScrollOffset = max(0, snapshot.verticalScrollOffset)
+        windowStateStorage.zoomScale = min(max(snapshot.zoomScale, 0.5), 2)
+        windowStateStorage.viewportTopLine = max(1, snapshot.viewportTopLine)
+        windowStateStorage.viewportBottomLine = max(
+          windowStateStorage.viewportTopLine,
+          snapshot.viewportBottomLine
+        )
+        return true
+      }
     }
   }
 
@@ -315,9 +468,11 @@ extension VimEngine {
       }
       guard current.text != text else { return .committed(current) }
 
-      guard let originViewID = sessionStorage.views.values.first(where: {
-        $0.bufferID == bufferID
-      })?.id else {
+      guard
+        let originViewID = sessionStorage.views.values.first(where: {
+          $0.bufferID == bufferID
+        })?.id
+      else {
         buffer.authoritativeText = text
         buffer.revision &+= 1
         buffer.lineIndex.synchronize(with: text)
@@ -546,6 +701,26 @@ public final class VimSessionCoordinator: @unchecked Sendable {
 
   public func bufferSnapshot(_ bufferID: VimBufferID) -> VimBufferSnapshot? {
     engine.sessionBufferSnapshot(bufferID)
+  }
+
+  public func runtimeSnapshot(
+    for windowID: VimWindowID,
+    displaying bufferID: VimBufferID
+  ) -> VimViewRuntimeSnapshot? {
+    engine.sessionViewRuntimeSnapshot(windowID: windowID, bufferID: bufferID)
+  }
+
+  @discardableResult
+  public func restoreRuntimeSnapshot(
+    _ snapshot: VimViewRuntimeSnapshot,
+    for windowID: VimWindowID,
+    displaying bufferID: VimBufferID
+  ) -> Bool {
+    engine.restoreSessionViewRuntimeSnapshot(
+      snapshot,
+      windowID: windowID,
+      bufferID: bufferID
+    )
   }
 
   public func applyExternalSnapshot(

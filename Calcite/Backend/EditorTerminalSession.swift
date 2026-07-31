@@ -87,6 +87,23 @@
       startIfNeeded()
     }
 
+    func shellProcessIdentifier(timeout: Duration = .seconds(2)) async -> Int? {
+      startIfNeeded()
+      let clock = ContinuousClock()
+      let deadline = clock.now.advanced(by: timeout)
+      while clock.now < deadline {
+        if let value = await worker.processIdentifier() { return Int(value) }
+        try? await Task.sleep(for: .milliseconds(25))
+      }
+      return await worker.processIdentifier().map(Int.init)
+    }
+
+    /// Interrupts the process currently in the terminal without destroying the shell.
+    /// The PTY translates Ctrl-C into SIGINT for its foreground process group.
+    func interruptForegroundProcess() {
+      send("\u{3}")
+    }
+
     func startIfNeeded() {
       guard !startRequested, !isRunning, !isStopping else { return }
       startRequested = true
@@ -457,6 +474,10 @@
       self.workspaceURL = workspaceURL
       self.shellPath = shellPath
       self.events = events
+    }
+
+    func processIdentifier() -> pid_t? {
+      childPID > 0 ? childPID : nil
     }
 
     func start() {

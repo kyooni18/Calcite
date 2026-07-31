@@ -59,6 +59,22 @@ extension EditorDebugAdapterSelectionError: LocalizedError {
       environment: [String: String]? = ProcessInfo.processInfo.environment,
       initializeArguments: InitializeArguments? = nil
     ) async throws -> Capabilities {
+      try await startDebugger(
+        for: language,
+        environment: environment,
+        initializeArguments: initializeArguments,
+        reverseRequestHandler: nil
+      )
+    }
+
+    /// Starts the selected adapter with a host for adapter reverse requests.
+    @discardableResult
+    public func startDebugger(
+      for language: EditorLanguage,
+      environment: [String: String]? = ProcessInfo.processInfo.environment,
+      initializeArguments: InitializeArguments? = nil,
+      reverseRequestHandler: (any DAPReverseRequestHandler)?
+    ) async throws -> Capabilities {
       guard let adapter = debugAdapter(for: language) else {
         throw EditorDebugAdapterSelectionError.unavailable(language)
       }
@@ -67,7 +83,8 @@ extension EditorDebugAdapterSelectionError: LocalizedError {
           workspaceURL: projectInspection?.workspaceURL ?? backend.workspaceURL,
           environment: environment,
           initializeArguments: initializeArguments
-        )
+        ),
+        reverseRequestHandler: reverseRequestHandler
       )
     }
   }

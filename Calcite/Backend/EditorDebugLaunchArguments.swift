@@ -21,6 +21,7 @@ enum EditorDebugLaunchArguments {
       "args": arguments,
       "cwd": .string(cwd),
       "stopOnEntry": .bool(configuration.stopOnEntry),
+      "env": .object(configuration.environment.mapValues(DAPValue.string)),
     ]
 
     EditorDebugLanguageStrategyRegistry.strategy(for: language).configureLaunch(
@@ -30,6 +31,17 @@ enum EditorDebugLaunchArguments {
       arguments: arguments,
       workspaceURL: workspaceURL
     )
+    switch configuration.terminalMode {
+    case .integrated:
+      values["terminal"] = .string("integrated")
+      values["console"] = .string("integratedTerminal")
+    case .external:
+      values["terminal"] = .string("external")
+      values["console"] = .string("externalTerminal")
+    case .debugConsole:
+      values["terminal"] = .string("console")
+      values["console"] = .string("internalConsole")
+    }
     return .object(values)
   }
 }

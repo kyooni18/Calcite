@@ -178,18 +178,29 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     }
 
     func updateScroll(horizontal: Double? = nil, vertical: Double? = nil) {
+      var changed = false
       if let horizontal, horizontal.isFinite {
-        horizontalScrollOffset = max(0, horizontal)
+        let value = max(0, horizontal)
+        if abs(horizontalScrollOffset - value) > 0.5 {
+          horizontalScrollOffset = value
+          changed = true
+        }
       }
       if let vertical, vertical.isFinite {
-        verticalScrollOffset = max(0, vertical)
+        let value = max(0, vertical)
+        if abs(verticalScrollOffset - value) > 0.5 {
+          verticalScrollOffset = value
+          changed = true
+        }
       }
-      persistCurrentPresentation()
+      if changed { persistCurrentPresentation() }
     }
 
     func updateZoom(_ scale: Double) {
       guard scale.isFinite else { return }
-      zoomScale = Self.clampedZoom(scale)
+      let value = Self.clampedZoom(scale)
+      guard abs(zoomScale - value) > 0.0001 else { return }
+      zoomScale = value
       persistCurrentPresentation()
     }
 
@@ -223,6 +234,66 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       persistCurrentPresentation()
     }
 
+    fileprivate func retainPresentationStates(for documentIDs: Set<UUID>) {
+      documentPresentationStates = documentPresentationStates.filter { state in
+        documentIDs.contains(state.key)
+      }
+      if documentIDs.contains(documentID) {
+        persistCurrentPresentation()
+      }
+    }
+
+    fileprivate func runtimePresentationSnapshot(
+      vimRuntime: VimViewRuntimeSnapshot?
+    ) -> WorkspaceEditorPresentationSnapshot {
+      persistCurrentPresentation()
+      return WorkspaceEditorPresentationSnapshot(
+        editorSessionID: id,
+        documentID: documentID,
+        selectedRange: WorkspaceTextRangeSnapshot(selectedRange),
+        horizontalScrollOffset: horizontalScrollOffset,
+        verticalScrollOffset: verticalScrollOffset,
+        zoomScale: zoomScale,
+        vimRuntime: vimRuntime,
+        documentPresentations: documentPresentationStates.map { documentID, state in
+          WorkspaceDocumentPresentationSnapshot(
+            documentID: documentID,
+            selectedRange: WorkspaceTextRangeSnapshot(state.selectedRange),
+            horizontalScrollOffset: state.horizontalScrollOffset,
+            verticalScrollOffset: state.verticalScrollOffset,
+            zoomScale: state.zoomScale
+          )
+        }.sorted { lhs, rhs in
+          lhs.documentID.uuidString < rhs.documentID.uuidString
+        }
+      )
+    }
+
+    fileprivate func restoreDocumentPresentations(
+      _ values: [WorkspaceDocumentPresentationSnapshot]
+    ) {
+      guard let backend = windowSession?.backend else { return }
+      for value in values {
+        guard let document = backend.document(id: value.documentID) else { continue }
+        documentPresentationStates[value.documentID] = DocumentPresentationState(
+          selectedRange: Self.clamped(
+            value.selectedRange.nsRange,
+            utf16Length: document.text.utf16.count
+          ),
+          horizontalScrollOffset: max(0, value.horizontalScrollOffset),
+          verticalScrollOffset: max(0, value.verticalScrollOffset),
+          zoomScale: Self.clampedZoom(value.zoomScale)
+        )
+      }
+      if let current = documentPresentationStates[documentID] {
+        selectedRange = current.selectedRange
+        horizontalScrollOffset = current.horizontalScrollOffset
+        verticalScrollOffset = current.verticalScrollOffset
+        zoomScale = current.zoomScale
+      }
+      persistCurrentPresentation()
+    }
+
     fileprivate func applySelectionToDocument() {
       guard let document else { return }
       let clamped = Self.clamped(selectedRange, utf16Length: document.text.utf16.count)
@@ -244,7 +315,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       )
     }
 
-    private static func clamped(_ range: NSRange, utf16Length: Int) -> NSRange {
+    fileprivate static func clamped(_ range: NSRange, utf16Length: Int) -> NSRange {
       let location = min(max(0, range.location), utf16Length)
       let length = min(max(0, range.length), utf16Length - location)
       return NSRange(location: location, length: length)
@@ -277,6 +348,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   @Published private(set) var editorCommandEvent: EditorCommandEvent?
   @Published private(set) var pendingDocumentOpenURLs: [URL] = []
   private var sectionalEditorAssignments: [UUID: UUID] = [:]
+  private struct PendingVimRuntimeSnapshot {
+    var documentID: UUID
+    var snapshot: VimViewRuntimeSnapshot
+  }
+  private var pendingVimRuntimeSnapshots: [UUID: PendingVimRuntimeSnapshot] = [:]
 
   @Published var selectedFileURL: URL?
   @Published private(set) var pendingDocumentClose: EditorTab?
@@ -340,13 +416,16 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         canSaveAll: false,
         canBuild: false,
         canRun: false,
+        canRunCurrentFile: false,
         canTest: false,
         canCheck: false,
         isBuilding: false,
         canStartDebug: false,
+        canDebugCurrentFile: false,
         debugIsActive: false,
         debugIsRunning: false,
-        debugIsPaused: false
+        debugIsPaused: false,
+        liveDebugIsEnabled: false
       )
     }
 
@@ -360,13 +439,16 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       canSaveAll: base.hasUnsavedDocuments,
       canBuild: base.canBuild,
       canRun: base.canRun,
+      canRunCurrentFile: hasActiveDocument && base.canRunCurrentFile,
       canTest: base.canTest,
       canCheck: base.canCheck,
       isBuilding: base.isBuilding,
       canStartDebug: hasActiveDocument && base.canStartDebug,
+      canDebugCurrentFile: hasActiveDocument && base.canDebugCurrentFile,
       debugIsActive: base.debugIsActive,
       debugIsRunning: base.debugIsRunning,
-      debugIsPaused: base.debugIsPaused
+      debugIsPaused: base.debugIsPaused,
+      liveDebugIsEnabled: base.liveDebugIsEnabled
     )
   }
 
@@ -451,6 +533,42 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     vimStateStore.saveHistory(merged)
   }
 
+  func vimController(
+    for editor: EditorSession,
+    displaying document: EditorTab,
+    profile: EditorCustomProfile,
+    attachment: VimControllerAttachment
+  ) -> VimKeymapController {
+    let windowID = VimWindowID(editor.id)
+    let bufferID = VimBufferID(document.id)
+    let controller = vimSessionCoordinator.controller(
+      for: windowID,
+      displaying: bufferID,
+      text: document.text,
+      cursor: editor.selection(for: document).location,
+      name: document.url.path,
+      leader: profile.vim.normalizedLeader,
+      localLeader: profile.vim.normalizedLeader,
+      tabWidth: profile.behavior.tabWidth,
+      attachment: attachment
+    )
+
+    if let pending = pendingVimRuntimeSnapshots[editor.id],
+      pending.documentID == document.id,
+      vimSessionCoordinator.restoreRuntimeSnapshot(
+        pending.snapshot,
+        for: windowID,
+        displaying: bufferID
+      )
+    {
+      // Do not publish EditorSession changes while SwiftUI is evaluating the
+      // editor body. The surface projects the restored engine state after it
+      // attaches to this controller.
+      pendingVimRuntimeSnapshots.removeValue(forKey: editor.id)
+    }
+    return controller
+  }
+
   // MARK: - Lifecycle
 
   /// Starts the shared project services and then drains all document requests queued for this
@@ -503,6 +621,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     }
     editorSessions.removeAll()
     sectionalEditorAssignments.removeAll()
+    pendingVimRuntimeSnapshots.removeAll()
     #if os(macOS)
       terminalEditorSessions.removeAll()
     #endif
@@ -512,6 +631,97 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   }
 
   // MARK: - Documents and editor instances
+
+  func captureRuntimePresentationSnapshot() -> WorkspaceWindowPresentationSnapshot {
+    for editor in editorSessions {
+      captureAuthoritativeSelection(for: editor)
+    }
+    return WorkspaceWindowPresentationSnapshot(
+      windowSessionID: id,
+      activeEditorSessionID: activeEditorSessionID,
+      activeSectionID: sectionalLayout.activeSectionID,
+      editors: editorSessions.map { editor in
+        let vimRuntime =
+          vimSessionCoordinator.runtimeSnapshot(
+            for: VimWindowID(editor.id),
+            displaying: VimBufferID(editor.documentID)
+          )
+          ?? pendingVimRuntimeSnapshots[editor.id].flatMap { pending in
+            pending.documentID == editor.documentID ? pending.snapshot : nil
+          }
+        return editor.runtimePresentationSnapshot(vimRuntime: vimRuntime)
+      },
+      sectionAssignments: sectionalEditorAssignments.map { sectionID, editorSessionID in
+        WorkspaceSectionEditorAssignmentSnapshot(
+          sectionID: sectionID,
+          editorSessionID: editorSessionID
+        )
+      }.sorted { lhs, rhs in
+        lhs.sectionID.uuidString < rhs.sectionID.uuidString
+      }
+    )
+  }
+
+  func restoreRuntimePresentationSnapshot(_ snapshot: WorkspaceWindowPresentationSnapshot) {
+    guard !isClosed, let backend else { return }
+
+    for editor in editorSessions {
+      vimSessionCoordinator.removeWindow(VimWindowID(editor.id))
+    }
+    editorSessions.removeAll(keepingCapacity: true)
+    sectionalEditorAssignments.removeAll(keepingCapacity: true)
+    pendingVimRuntimeSnapshots.removeAll(keepingCapacity: true)
+    activeEditorSessionID = nil
+    previousActiveEditorSessionID = nil
+
+    var restoredEditorIDs: Set<UUID> = []
+    for value in snapshot.editors {
+      guard restoredEditorIDs.insert(value.editorSessionID).inserted,
+        let document = backend.document(id: value.documentID)
+      else { continue }
+      let editor = EditorSession(
+        id: value.editorSessionID,
+        documentID: document.id,
+        selectedRange: value.selectedRange.nsRange,
+        horizontalScrollOffset: value.horizontalScrollOffset,
+        verticalScrollOffset: value.verticalScrollOffset,
+        zoomScale: value.zoomScale,
+        windowSession: self
+      )
+      editor.restoreDocumentPresentations(value.documentPresentations)
+      editorSessions.append(editor)
+      if let vimRuntime = value.vimRuntime {
+        pendingVimRuntimeSnapshots[editor.id] = PendingVimRuntimeSnapshot(
+          documentID: document.id,
+          snapshot: vimRuntime
+        )
+      }
+    }
+
+    let availableEditorIDs = Set(editorSessions.map(\.id))
+    for value in snapshot.sectionAssignments
+    where availableEditorIDs.contains(value.editorSessionID) {
+      sectionalEditorAssignments[value.sectionID] = value.editorSessionID
+    }
+
+    if let activeSectionID = snapshot.activeSectionID {
+      sectionalLayout.activateSection(activeSectionID)
+    }
+
+    let restoredActiveID =
+      snapshot.activeEditorSessionID.flatMap { candidate in
+        availableEditorIDs.contains(candidate) ? candidate : nil
+      } ?? editorSessions.first?.id
+
+    if let restoredActiveID {
+      if backend.activeWindowSession === self {
+        activateEditorSession(restoredActiveID)
+      } else {
+        activeEditorSessionID = restoredActiveID
+        editorSessions.first(where: { $0.id == restoredActiveID })?.applySelectionToDocument()
+      }
+    }
+  }
 
   func enqueueDocumentOpen(_ url: URL) {
     let standardizedURL = url.standardizedFileURL
@@ -760,6 +970,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     let wasActive = activeEditorSessionID == id
     captureAuthoritativeSelection(for: editorSessions[index])
     vimSessionCoordinator.removeWindow(VimWindowID(id))
+    pendingVimRuntimeSnapshots.removeValue(forKey: id)
     editorSessions.remove(at: index)
     sectionalEditorAssignments = sectionalEditorAssignments.filter { $0.value != id }
     if previousActiveEditorSessionID == id { previousActiveEditorSessionID = nil }
@@ -795,6 +1006,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         vimSessionCoordinator.wipeBuffer(VimBufferID(documentID))
       }
     }
+    for editor in editorSessions {
+      editor.retainPresentationStates(for: availableIDs)
+    }
 
     if editorSessions.isEmpty, let document = backend.activeDocument ?? backend.documents.first {
       _ = createEditorSession(for: document, activate: false)
@@ -821,6 +1035,46 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         restoreSelectionFromVimIfAvailable(for: replacement)
       }
     }
+  }
+
+  /// Reveals a document-local range in this window without using the shared
+  /// `EditorTab.selectedRange` as the presentation authority. An existing view
+  /// of the document is preferred; otherwise the active editor is reused.
+  @discardableResult
+  func revealSelection(
+    _ range: NSRange,
+    in documentID: UUID,
+    preferredEditorSessionID: UUID? = nil
+  ) -> EditorSession? {
+    guard !isClosed, let backend, let document = backend.document(id: documentID) else {
+      return nil
+    }
+
+    let preferred = preferredEditorSessionID.flatMap { id in
+      editorSessions.first { $0.id == id }
+    }
+    let editor =
+      preferred
+      ?? activeEditorSession.flatMap { $0.documentID == documentID ? $0 : nil }
+      ?? editorSessions.first { $0.documentID == documentID }
+      ?? activeEditorSession
+      ?? createEditorSession(for: document, activate: false)
+
+    if editor.documentID != documentID {
+      switchDocument(in: editor, to: document)
+    }
+
+    let clamped = EditorSession.clamped(range, utf16Length: document.text.utf16.count)
+    editor.updateSelection(clamped, for: document)
+    if let controller = existingVimController(for: editor) {
+      _ = controller.acceptHostCursorMove(
+        toUTF16Offset: clamped.location,
+        source: .parentRequest
+      )
+      restoreSelection(controller, to: editor)
+    }
+    activateEditorSession(editor.id)
+    return editor
   }
 
   func synchronizeControllerSelection() {
@@ -933,6 +1187,21 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       activateEditorSession(origin.id)
       navigateTab(forward: false, originatingEditorSessionID: origin.id)
       return .accepted
+    case .focusWindow(let direction, let count):
+      return handleVimCustomTopologyCommand(
+        "vim-window-\(direction.rawValue):\(max(1, count))", origin: origin)
+    case .cycleWindow(let direction, let count):
+      let name = direction == .next ? "next" : "previous"
+      return handleVimCustomTopologyCommand("vim-window-\(name):\(max(1, count))", origin: origin)
+    case .focusPreviousWindow:
+      return handleVimCustomTopologyCommand("vim-window-previous-active", origin: origin)
+    case .closeOtherWindows:
+      return handleVimCustomTopologyCommand("vim-window-only", origin: origin)
+    case .newWindow(let horizontal):
+      return handleVimCustomTopologyCommand(
+        horizontal ? "vim-window-new-horizontal" : "vim-window-new-vertical",
+        origin: origin
+      )
     case .custom(let command) where command.hasPrefix("vim-"):
       return handleVimCustomTopologyCommand(command, origin: origin)
     default:
@@ -1401,6 +1670,9 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     _ documentID: UUID,
     fallback: EditorTab?
   ) {
+    pendingVimRuntimeSnapshots = pendingVimRuntimeSnapshots.filter { _, pending in
+      pending.documentID != documentID
+    }
     let bufferID = VimBufferID(documentID)
     let fallback = fallback.flatMap { $0.id == documentID ? nil : $0 }
     let managesVimBuffer = vimSessionCoordinator.bufferInfo(id: bufferID) != nil
@@ -1435,7 +1707,8 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     guard let backend, backend.document(id: document.id) != nil else { return }
     let bufferID = VimBufferID(document.id)
     let hadVimBuffer = vimSessionCoordinator.bufferInfo(id: bufferID) != nil
-    let fallback = backend.activeDocument.flatMap { $0.id == document.id ? nil : $0 }
+    let fallback =
+      backend.activeDocument.flatMap { $0.id == document.id ? nil : $0 }
       ?? backend.documents.first(where: { $0.id != document.id })
     removeDocumentFromVimLifecycle(document.id, fallback: fallback)
     if hadVimBuffer { vimSessionCoordinator.wipeBuffer(bufferID) }

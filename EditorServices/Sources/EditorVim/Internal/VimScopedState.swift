@@ -159,6 +159,7 @@ struct VimEngineWindowRecord {
   var alternateBuffer: VimBufferID?
   var tabPageID: VimTabPageID?
   var views: [VimBufferID: VimViewID]
+  var viewMRU: [VimBufferID]
 }
 
 /// Canonical state graph for one Calcite window session.

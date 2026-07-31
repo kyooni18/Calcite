@@ -40,6 +40,15 @@ enum EditorDebugPhase: Equatable {
   case failed(String)
 }
 
+enum EditorLiveDebugPhase: Equatable {
+  case disabled
+  case watching
+  case changesPending(Int)
+  case building
+  case restarting
+  case failed(String)
+}
+
 struct EditorDebugScopeSnapshot: Identifiable {
   let scope: Scope
   let variables: [Variable]
@@ -72,6 +81,9 @@ struct EditorDebugConfiguration: Codable, Equatable, Sendable {
   var workingDirectory: String
   var stopOnEntry: Bool
   var buildBeforeLaunch: Bool
+  var environment: [String: String]
+  var terminalMode: EditorTerminalMode
+  var adapterID: String?
 
   var argumentList: [String] { ShellArgumentParser.parse(arguments) }
 
@@ -80,13 +92,19 @@ struct EditorDebugConfiguration: Codable, Equatable, Sendable {
     arguments: String,
     workingDirectory: String,
     stopOnEntry: Bool,
-    buildBeforeLaunch: Bool = true
+    buildBeforeLaunch: Bool = true,
+    environment: [String: String] = [:],
+    terminalMode: EditorTerminalMode = .integrated,
+    adapterID: String? = nil
   ) {
     self.programPath = programPath
     self.arguments = arguments
     self.workingDirectory = workingDirectory
     self.stopOnEntry = stopOnEntry
     self.buildBeforeLaunch = buildBeforeLaunch
+    self.environment = environment
+    self.terminalMode = terminalMode
+    self.adapterID = adapterID
   }
 
   init(from decoder: Decoder) throws {
@@ -96,14 +114,25 @@ struct EditorDebugConfiguration: Codable, Equatable, Sendable {
     workingDirectory = try container.decode(String.self, forKey: .workingDirectory)
     stopOnEntry = try container.decode(Bool.self, forKey: .stopOnEntry)
     buildBeforeLaunch = try container.decodeIfPresent(Bool.self, forKey: .buildBeforeLaunch) ?? true
+    environment = try container.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+    terminalMode =
+      try container.decodeIfPresent(EditorTerminalMode.self, forKey: .terminalMode) ?? .integrated
+    adapterID = try container.decodeIfPresent(String.self, forKey: .adapterID)
   }
 }
 
 @MainActor
 final class EditorWorkspaceController: ObservableObject {
+  typealias WorkspaceOpening =
+    @MainActor (EditorServicesConfiguration) async throws -> EditorIDEWorkspace
+
   let workspaceURL: URL
   let serviceSettingsModel: EditorServicesSettingsModel
   let buildController: EditorBuildController
+  let testController: EditorTestController
+  let breakpointController: EditorBreakpointCoordinator
+  let runConfigurationController: EditorRunConfigurationController
+  let debugSessionController: EditorDebugSessionController
 
   @Published private(set) var tabs: [EditorTab] = []
   @Published var selectedTabID: EditorTab.ID? {
@@ -115,7 +144,23 @@ final class EditorWorkspaceController: ObservableObject {
   @Published private(set) var diagnosticsRevision = 0
   @Published private(set) var projectDiagnostics: [URL: [Diagnostic]] = [:]
   @Published private(set) var isPreparingBuildTask = false
-  @Published private(set) var debugPhase: EditorDebugPhase = .idle
+  @Published private(set) var recentlyChangedSourceFiles: [URL] = []
+  var debugPhase: EditorDebugPhase {
+    get { debugSessionController.phase }
+    set { debugSessionController.phase = newValue }
+  }
+  var liveDebugPhase: EditorLiveDebugPhase {
+    liveDebugController?.phase ?? .disabled
+  }
+  @Published var isLiveDebugEnabled = false {
+    didSet {
+      UserDefaults.standard.set(
+        isLiveDebugEnabled,
+        forKey: Self.liveDebugPreferenceKey(workspaceURL: workspaceURL)
+      )
+      configureLiveDebugMonitoring()
+    }
+  }
   @Published private(set) var debugThreads: [DAPThread] = []
   @Published private(set) var debugFrames: [StackFrame] = []
   @Published private(set) var debugScopes: [EditorDebugScopeSnapshot] = []
@@ -134,6 +179,8 @@ final class EditorWorkspaceController: ObservableObject {
   var onVimCloseWindow: (() -> Void)?
   var onVimNewTab: (() -> Void)?
   var onVimCommand: ((EditorCommand) -> Void)?
+  var capturePresentationSnapshot: (() -> WorkspacePresentationSnapshot)?
+  var restorePresentationSnapshot: ((WorkspacePresentationSnapshot) -> Void)?
 
   @Published private(set) var activeThemeSlot: EditorThemeSlot
   @Published private(set) var usesWorkspaceThemeOverrides: Bool
@@ -153,7 +200,8 @@ final class EditorWorkspaceController: ObservableObject {
   private var snippetLibrary: EditorSnippetLibrary
   private let sessionStore: EditorWorkspaceSessionStore
   private let symbolResolver: EditorProjectSymbolResolver
-  private var ideWorkspace: EditorIDEWorkspace?
+  private let workspaceOpener: WorkspaceOpening
+var ideWorkspace: EditorIDEWorkspace?
   private var projectDiagnosticsByService: [URL: [String: [Diagnostic]]] = [:]
   private let taskSupervisor = WorkspaceTaskSupervisor()
   private let stabilityRecorder = StabilityEventRecorder.shared
@@ -162,6 +210,41 @@ final class EditorWorkspaceController: ObservableObject {
   private var startGeneration = 0
   private var backendObservationGeneration: UInt64 = 0
   private var activeThreadID: Int?
+  private var activeDebugSourceFingerprint: String? {
+    get { debugSessionController.sourceFingerprint }
+    set { debugSessionController.sourceFingerprint = newValue }
+  }
+  private var activeDebugLaunchTarget: EditorDebugLaunchTarget? {
+    get { debugSessionController.launchTarget }
+    set { debugSessionController.launchTarget = newValue }
+  }
+  private var activeDebugLanguage: EditorLanguage? {
+    get { debugSessionController.language }
+    set { debugSessionController.language = newValue }
+  }
+  private var debugSessionGeneration: UInt64 {
+    get { debugSessionController.operationGeneration }
+    set { debugSessionController.operationGeneration = newValue }
+  }
+  private var activeBackendDebugGeneration: UInt64? {
+    get { debugSessionController.backendGeneration }
+    set { debugSessionController.backendGeneration = newValue }
+  }
+  private var debugExecutionOperationID: UUID {
+    get { debugSessionController.operationID }
+    set { debugSessionController.operationID = newValue }
+  }
+  private var debugExecutionSessionID: UUID? {
+    get { debugSessionController.sessionID }
+    set { debugSessionController.sessionID = newValue }
+  }
+  private lazy var dapReverseRequestHost = EditorDAPReverseRequestHost(workspaceURL: workspaceURL)
+  private var isReplacingDebugSession: Bool {
+    get { debugSessionController.isReplacing }
+    set { debugSessionController.isReplacing = newValue }
+  }
+  private var debugLaunchTarget: EditorDebugLaunchTarget = .project
+  private(set) var liveDebugController: EditorLiveDebugController!
   private var openingDocumentURLs: Set<URL> = []
   private var externalConflictIDs: [URL: SourceFileID] = [:]
   private var pendingExternalFileConflicts: [EditorExternalFileConflict] = []
@@ -169,11 +252,11 @@ final class EditorWorkspaceController: ObservableObject {
   private struct ServicesReconfigurationRequest {
     var configuration: EditorServicesConfiguration
     var requiresSuccessfulSave: Bool
+    var generation: UInt64
   }
 
   private var pendingReconfigurationRequest: ServicesReconfigurationRequest?
-  private var pendingRuntimeTabRestoration: [ReconfigurationTabState]?
-  private var pendingRuntimeSelectedTabID: EditorTab.ID?
+  private var reconfigurationGeneration: UInt64 = 0
   private var hasRestoredSession = false
 
   private var isShuttingDown: Bool {
@@ -193,8 +276,12 @@ final class EditorWorkspaceController: ObservableObject {
     return tabs.first { $0.id == selectedTabID }
   }
 
-  init(workspaceURL: URL) {
+  init(
+    workspaceURL: URL,
+    workspaceOpener: WorkspaceOpening? = nil
+  ) {
     self.workspaceURL = workspaceURL.standardizedFileURL
+    self.workspaceOpener = workspaceOpener ?? Self.openIDEWorkspace
     var configuration = EditorServicesConfiguration(
       workspaceURL: workspaceURL,
       languageSelection: .automatic,
@@ -254,7 +341,12 @@ final class EditorWorkspaceController: ObservableObject {
       workspaceURL: workspaceURL,
       profile: loadedProfile.snippets
     )
-    self.buildController = EditorBuildController(workspaceURL: workspaceURL)
+    let buildController = EditorBuildController(workspaceURL: workspaceURL)
+    self.buildController = buildController
+    self.testController = EditorTestController(buildController: buildController)
+    self.breakpointController = EditorBreakpointCoordinator(workspaceURL: workspaceURL)
+    self.runConfigurationController = EditorRunConfigurationController(workspaceURL: workspaceURL)
+    self.debugSessionController = EditorDebugSessionController()
     self.debugConfiguration =
       EditorDebugPreferencesStore.load(workspaceURL: workspaceURL)
       ?? EditorDebugConfiguration(
@@ -263,6 +355,9 @@ final class EditorWorkspaceController: ObservableObject {
         workingDirectory: workspaceURL.path,
         stopOnEntry: false
       )
+    self.isLiveDebugEnabled = UserDefaults.standard.bool(
+      forKey: Self.liveDebugPreferenceKey(workspaceURL: workspaceURL)
+    )
     self.buildController.onDiagnostics = { [weak self] diagnostics in
       self?.applyBuildDiagnostics(diagnostics)
     }
@@ -291,6 +386,34 @@ final class EditorWorkspaceController: ObservableObject {
         ]
       )
     }
+    self.liveDebugController = EditorLiveDebugController(
+      rootResolver: { [weak self] target in
+        self?.liveDebugRoots(for: target) ?? []
+      },
+      filter: { [weak self] url, target in
+        self?.shouldTriggerLiveDebug(for: url, target: target) ?? false
+      },
+      applyChanges: { [weak self] batch, generation in
+        guard let self else { return }
+        await self.restartDebuggingForLiveChanges(batch: batch, generation: generation)
+      }
+    )
+    self.buildController.onBuildProjectChange = { [weak self] in
+      self?.configureLiveDebugMonitoring()
+    }
+  }
+
+  private static func openIDEWorkspace(
+    configuration: EditorServicesConfiguration
+  ) async throws -> EditorIDEWorkspace {
+    try await EditorIDEWorkspace.open(
+      configuration: configuration,
+      documentConfiguration: .init(
+        analysisDebounce: .milliseconds(70),
+        semanticAnalysisDebounce: .milliseconds(500),
+        includeSemanticHighlights: true
+      )
+    )
   }
 
   var activeRuntimeTaskCount: Int { taskSupervisor.activeCount }
@@ -317,7 +440,7 @@ final class EditorWorkspaceController: ObservableObject {
     switch next {
     case .idle, .terminated:
       phase = .idle
-    case .starting, .reconfiguring:
+    case .starting, .preparingReconfiguration, .committingReconfiguration:
       phase = .starting
     case .running:
       phase = .ready
@@ -339,6 +462,7 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   isolated deinit {
+    liveDebugController?.stop()
     startTask?.cancel()
     startTask = nil
     startGeneration &+= 1
@@ -358,15 +482,9 @@ final class EditorWorkspaceController: ObservableObject {
       )
       startGeneration &+= 1
       let configuration = servicesConfiguration
+      let workspaceOpener = self.workspaceOpener
       startTask = Task {
-        try await EditorIDEWorkspace.open(
-          configuration: configuration,
-          documentConfiguration: .init(
-            analysisDebounce: .milliseconds(70),
-            semanticAnalysisDebounce: .milliseconds(500),
-            includeSemanticHighlights: true
-          )
-        )
+        try await workspaceOpener(configuration)
       }
     } else {
       operationID = nil
@@ -403,13 +521,12 @@ final class EditorWorkspaceController: ObservableObject {
           ]
         )
       }
-      if pendingRuntimeTabRestoration != nil {
-        await restoreRuntimeTabs(using: workspace)
-      } else if !hasRestoredSession {
+      if !hasRestoredSession {
         hasRestoredSession = true
         await restoreWorkspaceSession()
         scheduleSessionPersistence()
       }
+      configureLiveDebugMonitoring()
     } catch is CancellationError {
       guard generation == startGeneration else {
         if let operationID {
@@ -451,18 +568,21 @@ final class EditorWorkspaceController: ObservableObject {
     guard !isShuttingDown, !hasShutDown else { return }
     var configuration = configuration
     configuration.environment = resolvedPythonProcessEnvironment()
+    reconfigurationGeneration &+= 1
+    let generation = reconfigurationGeneration
     if let pending = pendingReconfigurationRequest {
       pendingReconfigurationRequest = ServicesReconfigurationRequest(
         configuration: configuration,
-        requiresSuccessfulSave: pending.requiresSuccessfulSave && requiresSuccessfulSave
+        requiresSuccessfulSave: pending.requiresSuccessfulSave && requiresSuccessfulSave,
+        generation: generation
       )
     } else {
       pendingReconfigurationRequest = ServicesReconfigurationRequest(
         configuration: configuration,
-        requiresSuccessfulSave: requiresSuccessfulSave
+        requiresSuccessfulSave: requiresSuccessfulSave,
+        generation: generation
       )
     }
-    guard !taskSupervisor.contains(.reconfiguration) else { return }
     taskSupervisor.replace(.reconfiguration) { [weak self] lease in
       guard let self else { return }
       while !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
@@ -506,7 +626,8 @@ final class EditorWorkspaceController: ObservableObject {
     at url: URL,
     using workspace: EditorIDEWorkspace,
     id: UUID = UUID(),
-    selectedRange: NSRange? = nil
+    selectedRange: NSRange? = nil,
+    attachCallbacks: Bool = true
   ) async throws -> EditorTab {
     let key = url.standardizedFileURL
     let languageID = EditorLanguageCatalog.standard.languageID(for: key)
@@ -522,16 +643,25 @@ final class EditorWorkspaceController: ObservableObject {
       let selectionLength = min(max(0, selectedRange.length), length - location)
       tab.updateSelection(NSRange(location: location, length: selectionLength))
     }
-    tab.onDiagnosticsChange = { [weak self] in
-      self?.diagnosticsRevision &+= 1
-    }
-    tab.onContentStateChange = { [weak self] in
-      self?.scheduleSessionPersistence()
-    }
+    if attachCallbacks { configureEditorTabCallbacks(tab) }
     tab.setBuildDiagnostics(
       buildController.diagnostics.filter { $0.url.standardizedFileURL == key }
     )
     return tab
+  }
+
+  private func configureEditorTabCallbacks(_ tab: EditorTab) {
+    tab.onDiagnosticsChange = { [weak self] in
+      self?.diagnosticsRevision &+= 1
+    }
+    tab.onContentStateChange = { [weak self, weak tab] in
+      guard let self else { return }
+      self.scheduleSessionPersistence()
+      guard self.isLiveDebugEnabled, let tab else { return }
+      self.liveDebugController.enqueueFullRestart(
+        for: [tab.url.standardizedFileURL]
+      )
+    }
   }
 
   func closeTab(_ tab: EditorTab, saving: Bool = false) {
@@ -576,6 +706,199 @@ final class EditorWorkspaceController: ObservableObject {
       if !(await tab.save()) { succeeded = false }
     }
     return succeeded
+  }
+
+  private func prepareWorkspaceForExecution(
+    _ reason: EditorExecutionPreparationReason
+  ) async throws -> EditorPreparedSourceSnapshot {
+    NotificationCenter.default.post(name: .calciteCommitEditorStateForExecution, object: nil)
+    await Task.yield()
+
+    var openDocuments: [URL: (revision: UInt64, text: String)] = [:]
+    for tab in tabs {
+      guard await tab.save() else {
+        throw EditorExecutionIntegrityError.documentSaveFailed(tab.title)
+      }
+      let key = tab.url.standardizedFileURL
+      openDocuments[key] = (revision: tab.textRevision, text: tab.text)
+    }
+
+    let root = buildController.buildProjectURL.standardizedFileURL
+    let snapshot = try EditorWorkspaceSourceScanner.snapshot(
+      workspaceURL: root,
+      reason: reason,
+      openDocuments: openDocuments
+    )
+    stabilityRecorder.record(
+      .lifecycle,
+      "execution-source-prepared",
+      metadata: [
+        "reason": reason.rawValue,
+        "fingerprint": snapshot.fingerprint,
+        "documents": String(snapshot.documentCount),
+        "workspace": root.path,
+      ]
+    )
+    return snapshot
+  }
+
+  private func prepareSingleFileForExecution(
+    _ fileURL: URL,
+    reason: EditorExecutionPreparationReason
+  ) async throws -> EditorPreparedSourceSnapshot {
+    NotificationCenter.default.post(name: .calciteCommitEditorStateForExecution, object: nil)
+    await Task.yield()
+
+    let key = fileURL.standardizedFileURL
+    let tab = tabs.first { $0.url.standardizedFileURL == key }
+    if let tab, !(await tab.save()) {
+      throw EditorExecutionIntegrityError.documentSaveFailed(tab.title)
+    }
+    let snapshot = try EditorWorkspaceSourceScanner.snapshot(
+      fileURL: key,
+      reason: reason,
+      openDocument: tab.map { (revision: $0.textRevision, text: $0.text) }
+    )
+    stabilityRecorder.record(
+      .lifecycle,
+      "single-file-source-prepared",
+      metadata: [
+        "reason": reason.rawValue,
+        "fingerprint": snapshot.fingerprint,
+        "file": key.path,
+      ]
+    )
+    return snapshot
+  }
+
+  @discardableResult
+  private func acceptSuccessfulExecution(
+    sourceSnapshot: EditorPreparedSourceSnapshot
+  ) -> Bool {
+    for document in sourceSnapshot.documents where document.revision != nil {
+      guard
+        let tab = tabs.first(where: {
+          $0.url.standardizedFileURL == document.url.standardizedFileURL
+        })
+      else { continue }
+      let currentHash = EditorSourceFingerprint.hash(Data(tab.text.utf8))
+      if tab.textRevision != document.revision || currentHash != document.contentHash {
+        buildController.invalidateLastArtifact(
+          "\(document.url.lastPathComponent) changed while the task was running."
+        )
+        return false
+      }
+    }
+    clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+    return true
+  }
+
+  private func runConfiguredTasks(
+    _ identifiers: [String],
+    stage: String,
+    sourceSnapshot: EditorPreparedSourceSnapshot?
+  ) async -> Bool {
+    guard !identifiers.isEmpty else { return true }
+    let resolved = runConfigurationController.taskCommands(
+      identifiers,
+      plan: buildController.plan
+    )
+    if !resolved.missing.isEmpty {
+      let message = "\(stage) task(s) not found: " + resolved.missing.joined(separator: ", ")
+      appendDebugMessage(message, channel: .system, severity: .error)
+      buildController.reportPreparationFailure(message)
+      return false
+    }
+    for command in resolved.commands {
+      guard !Task.isCancelled else { return false }
+      appendDebugMessage(
+        "Running \(stage.lowercased()) task: \(command.title)",
+        channel: .system
+      )
+      guard await buildController.run(command, sourceSnapshot: sourceSnapshot) else {
+        appendDebugMessage(
+          "\(stage) task failed: \(command.title)",
+          channel: .system,
+          severity: .error
+        )
+        return false
+      }
+    }
+    return true
+  }
+
+  private func runPreLaunchTasks(
+    target: EditorExecutionTargetKind,
+    sourceSnapshot: EditorPreparedSourceSnapshot?
+  ) async -> Bool {
+    guard let configuration = runConfigurationController.configuration(for: target) else {
+      return true
+    }
+    return await runConfiguredTasks(
+      configuration.preLaunchTaskIDs,
+      stage: "Pre-launch",
+      sourceSnapshot: sourceSnapshot
+    )
+  }
+
+  private func runPostDebugTasks(
+    target: EditorExecutionTargetKind
+  ) async {
+    guard let configuration = runConfigurationController.configuration(for: target) else {
+      return
+    }
+    _ = await runConfiguredTasks(
+      configuration.postDebugTaskIDs,
+      stage: "Post-debug",
+      sourceSnapshot: nil
+    )
+  }
+
+  func runCurrentFile() {
+    guard let fileURL = activeTab?.url,
+      EditorBuildDiscovery.singleFileResolution(
+        fileURL: fileURL,
+        workspaceURL: workspaceURL
+      ).runnablePlan != nil,
+      !taskSupervisor.contains(.buildLaunch),
+      !buildController.phase.isRunning
+    else { return }
+
+    runConfigurationController.select(target: .currentFile)
+    let runConfiguration = runConfigurationController.configuration(for: .currentFile)
+    isPreparingBuildTask = true
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
+      guard let self else { return }
+      defer { self.isPreparingBuildTask = false }
+      do {
+        let snapshot = try await self.prepareSingleFileForExecution(
+          fileURL, reason: .singleFileRun
+        )
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        guard await self.runPreLaunchTasks(target: .currentFile, sourceSnapshot: snapshot) else {
+          return
+        }
+        self.isPreparingBuildTask = false
+        let runtimeWorkingDirectory = runConfiguration.flatMap { configuration -> URL? in
+          let path = NSString(string: configuration.workingDirectory).expandingTildeInPath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+          return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+        }
+        if await self.buildController.runSingleFile(
+          fileURL,
+          kind: .run,
+          sourceSnapshot: snapshot,
+          runtimeArguments: runConfiguration?.arguments ?? [],
+          runtimeEnvironment: runConfiguration?.environment ?? [:],
+          runtimeWorkingDirectory: runtimeWorkingDirectory
+        ), self.taskSupervisor.isCurrent(lease) {
+          _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
+      }
+    }
   }
 
   func createFile(in directory: URL, name: String) async -> Bool {
@@ -664,22 +987,65 @@ final class EditorWorkspaceController: ObservableObject {
     taskSupervisor.replace(.buildLaunch) { [weak self] lease in
       guard let self else { return }
       defer { self.isPreparingBuildTask = false }
-      guard await self.saveAllDocuments(), !Task.isCancelled,
-        self.taskSupervisor.isCurrent(lease),
-        let target = self.resolvedBuildTask(kind)
-      else { return }
-      self.isPreparingBuildTask = false
-      switch target {
-      case .project(let command):
-        if await self.buildController.run(command), self.taskSupervisor.isCurrent(lease) {
-          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+      do {
+        let reason: EditorExecutionPreparationReason =
+          switch kind {
+          case .run: .run
+          case .test: .test
+          case .build, .check, .clean, .custom: .build
+          }
+        let snapshot = try await self.prepareWorkspaceForExecution(reason)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease),
+          let target = self.resolvedBuildTask(kind)
+        else { return }
+        self.isPreparingBuildTask = false
+        switch target {
+        case .project(let command):
+          let succeeded: Bool
+          if kind == .test {
+            succeeded = await self.testController.runAll(sourceSnapshot: snapshot)
+          } else if kind == .run {
+            guard await self.runPreLaunchTasks(target: .project, sourceSnapshot: snapshot) else {
+              return
+            }
+            let configured = self.runConfigurationController.configuredCommand(
+              command, target: .project, plan: self.buildController.plan
+            )
+            succeeded = await self.buildController.run(configured, sourceSnapshot: snapshot)
+          } else {
+            succeeded = await self.buildController.run(command, sourceSnapshot: snapshot)
+          }
+          if succeeded, self.taskSupervisor.isCurrent(lease) {
+            _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+          }
+        case .standalone(let fileURL, _):
+          let configuration =
+            kind == .run
+            ? self.runConfigurationController.configuration(for: .currentFile) : nil
+          let runtimeWorkingDirectory = configuration.flatMap { value -> URL? in
+            let path = NSString(string: value.workingDirectory).expandingTildeInPath
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+          }
+          if kind == .run,
+            !(await self.runPreLaunchTasks(target: .currentFile, sourceSnapshot: snapshot))
+          {
+            return
+          }
+          if await self.buildController.runSingleFile(
+            fileURL,
+            kind: kind,
+            sourceSnapshot: snapshot,
+            runtimeArguments: configuration?.arguments ?? [],
+            runtimeEnvironment: configuration?.environment ?? [:],
+            runtimeWorkingDirectory: runtimeWorkingDirectory
+          ), self.taskSupervisor.isCurrent(lease) {
+            _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+          }
         }
-      case .standalone(let fileURL, _):
-        if await self.buildController.runSingleFile(fileURL, kind: kind),
-          self.taskSupervisor.isCurrent(lease)
-        {
-          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
-        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
       }
     }
   }
@@ -690,27 +1056,345 @@ final class EditorWorkspaceController: ObservableObject {
     taskSupervisor.replace(.buildLaunch) { [weak self] lease in
       guard let self else { return }
       defer { self.isPreparingBuildTask = false }
-      guard await self.saveAllDocuments(), !Task.isCancelled,
-        self.taskSupervisor.isCurrent(lease)
-      else { return }
-      self.isPreparingBuildTask = false
-      if let selected = self.buildController.selectedCommand {
-        if await self.buildController.run(selected), self.taskSupervisor.isCurrent(lease) {
-          self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
-        }
-      } else if let target = self.resolvedBuildTask(.run) {
-        switch target {
-        case .project(let command):
-          if await self.buildController.run(command), self.taskSupervisor.isCurrent(lease) {
-            self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+      do {
+        let snapshot = try await self.prepareWorkspaceForExecution(.run)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        self.isPreparingBuildTask = false
+        if let selected = self.buildController.selectedCommand {
+          if selected.kind == .run,
+            !(await self.runPreLaunchTasks(target: .project, sourceSnapshot: snapshot))
+          {
+            return
           }
-        case .standalone(let fileURL, _):
-          if await self.buildController.runSingleFile(fileURL, kind: .run),
+          let command =
+            selected.kind == .run
+            ? self.runConfigurationController.configuredCommand(
+              selected,
+              target: .project,
+              plan: self.buildController.plan
+            )
+            : selected
+          if await self.buildController.run(command, sourceSnapshot: snapshot),
             self.taskSupervisor.isCurrent(lease)
           {
-            self.clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
+            _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+          }
+        } else if let target = self.resolvedBuildTask(.run) {
+          switch target {
+          case .project(let command):
+            guard await self.runPreLaunchTasks(target: .project, sourceSnapshot: snapshot) else {
+              return
+            }
+            let configured = self.runConfigurationController.configuredCommand(
+              command,
+              target: .project,
+              plan: self.buildController.plan
+            )
+            if await self.buildController.run(configured, sourceSnapshot: snapshot),
+              self.taskSupervisor.isCurrent(lease)
+            {
+              _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+            }
+          case .standalone(let fileURL, _):
+            let configuration = self.runConfigurationController.configuration(for: .currentFile)
+            let runtimeWorkingDirectory = configuration.flatMap { value -> URL? in
+              let path = NSString(string: value.workingDirectory).expandingTildeInPath
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+              return path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true)
+            }
+            guard
+              await self.runPreLaunchTasks(
+                target: .currentFile,
+                sourceSnapshot: snapshot
+              )
+            else { return }
+            if await self.buildController.runSingleFile(
+              fileURL,
+              kind: .run,
+              sourceSnapshot: snapshot,
+              runtimeArguments: configuration?.arguments ?? [],
+              runtimeEnvironment: configuration?.environment ?? [:],
+              runtimeWorkingDirectory: runtimeWorkingDirectory
+            ), self.taskSupervisor.isCurrent(lease) {
+              _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+            }
           }
         }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
+      }
+    }
+  }
+
+  func runTestsInCurrentFile() {
+    guard let fileURL = activeTab?.url,
+      !taskSupervisor.contains(.buildLaunch),
+      !buildController.phase.isRunning
+    else { return }
+    isPreparingBuildTask = true
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
+      guard let self else { return }
+      defer { self.isPreparingBuildTask = false }
+      do {
+        let snapshot = try await self.prepareWorkspaceForExecution(.test)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        self.isPreparingBuildTask = false
+        if await self.testController.runCurrentFile(fileURL, sourceSnapshot: snapshot),
+          self.taskSupervisor.isCurrent(lease)
+        {
+          _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
+      }
+    }
+  }
+
+  func runTestAtCurrentSymbol() {
+    guard let tab = activeTab,
+      !taskSupervisor.contains(.buildLaunch),
+      !buildController.phase.isRunning
+    else { return }
+    isPreparingBuildTask = true
+    taskSupervisor.replace(.buildLaunch) { [weak self, weak tab] lease in
+      guard let self, let tab else { return }
+      defer { self.isPreparingBuildTask = false }
+      do {
+        guard let symbol = try await tab.documentSymbolAtSelection() else {
+          self.buildController.reportPreparationFailure(
+            "No test symbol could be resolved at the current cursor position."
+          )
+          return
+        }
+        let snapshot = try await self.prepareWorkspaceForExecution(.test)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        self.isPreparingBuildTask = false
+        if await self.testController.runCurrentSymbol(
+          symbol.name,
+          fileURL: tab.url,
+          sourceSnapshot: snapshot
+        ), self.taskSupervisor.isCurrent(lease) {
+          _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
+      }
+    }
+  }
+
+  func rerunFailedTests() {
+    guard !taskSupervisor.contains(.buildLaunch), !buildController.phase.isRunning else { return }
+    isPreparingBuildTask = true
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
+      guard let self else { return }
+      defer { self.isPreparingBuildTask = false }
+      do {
+        let snapshot = try await self.prepareWorkspaceForExecution(.test)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        self.isPreparingBuildTask = false
+        if await self.testController.rerunFailed(sourceSnapshot: snapshot),
+          self.taskSupervisor.isCurrent(lease)
+        {
+          _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
+      }
+    }
+  }
+
+  func debugTestsInCurrentFile() {
+    guard let fileURL = activeTab?.url else { return }
+    guard !isLiveDebugEnabled else {
+      appendDebugMessage(
+        "Stop Live Debug before starting a test debug session.",
+        channel: .debugger,
+        severity: .warning
+      )
+      return
+    }
+    switch debugPhase {
+    case .idle, .failed:
+      runDebugOperation { await self.beginDebuggingTests(in: fileURL) }
+    case .starting, .running, .stopped:
+      appendDebugMessage(
+        "Stop the current debug session before debugging tests.",
+        channel: .debugger,
+        severity: .warning
+      )
+    }
+  }
+
+  func debugTestAtCurrentSymbol() {
+    guard let tab = activeTab else { return }
+    guard !isLiveDebugEnabled else {
+      appendDebugMessage(
+        "Stop Live Debug before starting a test debug session.",
+        channel: .debugger,
+        severity: .warning
+      )
+      return
+    }
+    switch debugPhase {
+    case .idle, .failed:
+      runDebugOperation { [weak tab] in
+        guard let tab else { return }
+        do {
+          guard let symbol = try await tab.documentSymbolAtSelection() else {
+            self.appendDebugMessage(
+              "No test symbol could be resolved at the current cursor position.",
+              channel: .test,
+              severity: .warning
+            )
+            return
+          }
+          await self.beginDebuggingTests(in: tab.url, symbol: symbol.name)
+        } catch {
+          self.appendDebugMessage(
+            "Test symbol resolution failed: \(error.localizedDescription)",
+            channel: .test,
+            severity: .error
+          )
+        }
+      }
+    case .starting, .running, .stopped:
+      appendDebugMessage(
+        "Stop the current debug session before debugging tests.",
+        channel: .debugger,
+        severity: .warning
+      )
+    }
+  }
+
+  private func beginDebuggingTests(in fileURL: URL, symbol: String? = nil) async {
+    guard let workspace = ideWorkspace else { return }
+    do {
+      let snapshot = try await prepareWorkspaceForExecution(.test)
+      let plan = try EditorTestDebugPlanner.plan(
+        projectKind: buildController.plan.projectKind,
+        projectPlan: buildController.plan,
+        fileURL: fileURL,
+        workspaceURL: buildController.buildProjectURL,
+        symbol: symbol
+      )
+      guard await runPreLaunchTasks(target: .project, sourceSnapshot: snapshot) else {
+        throw EditorExecutionIntegrityError.configuration("A pre-launch task failed.")
+      }
+      var nativeArtifact: URL?
+      if let command = plan.buildCommand {
+        appendDebugMessage(plan.title, channel: .test)
+        guard await buildController.run(command, sourceSnapshot: snapshot) else {
+          throw EditorExecutionIntegrityError.configuration(
+            "The test build failed. Open the Build panel for details."
+          )
+        }
+        guard acceptSuccessfulExecution(sourceSnapshot: snapshot) else {
+          throw EditorExecutionIntegrityError.configuration(
+            "The source changed while the test executable was being built."
+          )
+        }
+        nativeArtifact = await EditorTestDebugPlanner.nativeTestArtifact(
+          projectKind: buildController.plan.projectKind,
+          workspaceURL: buildController.buildProjectURL,
+          buildOutput: buildController.output,
+          buildCommand: command
+        )
+      }
+
+      try? await workspace.backend.disconnectDebugger()
+      debugExecutionOperationID = UUID()
+      debugExecutionSessionID = UUID()
+      debugPhase = .starting
+      debugBreakpointVerification.removeAll(keepingCapacity: true)
+      let configuration = effectiveDebugConfiguration(for: .project)
+      let adapterID =
+        configuration.adapterID?
+        .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        ?? workspace.serviceResult.debugAdapter(for: plan.language)?.defaultAdapterID
+        ?? plan.language.rawValue
+      let prepared = try await workspace.serviceResult.prepareDebugger(
+        for: plan.language,
+        initializeArguments: InitializeArguments(
+          adapterID: adapterID,
+          clientID: "Calcite",
+          clientName: "Calcite",
+          supportsRunInTerminalRequest: true
+        ),
+        reverseRequestHandler: dapReverseRequestHost
+      )
+      do {
+        let launchArguments = try EditorTestDebugPlanner.launchArguments(
+          plan: plan,
+          adapterID: adapterID,
+          configuration: configuration,
+          nativeArtifact: nativeArtifact
+        )
+        try await prepared.launch(arguments: launchArguments)
+        try await synchronizeBreakpoints(using: prepared)
+        try await prepared.finishConfiguration()
+        try await workspace.backend.adoptPreparedDebugger(prepared)
+      } catch {
+        await prepared.discard()
+        throw error
+      }
+      activeBackendDebugGeneration = await workspace.backend.currentDebugSessionGeneration()
+      activeDebugSourceFingerprint = snapshot.fingerprint
+      activeDebugLanguage = plan.language
+      activeDebugLaunchTarget = .project
+      debugSessionGeneration &+= 1
+      await registerActiveDebugProcess(backend: workspace.backend, live: false)
+      debugPhase = .running
+      appendDebugMessage(
+        "Started test debugger with \(adapterID) for "
+          + (symbol.map { "\(fileURL.lastPathComponent)::\($0)" }
+            ?? fileURL.lastPathComponent) + ".",
+        channel: .test
+      )
+    } catch {
+      try? await workspace.backend.disconnectDebugger()
+      await dapReverseRequestHost.terminateActiveTerminalProcess()
+      activeThreadID = nil
+      activeBackendDebugGeneration = nil
+      activeDebugSourceFingerprint = nil
+      debugExecutionSessionID = nil
+      activeDebugLanguage = nil
+      activeDebugLaunchTarget = nil
+      debugPhase = .failed(error.localizedDescription)
+      appendDebugMessage(
+        "Test debug failed: \(error.localizedDescription)",
+        channel: .test,
+        severity: .error
+      )
+    }
+  }
+
+  func runTestsForChangedFiles() {
+    guard !recentlyChangedSourceFiles.isEmpty,
+      !taskSupervisor.contains(.buildLaunch),
+      !buildController.phase.isRunning
+    else { return }
+    let files = recentlyChangedSourceFiles
+    isPreparingBuildTask = true
+    taskSupervisor.replace(.buildLaunch) { [weak self] lease in
+      guard let self else { return }
+      defer { self.isPreparingBuildTask = false }
+      do {
+        let snapshot = try await self.prepareWorkspaceForExecution(.test)
+        guard !Task.isCancelled, self.taskSupervisor.isCurrent(lease) else { return }
+        self.isPreparingBuildTask = false
+        if await self.testController.runChangedFiles(files, sourceSnapshot: snapshot),
+          self.taskSupervisor.isCurrent(lease)
+        {
+          _ = self.acceptSuccessfulExecution(sourceSnapshot: snapshot)
+          self.recentlyChangedSourceFiles.removeAll(keepingCapacity: true)
+        }
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.buildController.reportPreparationFailure(error.localizedDescription)
       }
     }
   }
@@ -719,6 +1403,26 @@ final class EditorWorkspaceController: ObservableObject {
     taskSupervisor.cancel(.buildLaunch)
     isPreparingBuildTask = false
     buildController.cancel()
+  }
+
+  func openExecutionSource(_ location: EditorExecutionSourceLocation) {
+    runAuxiliaryTask("open-execution-source") { [weak self] lease in
+      guard let self else { return }
+      await self.openDocument(at: location.url)
+      guard self.taskSupervisor.isCurrent(lease),
+        let tab = self.tabs.first(where: {
+          $0.url.standardizedFileURL == location.url.standardizedFileURL
+        })
+      else { return }
+      let snapshot = TextSnapshot(text: tab.text)
+      let position = TextPosition(
+        line: max(0, location.line - 1),
+        utf16Column: max(0, location.column - 1)
+      )
+      if let offset = try? snapshot.utf16Offset(of: position) {
+        tab.updateSelection(NSRange(location: offset, length: 0))
+      }
+    }
   }
 
   func openBuildDiagnostic(_ diagnostic: EditorBuildDiagnostic) {
@@ -918,7 +1622,8 @@ final class EditorWorkspaceController: ObservableObject {
 
   private static func requiresOriginatingDocument(_ request: VimHostRequest) -> Bool {
     switch request {
-    case .write, .writeAndQuit, .quit, .closeTab, .split, .scroll,
+    case .write, .writeAndQuit, .quit, .closeTab, .split, .focusWindow, .cycleWindow,
+      .focusPreviousWindow, .closeOtherWindows, .newWindow, .scroll,
       .definition, .declaration, .references, .hover, .rename, .codeAction,
       .format, .completion:
       return true
@@ -1006,6 +1711,16 @@ final class EditorWorkspaceController: ObservableObject {
       renameSymbolFromVim()
     case .codeAction:
       runCodeActionFromVim()
+    case .focusWindow(let direction, let count):
+      handleVimCustomCommand("vim-window-\(direction.rawValue):\(max(1, count))")
+    case .cycleWindow(let direction, let count):
+      handleVimCustomCommand("vim-window-\(direction.rawValue):\(max(1, count))")
+    case .focusPreviousWindow:
+      handleVimCustomCommand("vim-window-previous-active")
+    case .closeOtherWindows:
+      handleVimCustomCommand("vim-window-only")
+    case .newWindow(let horizontal):
+      handleVimCustomCommand(horizontal ? "vim-window-new-horizontal" : "vim-window-new-vertical")
     case .custom(let command):
       handleVimCustomCommand(command)
     }
@@ -1202,6 +1917,7 @@ final class EditorWorkspaceController: ObservableObject {
   func toggleBreakpointAtCurrentLine() {
     guard let tab = activeTab else { return }
     tab.toggleBreakpointAtCurrentLine()
+    breakpointController.reload()
     guard debugPhase == .running || debugPhase == .stopped else { return }
     runAuxiliaryTask("breakpoint-sync-\(tab.id.uuidString)") { [weak self, weak tab] lease in
       guard let self, let tab, let backend = self.ideWorkspace?.backend else { return }
@@ -1214,7 +1930,50 @@ final class EditorWorkspaceController: ObservableObject {
     }
   }
 
+  func updateBreakpoint(_ record: EditorStoredBreakpoint) {
+    breakpointController.update(record)
+    guard debugPhase == .running || debugPhase == .stopped else { return }
+    runAuxiliaryTask("breakpoint-record-sync-\(record.id.uuidString)") { [weak self] lease in
+      guard let self, let backend = self.ideWorkspace?.backend else { return }
+      do {
+        try await self.synchronizeBreakpoints(using: backend)
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.appendDebugMessage("Breakpoint update failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
+  func removeBreakpoint(_ record: EditorStoredBreakpoint) {
+    breakpointController.remove(id: record.id)
+    if let tab = tabs.first(where: {
+      $0.url.standardizedFileURL == record.documentURL?.standardizedFileURL
+    }) {
+      let lines = Set(EditorBreakpointStore.loadRecords(for: tab.url).map(\.requestedLine))
+      tab.updateBreakpoints(lines)
+    }
+    guard debugPhase == .running || debugPhase == .stopped else { return }
+    runAuxiliaryTask("breakpoint-record-remove-\(record.id.uuidString)") { [weak self] lease in
+      guard let self, let backend = self.ideWorkspace?.backend else { return }
+      do {
+        try await self.synchronizeBreakpoints(using: backend)
+      } catch {
+        guard self.taskSupervisor.isCurrent(lease) else { return }
+        self.appendDebugMessage("Breakpoint removal failed: \(error.localizedDescription)")
+      }
+    }
+  }
+
   func startDebugging() {
+    debugLaunchTarget = .project
+    runConfigurationController.select(target: .project)
+    runDebugOperation { await self.beginDebugging() }
+  }
+
+  func startDebuggingCurrentFile() {
+    guard let fileURL = activeTab?.url else { return }
+    debugLaunchTarget = .currentFile(fileURL.standardizedFileURL)
+    runConfigurationController.select(target: .currentFile)
     runDebugOperation { await self.beginDebugging() }
   }
 
@@ -1319,14 +2078,38 @@ final class EditorWorkspaceController: ObservableObject {
   func clearDebugConsole() { debugConsole.removeAll() }
 
   func stopDebugging() {
+    stopLiveDebugging()
+    let stoppedTarget: EditorExecutionTargetKind =
+      switch activeDebugLaunchTarget ?? debugLaunchTarget {
+      case .project: .project
+      case .currentFile: .currentFile
+      }
     runDebugOperation {
       guard let backend = self.ideWorkspace?.backend else { return }
       try? await backend.terminateDebugger()
       try? await backend.disconnectDebugger()
+      await self.dapReverseRequestHost.terminateActiveTerminalProcess()
+      if let lease = self.debugSessionController.takeProcessLease() {
+        await EditorProcessRegistry.shared.unregister(lease)
+      } else {
+        await EditorProcessRegistry.shared.unregister(
+          owner: .debug(workspacePath: self.workspaceURL.path)
+        )
+        await EditorProcessRegistry.shared.unregister(
+          owner: .liveDebug(workspacePath: self.workspaceURL.path)
+        )
+      }
       self.activeThreadID = nil
+      self.activeDebugSourceFingerprint = nil
+      self.activeBackendDebugGeneration = nil
+      self.debugExecutionSessionID = nil
+      self.activeDebugLanguage = nil
+      self.activeDebugLaunchTarget = nil
+      self.debugSessionGeneration &+= 1
       self.clearDebugInspection()
       self.debugBreakpointVerification.removeAll(keepingCapacity: true)
       self.debugPhase = .idle
+      await self.runPostDebugTasks(target: stoppedTarget)
     }
   }
 
@@ -1335,6 +2118,7 @@ final class EditorWorkspaceController: ObservableObject {
     if hasShutDown { return true }
     guard !isShuttingDown else { return false }
     transitionRuntime(to: .shuttingDown, detail: "workspace shutdown requested")
+    liveDebugController.stop()
     pendingReconfigurationRequest = nil
 
     await taskSupervisor.cancelAndWait(.reconfiguration)
@@ -1355,9 +2139,7 @@ final class EditorWorkspaceController: ObservableObject {
         scheduleSessionPersistence()
         return false
       }
-      await persistWorkspaceSession(
-        includeRecoveries: pendingRuntimeTabRestoration != nil
-      )
+      await persistWorkspaceSession(includeRecoveries: false)
     } else {
       await persistWorkspaceSession(includeRecoveries: false)
     }
@@ -1385,6 +2167,8 @@ final class EditorWorkspaceController: ObservableObject {
     if let pendingStart { _ = try? await pendingStart.value }
 
     await taskSupervisor.cancelAllAndWait(rejectingNewTasks: true)
+    await dapReverseRequestHost.terminateActiveTerminalProcess()
+    await EditorProcessRegistry.shared.terminate(workspaceURL: workspaceURL)
     transitionRuntime(to: .terminated, detail: "workspace shutdown complete")
     return true
   }
@@ -1412,233 +2196,1319 @@ final class EditorWorkspaceController: ObservableObject {
     }
   }
 
-  private struct ReconfigurationTabState {
-    var id: UUID
-    var url: URL
-    var selectedRange: NSRange
-    var text: String
-    var isDirty: Bool
-    var diskModificationTime: TimeInterval?
+  private enum WorkspaceReconfigurationError: LocalizedError {
+    case missingDocument(URL)
+    case documentChangedDuringPreparation(URL)
+
+    var errorDescription: String? {
+      switch self {
+      case .missingDocument(let url):
+        return "\(url.lastPathComponent) is no longer available on disk."
+      case .documentChangedDuringPreparation(let url):
+        return "\(url.lastPathComponent) changed on disk while Editor Services were preparing."
+      }
+    }
+  }
+
+  private func captureRuntimeSnapshot() -> WorkspaceRuntimeSnapshot {
+    let presentation = capturePresentationSnapshot?() ?? .empty
+    return WorkspaceRuntimeSnapshot(
+      documents: tabs.map { tab in
+        WorkspaceDocumentRuntimeSnapshot(
+          id: tab.id,
+          url: tab.url,
+          selectedRange: WorkspaceTextRangeSnapshot(tab.selectedRange),
+          text: tab.text,
+          isDirty: tab.isDirty,
+          diskModificationTime: tab.diskModificationTime
+        )
+      },
+      selectedDocumentID: selectedTabID,
+      presentation: presentation
+    )
   }
 
   private func reconfigure(using request: ServicesReconfigurationRequest) async {
-    guard !isShuttingDown else { return }
-    transitionRuntime(to: .reconfiguring(UUID()), detail: "service configuration changed")
+    guard !isShuttingDown, !hasShutDown else { return }
+    let operationID = UUID()
+    transitionRuntime(
+      to: .preparingReconfiguration(operationID),
+      detail: "service configuration preparation started"
+    )
+
+    if let pendingStart = startTask {
+      pendingStart.cancel()
+      startTask = nil
+      startGeneration &+= 1
+      _ = try? await pendingStart.value
+    }
+
     if request.requiresSuccessfulSave, !(await saveAllDocuments()) {
-      transitionRuntime(
-        to: .failed(
-          "Editor Services were not reconfigured because a document could not be saved."),
-        detail: "reconfiguration save failed"
-      )
+      let message =
+        "Editor Services were not reconfigured because a document could not be saved."
+      fileOperationError = message
+      if ideWorkspace != nil {
+        transitionRuntime(to: .running, detail: "reconfiguration save failed; old runtime retained")
+      } else {
+        transitionRuntime(to: .failed(message), detail: "reconfiguration save failed")
+      }
       return
     }
-    guard !Task.isCancelled, !isShuttingDown else { return }
-    var tabStates = tabs.map {
-      ReconfigurationTabState(
-        id: $0.id,
-        url: $0.url,
-        selectedRange: $0.selectedRange,
-        text: $0.text,
-        isDirty: $0.isDirty,
-        diskModificationTime: $0.diskModificationTime
-      )
-    }
-    let capturedIDs = Set(tabStates.map(\.id))
-    tabStates.append(
-      contentsOf: (pendingRuntimeTabRestoration ?? []).filter { !capturedIDs.contains($0.id) }
-    )
-    let previouslySelectedID = selectedTabID ?? pendingRuntimeSelectedTabID
+    guard !Task.isCancelled, !isShuttingDown, !hasShutDown else { return }
 
-    startTask?.cancel()
-    startTask = nil
-    startGeneration &+= 1
-    await taskSupervisor.cancelAndWait(.projectRefresh)
-    projectContextRefreshGeneration &+= 1
-    let observationTasks = cancelBackendObservationTasks()
-    pendingRuntimeTabRestoration = tabStates
-    pendingRuntimeSelectedTabID = previouslySelectedID
-    // Once teardown starts it must finish as one unit. Returning halfway would leave
-    // a mixture of closed and live tabs backed by a partially shut down workspace.
-    for tab in tabs { await tab.close() }
-    tabs.removeAll(keepingCapacity: false)
-    selectedTabID = nil
-    try? await ideWorkspace?.shutdown()
-    for task in observationTasks { await task.value }
-    ideWorkspace = nil
-    guard !Task.isCancelled, !isShuttingDown else { return }
-    servicesConfiguration = request.configuration
-    EditorServicePreferencesStore.save(configuration: request.configuration)
-    transitionRuntime(to: .idle, detail: "old services stopped")
-    await start()
+    let snapshot = captureRuntimeSnapshot()
+    let workspaceOpener = self.workspaceOpener
+    var candidateWorkspace: EditorIDEWorkspace?
+    var candidateTabs: [EditorTab] = []
+
+    do {
+      let candidate = try await workspaceOpener(request.configuration)
+      candidateWorkspace = candidate
+      candidateTabs = try await prepareRuntimeTabs(
+        from: snapshot,
+        using: candidate
+      )
+
+      guard !Task.isCancelled, !isShuttingDown, !hasShutDown else {
+        await disposePreparedRuntime(candidateTabs, workspace: candidate)
+        return
+      }
+      guard request.generation == reconfigurationGeneration else {
+        await disposePreparedRuntime(candidateTabs, workspace: candidate)
+        transitionRuntime(
+          to: ideWorkspace == nil ? .idle : .running,
+          detail: "prepared service configuration was superseded"
+        )
+        return
+      }
+
+      transitionRuntime(
+        to: .committingReconfiguration(operationID),
+        detail: "candidate services and documents are ready"
+      )
+      await commitPreparedRuntime(
+        candidateWorkspace: candidate,
+        candidateTabs: candidateTabs,
+        snapshot: snapshot,
+        configuration: request.configuration
+      )
+      candidateWorkspace = nil
+      candidateTabs.removeAll(keepingCapacity: false)
+    } catch is CancellationError {
+      if let candidateWorkspace {
+        await disposePreparedRuntime(candidateTabs, workspace: candidateWorkspace)
+      }
+      if !isShuttingDown, !hasShutDown {
+        transitionRuntime(
+          to: ideWorkspace == nil ? .idle : .running,
+          detail: "reconfiguration preparation cancelled"
+        )
+      }
+    } catch {
+      if let candidateWorkspace {
+        await disposePreparedRuntime(candidateTabs, workspace: candidateWorkspace)
+      }
+      let message =
+        "Editor Services could not be reconfigured. The existing workspace was kept: "
+        + error.localizedDescription
+      fileOperationError = message
+      appendDebugMessage(message)
+      stabilityRecorder.record(
+        .error,
+        "reconfiguration-rolled-back",
+        detail: error.localizedDescription,
+        metadata: ["workspace": workspaceURL.path]
+      )
+      if ideWorkspace != nil {
+        transitionRuntime(to: .running, detail: "candidate runtime failed; old runtime retained")
+      } else {
+        transitionRuntime(to: .failed(message), detail: "candidate runtime failed")
+      }
+    }
   }
 
-  private func restoreRuntimeTabs(using workspace: EditorIDEWorkspace) async {
-    guard let tabStates = pendingRuntimeTabRestoration else { return }
-    let previouslySelectedID = pendingRuntimeSelectedTabID
-    var reopenedTabs: [EditorTab] = []
-    var remainingStates: [ReconfigurationTabState] = []
-    reopenedTabs.reserveCapacity(tabStates.count)
-    for (index, state) in tabStates.enumerated() {
-      guard !Task.isCancelled, !isShuttingDown else {
-        remainingStates.append(contentsOf: tabStates[index...])
-        break
-      }
-      guard isRegularFile(state.url) else {
-        remainingStates.append(state)
-        continue
-      }
-      do {
+  private func prepareRuntimeTabs(
+    from snapshot: WorkspaceRuntimeSnapshot,
+    using workspace: EditorIDEWorkspace
+  ) async throws -> [EditorTab] {
+    var prepared: [EditorTab] = []
+    prepared.reserveCapacity(snapshot.documents.count)
+
+    do {
+      for state in snapshot.documents {
+        try Task.checkCancellation()
+        guard isRegularFile(state.url) else {
+          throw WorkspaceReconfigurationError.missingDocument(state.url)
+        }
         let tab = try await makeEditorTab(
           at: state.url,
           using: workspace,
           id: state.id,
-          selectedRange: state.selectedRange
+          selectedRange: state.selectedRange.nsRange,
+          attachCallbacks: false
         )
-        if tab.text != state.text {
-          try await tab.restoreRecoveredText(state.text)
-          let utf16Length = (tab.text as NSString).length
-          let location = min(max(state.selectedRange.location, 0), utf16Length)
-          tab.selectedRange = NSRange(
-            location: location,
-            length: min(max(state.selectedRange.length, 0), utf16Length - location)
-          )
-        }
-        reopenedTabs.append(tab)
-      } catch {
-        remainingStates.append(state)
-        appendDebugMessage(
-          "Could not reopen \(state.url.lastPathComponent) after reconfiguration: "
-            + error.localizedDescription
-        )
-      }
-    }
+        prepared.append(tab)
 
-    pendingRuntimeTabRestoration = remainingStates.isEmpty ? nil : remainingStates
-    if remainingStates.isEmpty {
-      pendingRuntimeSelectedTabID = nil
-    } else if let previouslySelectedID,
-      !remainingStates.contains(where: { $0.id == previouslySelectedID })
+        guard
+          modificationTimesMatch(
+            state.diskModificationTime,
+            tab.diskModificationTime
+          )
+        else {
+          throw WorkspaceReconfigurationError.documentChangedDuringPreparation(state.url)
+        }
+        if tab.text != state.text {
+          guard state.isDirty else {
+            throw WorkspaceReconfigurationError.documentChangedDuringPreparation(state.url)
+          }
+          try await tab.restoreRecoveredText(state.text)
+          tab.updateSelection(state.selectedRange.nsRange)
+        }
+      }
+      return prepared
+    } catch {
+      for tab in prepared {
+        await tab.close()
+        try? await workspace.closeDocument(at: tab.url)
+      }
+      throw error
+    }
+  }
+
+  private func modificationTimesMatch(
+    _ lhs: TimeInterval?,
+    _ rhs: TimeInterval?
+  ) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil):
+      return true
+    case (.some(let lhs), .some(let rhs)):
+      return abs(lhs - rhs) < 0.001
+    default:
+      return false
+    }
+  }
+
+  private func commitPreparedRuntime(
+    candidateWorkspace: EditorIDEWorkspace,
+    candidateTabs: [EditorTab],
+    snapshot: WorkspaceRuntimeSnapshot,
+    configuration: EditorServicesConfiguration
+  ) async {
+    await taskSupervisor.cancelAndWait(.projectRefresh)
+    projectContextRefreshGeneration &+= 1
+    let observationTasks = cancelBackendObservationTasks()
+
+    let previousWorkspace = ideWorkspace
+    let previousTabs = tabs
+    for tab in candidateTabs { configureEditorTabCallbacks(tab) }
+
+    ideWorkspace = candidateWorkspace
+    serviceReport = candidateWorkspace.serviceResult.report
+    servicesConfiguration = configuration
+    tabs = candidateTabs
+    if let selectedID = snapshot.selectedDocumentID,
+      candidateTabs.contains(where: { $0.id == selectedID })
     {
-      pendingRuntimeSelectedTabID = remainingStates.first?.id
-    }
-    tabs = reopenedTabs
-    if let previouslySelectedID, reopenedTabs.contains(where: { $0.id == previouslySelectedID }) {
-      selectedTabID = previouslySelectedID
+      selectedTabID = selectedID
     } else {
-      selectedTabID = reopenedTabs.first?.id
+      selectedTabID = candidateTabs.first?.id
     }
-    if !remainingStates.isEmpty {
-      recoveryWarning =
-        "Some tabs could not be reopened after Editor Services restarted. Their in-memory contents were kept in workspace recovery."
+    observeBackend(candidateWorkspace.backend)
+    EditorServicePreferencesStore.save(configuration: configuration)
+    transitionRuntime(to: .running, detail: "candidate runtime committed")
+    fileOperationError = nil
+    if !hasRestoredSession, tabs.isEmpty {
+      hasRestoredSession = true
+      await restoreWorkspaceSession()
     }
     scheduleSessionPersistence()
+
+    for tab in previousTabs { await tab.close() }
+    try? await previousWorkspace?.shutdown()
+    for task in observationTasks { await task.value }
+  }
+
+  private func disposePreparedRuntime(
+    _ preparedTabs: [EditorTab],
+    workspace: EditorIDEWorkspace
+  ) async {
+    for tab in preparedTabs {
+      await tab.close()
+      try? await workspace.closeDocument(at: tab.url)
+    }
+    try? await workspace.shutdown()
+  }
+
+  func startLiveDebugging() {
+    debugLaunchTarget = .project
+    beginLiveDebuggingForSelectedTarget()
+  }
+
+  func startLiveDebuggingCurrentFile() {
+    guard let fileURL = activeTab?.url else { return }
+    debugLaunchTarget = .currentFile(fileURL.standardizedFileURL)
+    beginLiveDebuggingForSelectedTarget()
+  }
+
+  private func beginLiveDebuggingForSelectedTarget() {
+    if !isLiveDebugEnabled {
+      isLiveDebugEnabled = true
+    } else {
+      configureLiveDebugMonitoring()
+    }
+    switch debugPhase {
+    case .idle, .failed:
+      runDebugOperation { await self.beginDebugging() }
+    case .starting:
+      liveDebugController.report(.watching)
+    case .running, .stopped:
+      if activeDebugLaunchTarget != debugLaunchTarget {
+        let changedPaths: Set<URL> =
+          switch debugLaunchTarget {
+          case .project: [buildController.buildProjectURL.standardizedFileURL]
+          case .currentFile(let fileURL): [fileURL.standardizedFileURL]
+          }
+        liveDebugController.enqueueFullRestart(for: changedPaths)
+      } else {
+        liveDebugController.report(.watching)
+      }
+    }
+  }
+
+  func stopLiveDebugging() {
+    isLiveDebugEnabled = false
+    liveDebugController.stop()
+    liveDebugController.report(.disabled)
+  }
+
+  private static func liveDebugPreferenceKey(workspaceURL: URL) -> String {
+    "calcite.liveDebug." + EditorSourceFingerprint.hash(workspaceURL.standardizedFileURL.path)
+  }
+
+  private func configureLiveDebugMonitoring() {
+    guard let liveDebugController else { return }
+    guard !isShuttingDown, !hasShutDown else {
+      liveDebugController.stop()
+      return
+    }
+    liveDebugController.configure(
+      enabled: isLiveDebugEnabled,
+      target: debugLaunchTarget
+    )
+  }
+
+  private func liveDebugRoots(for target: EditorDebugLaunchTarget) -> [URL] {
+    let targetKind: EditorExecutionTargetKind =
+      switch target {
+      case .project: .project
+      case .currentFile: .currentFile
+      }
+    let configuration = runConfigurationController.configuration(for: targetKind)
+    let baseRoot: URL =
+      switch target {
+      case .project:
+        buildController.buildProjectURL.standardizedFileURL
+      case .currentFile(let fileURL):
+        if let language = languageForDebugFile(fileURL),
+          usesProjectDebugContext(for: fileURL, language: language)
+        {
+          buildController.buildProjectURL.standardizedFileURL
+        } else {
+          fileURL.standardizedFileURL.deletingLastPathComponent()
+        }
+      }
+    guard let configuration, !configuration.liveDebugWatchRoots.isEmpty else {
+      return [baseRoot]
+    }
+    return configuration.liveDebugWatchRoots.map { value in
+      let expanded = NSString(string: value).expandingTildeInPath
+      if expanded.hasPrefix("/") {
+        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
+      }
+      return baseRoot.appendingPathComponent(expanded, isDirectory: true).standardizedFileURL
+    }.filter { FileManager.default.fileExists(atPath: $0.path) }
+  }
+
+  private func shouldTriggerLiveDebug(
+    for url: URL,
+    target: EditorDebugLaunchTarget
+  ) -> Bool {
+    let standardized = url.standardizedFileURL
+    let targetKind: EditorExecutionTargetKind =
+      switch target {
+      case .project: .project
+      case .currentFile: .currentFile
+      }
+    if let configuration = runConfigurationController.configuration(for: targetKind),
+      configuration.liveDebugExclusions.contains(where: {
+        EditorPathPattern.matches(
+          path: standardized.path,
+          pattern: $0,
+          relativeTo: buildController.buildProjectURL
+        )
+      })
+    {
+      return false
+    }
+    if case .currentFile(let targetURL) = target {
+      let usesProjectContext =
+        languageForDebugFile(targetURL).map {
+          usesProjectDebugContext(for: targetURL, language: $0)
+        } ?? false
+      if !usesProjectContext, standardized != targetURL.standardizedFileURL {
+        return false
+      }
+    }
+    let impact = EditorFileChangeImpactResolver.resolve(
+      changedURL: standardized,
+      workspaceURL: buildController.buildProjectURL,
+      launchTarget: target
+    )
+    switch impact {
+    case .ignore:
+      return false
+    case .rebuildTargets(let targets), .rebuildDependents(let targets):
+      let active = activeLiveDebugTargetNames(for: target)
+      return active.isEmpty || !targets.isDisjoint(with: active)
+    case .resourceReload, .projectGraphReload, .debuggerRestartOnly:
+      return true
+    }
+  }
+
+  private func activeLiveDebugTargetNames(
+    for target: EditorDebugLaunchTarget
+  ) -> Set<String> {
+    var values = Set<String>()
+    let commands = [
+      buildController.plan.command(for: .run),
+      buildController.plan.command(for: .build),
+    ].compactMap { $0 }
+    for command in commands {
+      for flag in ["--product", "--target", "--bin", "--package", "-p"] {
+        if let index = command.arguments.lastIndex(of: flag),
+          command.arguments.indices.contains(index + 1)
+        {
+          values.insert(command.arguments[index + 1])
+        }
+      }
+    }
+    if let configured = runConfigurationController.configuration(for: .project)?
+      .projectTargetName?
+      .trimmingCharacters(in: .whitespacesAndNewlines),
+      !configured.isEmpty
+    {
+      values.insert(configured)
+    }
+    if let product = buildController.lastSuccessfulArtifact?.productName,
+      !product.isEmpty
+    {
+      values.insert(product)
+    }
+    let fileURL: URL? =
+      switch target {
+      case .project: activeTab?.url
+      case .currentFile(let fileURL): fileURL
+      }
+    if let fileURL {
+      let root = buildController.buildProjectURL.standardizedFileURL
+      let path = fileURL.standardizedFileURL.path
+      if path.hasPrefix(root.path + "/") {
+        let relative = String(path.dropFirst(root.path.count + 1))
+        let parts = relative.split(separator: "/").map(String.init)
+        if parts.count >= 2, ["Sources", "Tests"].contains(parts[0]) {
+          values.insert(parts[1])
+        }
+      }
+    }
+    let configuredProgram = effectiveDebugConfiguration(for: target).programPath
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if !configuredProgram.isEmpty {
+      values.insert(URL(fileURLWithPath: configuredProgram).lastPathComponent)
+    }
+    return values
+  }
+
+  private func targetedLiveDebugBuildCommand(
+    for batch: ProjectFileChangeBatch
+  ) -> EditorBuildCommand? {
+    guard case .project = debugLaunchTarget,
+      var command = buildController.plan.command(for: .build)
+    else { return nil }
+    let paths = batch.changedPaths.union(batch.removedPaths).union(batch.renamedPaths)
+    let impacts = paths.map {
+      EditorFileChangeImpactResolver.resolve(
+        changedURL: $0,
+        workspaceURL: buildController.buildProjectURL,
+        launchTarget: debugLaunchTarget
+      )
+    }
+    if impacts.contains(where: {
+      if case .projectGraphReload = $0 { return true }
+      return false
+    }) {
+      buildController.rediscover()
+      return buildController.plan.command(for: .build)
+    }
+    let configuredTarget = runConfigurationController.configuration(for: .project)?
+      .projectTargetName?
+      .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    let artifactTarget = buildController.lastSuccessfulArtifact?.productName
+    let active = activeLiveDebugTargetNames(for: debugLaunchTarget)
+    guard let target = configuredTarget ?? artifactTarget ?? active.sorted().first else {
+      return command
+    }
+    switch buildController.plan.projectKind {
+    case .swiftPackage:
+      if !command.arguments.contains("--target") && !command.arguments.contains("--product") {
+        command.arguments += ["--product", target]
+        command.title += " (\(target))"
+      }
+    case .rustCargo:
+      if !command.arguments.contains("--bin"),
+        !command.arguments.contains("--package"),
+        !command.arguments.contains("-p")
+      {
+        command.arguments += ["--bin", target]
+        command.title += " (\(target))"
+      }
+    case .goModule, .nodePackage, .python, .xcode, .gradle, .maven, .zig, .cmake,
+      .make, .generic:
+      break
+    }
+    return command
+  }
+
+  private func restartDebuggingForLiveChanges(
+    batch: ProjectFileChangeBatch,
+    generation: UInt64
+  ) async {
+    guard let workspace = ideWorkspace,
+      liveDebugController.generation == generation,
+      isLiveDebugEnabled
+    else { return }
+    do {
+      liveDebugController.report(.building)
+      let snapshot = try await prepareSourceSnapshotForDebugTarget(reason: .liveDebug)
+      guard liveDebugController.generation == generation, !Task.isCancelled else { return }
+      if snapshot.fingerprint == activeDebugSourceFingerprint {
+        appendDebugMessage(
+          "Live Debug ignored a change batch with an unchanged source fingerprint."
+        )
+        return
+      }
+
+      appendDebugMessage(
+        "Live Debug processing \(batch.changedPaths.count + batch.removedPaths.count + batch.renamedPaths.count) changed file(s)…",
+        channel: .liveDebug
+      )
+      let configurationTarget: EditorExecutionTargetKind =
+        switch debugLaunchTarget {
+        case .project: .project
+        case .currentFile: .currentFile
+        }
+      guard
+        await runPreLaunchTasks(
+          target: configurationTarget,
+          sourceSnapshot: snapshot
+        )
+      else {
+        liveDebugController.report(
+          .failed("A pre-launch task failed; the previous session was kept."))
+        return
+      }
+      guard
+        await buildDebugLaunchTarget(
+          sourceSnapshot: snapshot,
+          projectBuildCommandOverride: targetedLiveDebugBuildCommand(for: batch)
+        )
+      else {
+        liveDebugController.report(.failed("Build failed; the previous debug session was kept."))
+        appendDebugMessage("Live Debug build failed; the previous session was kept running.")
+        return
+      }
+
+      guard liveDebugController.generation == generation, !Task.isCancelled else { return }
+      liveDebugController.report(.restarting)
+      try await replaceDebugSession(using: workspace, sourceSnapshot: snapshot)
+      guard liveDebugController.generation == generation else { return }
+      activeDebugSourceFingerprint = snapshot.fingerprint
+      liveDebugController.report(.watching)
+    } catch is CancellationError {
+      return
+    } catch {
+      liveDebugController.report(.failed(error.localizedDescription))
+      appendDebugMessage("Live Debug restart failed: \(error.localizedDescription)")
+    }
+  }
+
+  private struct ResolvedDebugLaunch {
+    let language: EditorLanguage
+    let programPath: String
+    let workingDirectory: URL
+  }
+
+  func usesProjectDebugContext(
+    for fileURL: URL,
+    language: EditorLanguage
+  ) -> Bool {
+    let rootPath = buildController.buildProjectURL.standardizedFileURL.path
+    let filePath = fileURL.standardizedFileURL.path
+    guard filePath == rootPath || filePath.hasPrefix(rootPath + "/") else { return false }
+    switch buildController.plan.projectKind {
+    case .xcode:
+      return [.swift, .c, .cpp, .objectiveC, .objectiveCPP].contains(language)
+    case .swiftPackage:
+      return language == .swift
+    case .rustCargo:
+      return language == .rust
+    case .goModule:
+      return language == .go
+    case .python:
+      return language == .python
+    case .gradle, .maven:
+      return language == .java || language == .kotlin
+    case .nodePackage:
+      return language == .javascript || language == .typescript
+    case .zig:
+      return language == .zig
+    case .cmake, .make:
+      return [.c, .cpp, .objectiveC, .objectiveCPP].contains(language)
+    case .generic:
+      return false
+    }
+  }
+
+  private func languageForDebugFile(_ fileURL: URL) -> EditorLanguage? {
+    let standardized = fileURL.standardizedFileURL
+    let languageID =
+      tabs.first(where: {
+        $0.url.standardizedFileURL == standardized
+      })?.languageID ?? EditorLanguageCatalog.standard.languageID(for: standardized)
+    return editorLanguage(for: languageID)
+  }
+
+  private func prepareSourceSnapshotForDebugTarget(
+    reason: EditorExecutionPreparationReason
+  ) async throws -> EditorPreparedSourceSnapshot {
+    switch debugLaunchTarget {
+    case .project:
+      return try await prepareWorkspaceForExecution(reason)
+    case .currentFile(let fileURL):
+      if let language = languageForDebugFile(fileURL),
+        usesProjectDebugContext(for: fileURL, language: language)
+      {
+        return try await prepareWorkspaceForExecution(reason)
+      }
+      return try await prepareSingleFileForExecution(fileURL, reason: reason)
+    }
+  }
+
+  private func buildDebugLaunchTarget(
+    sourceSnapshot: EditorPreparedSourceSnapshot,
+    projectBuildCommandOverride: EditorBuildCommand? = nil
+  ) async -> Bool {
+    guard effectiveDebugConfiguration(for: debugLaunchTarget).buildBeforeLaunch else {
+      return true
+    }
+    switch debugLaunchTarget {
+    case .project:
+      guard
+        let baseCommand = projectBuildCommandOverride
+          ?? buildController.plan.command(for: .build)
+      else { return true }
+      var command = runConfigurationController.configuredCommand(
+        baseCommand,
+        target: .project,
+        plan: buildController.plan
+      )
+      command = prepareDebugArtifactCommand(command, sourceSnapshot: sourceSnapshot)
+      appendDebugMessage(
+        "Building project before debug launch: \(command.title)…",
+        channel: isLiveDebugEnabled ? .liveDebug : .debugger
+      )
+      guard await buildController.run(command, sourceSnapshot: sourceSnapshot) else {
+        return false
+      }
+    case .currentFile(let fileURL):
+      guard let language = languageForDebugFile(fileURL) else {
+        appendDebugMessage("The current file language could not be resolved for debugging.")
+        return false
+      }
+      if usesProjectDebugContext(for: fileURL, language: language) {
+        guard let baseCommand = buildController.plan.command(for: .build) else { return true }
+        var command = runConfigurationController.configuredCommand(
+          baseCommand,
+          target: .project,
+          plan: buildController.plan
+        )
+        command = prepareDebugArtifactCommand(command, sourceSnapshot: sourceSnapshot)
+        appendDebugMessage("Building project context for \(fileURL.lastPathComponent)…")
+        guard await buildController.run(command, sourceSnapshot: sourceSnapshot) else {
+          return false
+        }
+        break
+      }
+      do {
+        let target = try EditorStandaloneDebugTarget.resolve(
+          fileURL: fileURL, language: language
+        )
+        if let buildCommand = target.buildCommand {
+          appendDebugMessage("Building \(fileURL.lastPathComponent) for standalone debugging…")
+          guard await buildController.run(buildCommand, sourceSnapshot: sourceSnapshot) else {
+            return false
+          }
+        }
+      } catch {
+        appendDebugMessage(error.localizedDescription)
+        return false
+      }
+    }
+    return acceptSuccessfulExecution(sourceSnapshot: sourceSnapshot)
+  }
+
+  private func prepareDebugArtifactCommand(
+    _ command: EditorBuildCommand,
+    sourceSnapshot: EditorPreparedSourceSnapshot
+  ) -> EditorBuildCommand {
+    guard buildController.plan.projectKind == .goModule,
+      URL(fileURLWithPath: command.executable).lastPathComponent == "go",
+      command.arguments.first == "build"
+    else { return command }
+
+    var command = command
+    let configuration = runConfigurationController.configuration(for: .project)
+    let configuredTarget = configuration?.projectTargetName?
+      .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    let package = configuredTarget ?? "."
+    let directory = Self.debugArtifactDirectory(
+      workspaceURL: buildController.buildProjectURL,
+      sourceFingerprint: sourceSnapshot.fingerprint
+    )
+    try? FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    let output = directory.appendingPathComponent(
+      URL(fileURLWithPath: package).lastPathComponent.nilIfEmpty ?? "program"
+    )
+
+    command.arguments = Self.goDebugBuildArguments(
+      from: command.arguments,
+      package: package,
+      output: output
+    )
+    command.artifactPath = output.path
+    command.title += " (debug artifact)"
+    return command
+  }
+
+  nonisolated private static func goDebugBuildArguments(
+    from arguments: [String],
+    package: String,
+    output: URL
+  ) -> [String] {
+    let flagsWithValues: Set<String> = [
+      "-asmflags", "-buildmode", "-buildvcs", "-compiler", "-gcflags", "-installsuffix",
+      "-ldflags", "-mod", "-modfile", "-overlay", "-pgo", "-pkgdir", "-tags",
+      "-toolexec",
+    ]
+    var preserved: [String] = []
+    var index = arguments.first == "build" ? 1 : 0
+    while index < arguments.count {
+      let value = arguments[index]
+      if flagsWithValues.contains(value), arguments.indices.contains(index + 1) {
+        preserved += [value, arguments[index + 1]]
+        index += 2
+        continue
+      }
+      if value.hasPrefix("-") && value != "-o" {
+        preserved.append(value)
+        index += 1
+        continue
+      }
+      if value == "-o" {
+        index += min(2, arguments.count - index)
+        continue
+      }
+      index += 1
+    }
+    return ["build", "-o", output.path] + preserved + [package]
+  }
+
+  nonisolated private static func debugArtifactDirectory(
+    workspaceURL: URL,
+    sourceFingerprint: String
+  ) -> URL {
+    let caches =
+      FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+      ?? FileManager.default.temporaryDirectory
+    let workspaceHash = EditorSourceFingerprint.hash(workspaceURL.standardizedFileURL.path)
+    return
+      caches
+      .appendingPathComponent("Calcite/DebugArtifacts", isDirectory: true)
+      .appendingPathComponent(workspaceHash, isDirectory: true)
+      .appendingPathComponent(sourceFingerprint, isDirectory: true)
+  }
+
+  private func resolveDebugLaunch(
+    in workspace: EditorIDEWorkspace,
+    sourceSnapshot: EditorPreparedSourceSnapshot
+  ) async throws -> ResolvedDebugLaunch {
+    switch debugLaunchTarget {
+    case .project:
+      guard let language = await resolvedDebugLanguage(in: workspace) else {
+        throw EditorExecutionIntegrityError.configuration(
+          "No debug adapter is available for the active project language."
+        )
+      }
+      let resolver = EditorDebugProgramResolver(workspaceURL: buildController.buildProjectURL)
+      let launchConfiguration = effectiveDebugConfiguration(for: debugLaunchTarget)
+      let matchingArtifact = buildController.lastSuccessfulArtifact.flatMap { artifact -> String? in
+        guard artifact.sourceFingerprint == sourceSnapshot.fingerprint,
+          let url = artifact.executableURL,
+          FileManager.default.fileExists(atPath: url.path)
+        else { return nil }
+        return url.path
+      }
+      let configuredProgram = resolver.resolveConfiguredPath(launchConfiguration.programPath)
+      let program: String?
+      if Self.requiresFingerprintBoundArtifact(buildController.plan.projectKind),
+        launchConfiguration.buildBeforeLaunch
+      {
+        program = matchingArtifact
+      } else {
+        program =
+          matchingArtifact ?? configuredProgram
+          ?? Self.interpretedProjectEntry(
+            activeTab: activeTab,
+            language: language,
+            workspaceURL: buildController.buildProjectURL
+          )
+      }
+      guard let program else {
+        throw EditorExecutionIntegrityError.configuration(
+          "No executable matching the current source snapshot was found. Build the selected product or set an explicit program in Run Configurations."
+        )
+      }
+      return ResolvedDebugLaunch(
+        language: language,
+        programPath: program,
+        workingDirectory: buildController.buildProjectURL
+      )
+
+    case .currentFile(let fileURL):
+      let standardized = fileURL.standardizedFileURL
+      guard let language = languageForDebugFile(standardized) else {
+        throw EditorExecutionIntegrityError.configuration(
+          "The language of \(standardized.lastPathComponent) cannot be debugged."
+        )
+      }
+      guard workspace.serviceResult.debugAdapter(for: language) != nil else {
+        throw EditorDebugAdapterSelectionError.unavailable(language)
+      }
+      if usesProjectDebugContext(for: standardized, language: language) {
+        let resolver = EditorDebugProgramResolver(workspaceURL: buildController.buildProjectURL)
+        let launchConfiguration = effectiveDebugConfiguration(for: debugLaunchTarget)
+        let matchingArtifact = buildController.lastSuccessfulArtifact.flatMap {
+          artifact -> String? in
+          guard artifact.sourceFingerprint == sourceSnapshot.fingerprint,
+            let url = artifact.executableURL,
+            FileManager.default.fileExists(atPath: url.path)
+          else { return nil }
+          return url.path
+        }
+        let configuredProgram = resolver.resolveConfiguredPath(launchConfiguration.programPath)
+        let program: String?
+        if Self.requiresFingerprintBoundArtifact(buildController.plan.projectKind),
+          launchConfiguration.buildBeforeLaunch
+        {
+          program = matchingArtifact
+        } else {
+          program =
+            matchingArtifact ?? configuredProgram
+            ?? Self.interpretedProjectEntry(
+              activeTab: activeTab,
+              language: language,
+              workspaceURL: buildController.buildProjectURL
+            )
+        }
+        guard let program else {
+          throw EditorExecutionIntegrityError.configuration(
+            "No project executable matching the current source was found for \(standardized.lastPathComponent)."
+          )
+        }
+        return ResolvedDebugLaunch(
+          language: language,
+          programPath: program,
+          workingDirectory: buildController.buildProjectURL
+        )
+      }
+      let target = try EditorStandaloneDebugTarget.resolve(
+        fileURL: standardized, language: language
+      )
+      if target.buildCommand != nil,
+        !FileManager.default.isExecutableFile(atPath: target.programPath)
+      {
+        throw EditorExecutionIntegrityError.configuration(
+          "The standalone debug artifact was not created: \(target.programPath)"
+        )
+      }
+      return ResolvedDebugLaunch(
+        language: language,
+        programPath: target.programPath,
+        workingDirectory: target.workingDirectory
+      )
+    }
+  }
+
+  nonisolated private static func requiresFingerprintBoundArtifact(
+    _ kind: EditorProjectBuildKind
+  ) -> Bool {
+    switch kind {
+    case .swiftPackage, .rustCargo, .xcode, .goModule, .zig, .cmake:
+      return true
+    case .python, .nodePackage, .gradle, .maven, .make, .generic:
+      return false
+    }
+  }
+
+  private static func interpretedProjectEntry(
+    activeTab: EditorTab?,
+    language: EditorLanguage,
+    workspaceURL: URL
+  ) -> String? {
+    guard [.python, .javascript, .typescript, .ruby, .lua, .php].contains(language),
+      let url = activeTab?.url.standardizedFileURL,
+      url.path == workspaceURL.path || url.path.hasPrefix(workspaceURL.path + "/"),
+      FileManager.default.fileExists(atPath: url.path)
+    else { return nil }
+    return url.path
+  }
+
+  private func effectiveDebugConfiguration(
+    for target: EditorDebugLaunchTarget
+  ) -> EditorDebugConfiguration {
+    var value = debugConfiguration
+    let targetKind: EditorExecutionTargetKind =
+      switch target {
+      case .project: .project
+      case .currentFile: .currentFile
+      }
+    let run =
+      runConfigurationController.configurations.first(where: {
+        $0.id == runConfigurationController.selectedID && $0.target == targetKind
+      }) ?? runConfigurationController.configurations.first(where: { $0.target == targetKind })
+    guard let run else { return value }
+    if !run.arguments.isEmpty {
+      value.arguments = run.arguments.map(Self.shellQuotedArgument).joined(separator: " ")
+    }
+    value.environment.merge(run.environment) { _, configured in configured }
+    if !run.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      value.workingDirectory = run.workingDirectory
+    }
+    value.buildBeforeLaunch = run.buildBeforeLaunch
+    value.stopOnEntry = run.stopOnEntry
+    value.terminalMode = run.terminalMode
+    if let adapter = run.debuggerAdapterID?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !adapter.isEmpty
+    {
+      value.adapterID = adapter
+    }
+    return value
+  }
+
+  nonisolated private static func shellQuotedArgument(_ value: String) -> String {
+    guard !value.isEmpty else { return "''" }
+    let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._/@%+=:,"))
+    if value.unicodeScalars.allSatisfy({ safe.contains($0) }) { return value }
+    return "'" + value.replacingOccurrences(of: "'", with: "'\''") + "'"
+  }
+
+  private func registerActiveDebugProcess(
+    backend: MultiLanguageEditorBackend,
+    live: Bool
+  ) async {
+    let owner: EditorProcessOwner =
+      live
+      ? .liveDebug(workspacePath: workspaceURL.path)
+      : .debug(workspacePath: workspaceURL.path)
+
+    // The backend has already adopted or restarted the new DAP session at this point. Replacing
+    // the registry entry must not invoke the previous terminator because both entries can capture
+    // the same backend and would otherwise stop the newly installed session.
+    let alternateOwner: EditorProcessOwner =
+      live
+      ? .debug(workspacePath: workspaceURL.path)
+      : .liveDebug(workspacePath: workspaceURL.path)
+    if let previousLease = debugSessionController.takeProcessLease() {
+      await EditorProcessRegistry.shared.unregister(previousLease)
+    } else {
+      // Recover from older sessions that predate lease tracking without stopping the backend that
+      // has just been adopted by this coordinator.
+      await EditorProcessRegistry.shared.unregister(owner: owner)
+    }
+    await EditorProcessRegistry.shared.unregister(owner: alternateOwner)
+    let lease = await EditorProcessRegistry.shared.register(
+      owner: owner,
+      replacementPolicy: .preserveExistingProcess
+    ) { [weak self] in
+      try? await backend.terminateDebugger()
+      try? await backend.disconnectDebugger()
+      await self?.dapReverseRequestHost.terminateActiveTerminalProcess()
+    }
+    _ = debugSessionController.replaceProcessLease(with: lease)
+  }
+
+  private func replaceDebugSession(
+    using workspace: EditorIDEWorkspace,
+    sourceSnapshot: EditorPreparedSourceSnapshot
+  ) async throws {
+    let launch = try await resolveDebugLaunch(in: workspace, sourceSnapshot: sourceSnapshot)
+    var launchConfiguration = effectiveDebugConfiguration(for: debugLaunchTarget)
+    launchConfiguration.programPath = launch.programPath
+    if case .currentFile = debugLaunchTarget {
+      launchConfiguration.workingDirectory = launch.workingDirectory.path
+    } else if launchConfiguration.workingDirectory
+      .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      launchConfiguration.workingDirectory = launch.workingDirectory.path
+    }
+    let adapterID =
+      launchConfiguration.adapterID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+      ?? workspace.serviceResult.debugAdapter(for: launch.language)?.defaultAdapterID
+      ?? launch.language.rawValue
+    let arguments = EditorDebugLaunchArguments.make(
+      language: launch.language,
+      adapterID: adapterID,
+      configuration: launchConfiguration,
+      workspaceURL: launch.workingDirectory
+    )
+
+    isReplacingDebugSession = true
+    debugSessionGeneration &+= 1
+    let replacementSessionID = UUID()
+    defer { isReplacingDebugSession = false }
+    clearDebugInspection()
+    debugPhase = .starting
+
+    if activeDebugLanguage == launch.language {
+      do {
+        try await workspace.backend.restartDebugger(arguments: arguments)
+        try await synchronizeBreakpoints(using: workspace.backend)
+        activeBackendDebugGeneration = await workspace.backend.currentDebugSessionGeneration()
+        debugExecutionSessionID = replacementSessionID
+        activeDebugLanguage = launch.language
+        activeDebugLaunchTarget = debugLaunchTarget
+        await registerActiveDebugProcess(backend: workspace.backend, live: true)
+        if case .starting = debugPhase { debugPhase = .running }
+        appendDebugMessage(
+          "Live Debug restarted \(adapterID) at source \(sourceSnapshot.fingerprint)."
+        )
+        return
+      } catch {
+        appendDebugMessage(
+          "The adapter does not support an in-place restart; replacing the debug session."
+        )
+      }
+    } else {
+      appendDebugMessage("Live Debug is switching adapters for the selected target.")
+    }
+
+    let prepared = try await workspace.serviceResult.prepareDebugger(
+      for: launch.language,
+      initializeArguments: InitializeArguments(
+        adapterID: adapterID,
+        clientID: "Calcite",
+        clientName: "Calcite",
+        supportsRunInTerminalRequest: true
+      ),
+      reverseRequestHandler: dapReverseRequestHost
+    )
+    do {
+      // Launch the replacement adapter before sending source breakpoints. DAP
+      // adapters commonly emit `initialized` only after the launch request and
+      // may reject configuration requests sent earlier. The old session remains
+      // active until the replacement has launched and finished configuration.
+      try await prepared.launch(arguments: arguments)
+      try await synchronizeBreakpoints(using: prepared)
+      try await prepared.finishConfiguration()
+      try await workspace.backend.replaceWithPreparedDebugger(
+        prepared,
+        disconnectArguments: DisconnectArguments(
+          restart: true,
+          terminateDebuggee: true
+        )
+      )
+      activeBackendDebugGeneration = await workspace.backend.currentDebugSessionGeneration()
+      debugExecutionSessionID = replacementSessionID
+    } catch {
+      await prepared.discard()
+      throw error
+    }
+    activeDebugLanguage = launch.language
+    activeDebugLaunchTarget = debugLaunchTarget
+    await registerActiveDebugProcess(backend: workspace.backend, live: true)
+    if case .starting = debugPhase { debugPhase = .running }
+    appendDebugMessage(
+      "Live Debug replaced \(adapterID) at source \(sourceSnapshot.fingerprint)."
+    )
   }
 
   private func beginDebugging() async {
     guard let workspace = ideWorkspace else { return }
     debugBreakpointVerification.removeAll(keepingCapacity: true)
-    guard let language = await resolvedDebugLanguage(in: workspace) else {
-      debugPhase = .failed(
-        "No debuggable project language could be resolved. Choose a launch program or open a source file."
-      )
-      return
-    }
-
+    debugExecutionOperationID = UUID()
+    debugExecutionSessionID = UUID()
     debugPhase = .starting
-    guard await saveAllDocuments() else {
-      debugPhase = .failed("One or more documents could not be saved before debugging.")
+
+    let sourceSnapshot: EditorPreparedSourceSnapshot
+    do {
+      sourceSnapshot = try await prepareSourceSnapshotForDebugTarget(
+        reason: isLiveDebugEnabled ? .liveDebug : .debug
+      )
+    } catch {
+      debugPhase = .failed(error.localizedDescription)
+      appendDebugMessage("Debug launch preparation failed: \(error.localizedDescription)")
       return
     }
 
-    if debugConfiguration.buildBeforeLaunch,
-      buildController.plan.command(for: .build) != nil
-    {
-      appendDebugMessage("Building project before launch…")
-      guard await buildController.run(kind: .build) else {
-        debugPhase = .failed("The build failed. Open the Build or Problems panel for details.")
-        appendDebugMessage("Debug launch cancelled because the build failed.")
-        return
+    let configurationTarget: EditorExecutionTargetKind =
+      switch debugLaunchTarget {
+      case .project: .project
+      case .currentFile: .currentFile
       }
-      clearSupersededServiceDiagnosticsAfterSuccessfulBuild()
-    }
-
-    let resolver = EditorDebugProgramResolver(workspaceURL: workspaceURL)
     guard
-      let program = resolver.resolve(
-        configuredPath: debugConfiguration.programPath,
-        projectKind: buildController.plan.projectKind
+      await runPreLaunchTasks(
+        target: configurationTarget,
+        sourceSnapshot: sourceSnapshot
       )
     else {
-      debugPhase = .failed(
-        "No executable was found. Build the project or set an executable in Debug Settings."
-      )
+      debugPhase = .failed("A pre-launch task failed.")
       return
     }
-    var launchConfiguration = debugConfiguration
-    launchConfiguration.programPath = program
-    if launchConfiguration.workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    {
-      launchConfiguration.workingDirectory = workspaceURL.path
+
+    guard await buildDebugLaunchTarget(sourceSnapshot: sourceSnapshot) else {
+      debugPhase = .failed("The debug build failed. Open the Build or Problems panel for details.")
+      appendDebugMessage("Debug launch cancelled because the build failed.")
+      return
     }
 
     do {
-      _ = try await workspace.serviceResult.startDebugger(for: language)
+      let launch = try await resolveDebugLaunch(in: workspace, sourceSnapshot: sourceSnapshot)
+      var launchConfiguration = effectiveDebugConfiguration(for: debugLaunchTarget)
+      launchConfiguration.programPath = launch.programPath
+      if case .currentFile = debugLaunchTarget {
+        launchConfiguration.workingDirectory = launch.workingDirectory.path
+      } else if launchConfiguration.workingDirectory
+        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        launchConfiguration.workingDirectory = launch.workingDirectory.path
+      }
+      debugSessionGeneration &+= 1
       let adapterID =
-        workspace.serviceResult.debugAdapter(for: language)?.defaultAdapterID
-        ?? language.rawValue
-      try await workspace.backend.launchDebugger(
-        arguments: EditorDebugLaunchArguments.make(
-          language: language,
+        launchConfiguration.adapterID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        ?? workspace.serviceResult.debugAdapter(for: launch.language)?.defaultAdapterID
+        ?? launch.language.rawValue
+      let prepared = try await workspace.serviceResult.prepareDebugger(
+        for: launch.language,
+        initializeArguments: InitializeArguments(
+          adapterID: adapterID,
+          clientID: "Calcite",
+          clientName: "Calcite",
+          supportsRunInTerminalRequest: true
+        ),
+        reverseRequestHandler: dapReverseRequestHost
+      )
+      do {
+        let launchArguments = EditorDebugLaunchArguments.make(
+          language: launch.language,
           adapterID: adapterID,
           configuration: launchConfiguration,
-          workspaceURL: workspaceURL
-        ))
-      try await synchronizeBreakpoints(using: workspace.backend)
-      try await workspace.backend.finishDebuggerConfiguration()
-      debugPhase = .running
-      appendDebugMessage("Started \(adapterID) for \(program)")
+          workspaceURL: launch.workingDirectory
+        )
+        try await prepared.launch(arguments: launchArguments)
+        try await synchronizeBreakpoints(using: prepared)
+        try await prepared.finishConfiguration()
+        try await workspace.backend.adoptPreparedDebugger(prepared)
+        activeBackendDebugGeneration = await workspace.backend.currentDebugSessionGeneration()
+      } catch {
+        await prepared.discard()
+        throw error
+      }
+      activeDebugSourceFingerprint = sourceSnapshot.fingerprint
+      activeDebugLanguage = launch.language
+      activeDebugLaunchTarget = debugLaunchTarget
+      await registerActiveDebugProcess(
+        backend: workspace.backend,
+        live: isLiveDebugEnabled
+      )
+      if case .starting = debugPhase { debugPhase = .running }
+      if isLiveDebugEnabled { liveDebugController.report(.watching) }
+      appendDebugMessage(
+        "Started \(adapterID) for \(launch.programPath) at source \(sourceSnapshot.fingerprint)"
+      )
     } catch {
       try? await workspace.backend.disconnectDebugger()
+      await dapReverseRequestHost.terminateActiveTerminalProcess()
       activeThreadID = nil
+      activeDebugSourceFingerprint = nil
+      activeBackendDebugGeneration = nil
+      debugExecutionSessionID = nil
+      activeDebugLanguage = nil
+      activeDebugLaunchTarget = nil
       debugPhase = .failed(error.localizedDescription)
       appendDebugMessage("Debug start failed: \(error.localizedDescription)")
     }
   }
 
+  private func synchronizeBreakpoints(
+    using prepared: EditorPreparedDebugSession
+  ) async throws {
+    let requests = preparedBreakpointRequests()
+    var verification: [URL: [Breakpoint]] = [:]
+    for request in requests {
+      let response = try await prepared.setBreakpoints(
+        in: request.url,
+        breakpoints: request.breakpoints,
+        sourceModified: request.sourceModified
+      )
+      verification[request.url] = response
+      breakpointController.applyVerification(
+        documentURL: request.url,
+        sentRecords: request.records,
+        responses: response
+      )
+    }
+    debugBreakpointVerification = verification
+    breakpointController.reload()
+  }
+
+  private struct PreparedBreakpointRequest {
+    let url: URL
+    let records: [EditorStoredBreakpoint]
+    let breakpoints: [SourceBreakpoint]
+    let sourceModified: Bool
+  }
+
+  private func preparedBreakpointRequests() -> [PreparedBreakpointRequest] {
+    for tab in tabs {
+      EditorBreakpointStore.save(tab.breakpoints, for: tab.url)
+      _ = EditorBreakpointStore.relocateRecords(for: tab.url, in: tab.text)
+    }
+    var recordsByURL = EditorBreakpointStore.allRecords(under: workspaceURL)
+    for tab in tabs {
+      recordsByURL[tab.url.standardizedFileURL] = EditorBreakpointStore.loadRecords(for: tab.url)
+    }
+    return recordsByURL.keys.sorted(by: { $0.path < $1.path }).map { url in
+      var records = recordsByURL[url, default: []]
+      if let tab = tabs.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
+        records = EditorBreakpointStore.relocateRecords(for: url, in: tab.text)
+      } else if let text = try? String(contentsOf: url, encoding: .utf8) {
+        records = EditorBreakpointStore.relocateRecords(for: url, in: text)
+      }
+      let sentRecords = records.filter { record in
+        record.isEnabled
+          && (record.resolvedLine != nil || record.lineTextHash == nil)
+      }
+      let values = sentRecords.map { record in
+        SourceBreakpoint(
+          line: record.resolvedLine ?? record.requestedLine,
+          condition: record.condition,
+          hitCondition: record.hitCondition,
+          logMessage: record.logMessage
+        )
+      }
+      return PreparedBreakpointRequest(
+        url: url,
+        records: sentRecords,
+        breakpoints: values,
+        sourceModified: tabs.first(where: {
+          $0.url.standardizedFileURL == url.standardizedFileURL
+        })?.isDirty ?? false
+      )
+    }
+  }
+
   private func synchronizeBreakpoints(using backend: MultiLanguageEditorBackend) async throws {
-    var workspaceBreakpoints = EditorBreakpointStore.all(under: workspaceURL)
+    for tab in tabs {
+      EditorBreakpointStore.save(tab.breakpoints, for: tab.url)
+      _ = EditorBreakpointStore.relocateRecords(for: tab.url, in: tab.text)
+    }
+
+    var workspaceBreakpoints = EditorBreakpointStore.allRecords(under: workspaceURL)
     var modifiedByURL: [URL: Bool] = [:]
     for tab in tabs {
       let key = tab.url.standardizedFileURL
-      workspaceBreakpoints[key] = tab.breakpoints
+      workspaceBreakpoints[key] = EditorBreakpointStore.loadRecords(for: key)
       modifiedByURL[key] = tab.isDirty
     }
 
     var verification: [URL: [Breakpoint]] = [:]
     for url in workspaceBreakpoints.keys.sorted(by: { $0.path < $1.path }) {
-      let values = workspaceBreakpoints[url, default: []].sorted().map {
-        SourceBreakpoint(line: $0)
+      var records = workspaceBreakpoints[url, default: []]
+      if !tabs.contains(where: { $0.url.standardizedFileURL == url.standardizedFileURL }),
+        let text = try? String(contentsOf: url, encoding: .utf8)
+      {
+        records = EditorBreakpointStore.relocateRecords(for: url, in: text)
       }
-      verification[url] = try await backend.setBreakpoints(
+      let sentRecords = records.filter { record in
+        record.isEnabled
+          && (record.resolvedLine != nil || record.lineTextHash == nil)
+      }
+      let values = sentRecords.map { record in
+        SourceBreakpoint(
+          line: record.resolvedLine ?? record.requestedLine,
+          condition: record.condition,
+          hitCondition: record.hitCondition,
+          logMessage: record.logMessage
+        )
+      }
+      let response = try await backend.setBreakpoints(
         in: url,
         breakpoints: values,
         sourceModified: modifiedByURL[url] ?? false
       )
+      verification[url] = response
+      breakpointController.applyVerification(
+        documentURL: url,
+        sentRecords: sentRecords,
+        responses: response
+      )
     }
     debugBreakpointVerification = verification
+    breakpointController.reload()
   }
 
   private func synchronizeBreakpoints(
     for tab: EditorTab,
     using backend: MultiLanguageEditorBackend
   ) async throws {
-    let values = tab.breakpoints.sorted().map { SourceBreakpoint(line: $0) }
+    EditorBreakpointStore.save(tab.breakpoints, for: tab.url)
+    let records = EditorBreakpointStore.relocateRecords(for: tab.url, in: tab.text)
+    let sentRecords = records.filter { record in
+      record.isEnabled
+        && (record.resolvedLine != nil || record.lineTextHash == nil)
+    }
+    let values = sentRecords.map { record in
+      SourceBreakpoint(
+        line: record.resolvedLine ?? record.requestedLine,
+        condition: record.condition,
+        hitCondition: record.hitCondition,
+        logMessage: record.logMessage
+      )
+    }
     let verification = try await backend.setBreakpoints(
       in: tab.url,
       breakpoints: values,
       sourceModified: tab.isDirty
     )
     debugBreakpointVerification[tab.url.standardizedFileURL] = verification
+    breakpointController.applyVerification(
+      documentURL: tab.url,
+      sentRecords: sentRecords,
+      responses: verification
+    )
   }
 
   private func performThreadCommand(
@@ -1719,32 +3589,50 @@ final class EditorWorkspaceController: ObservableObject {
       }
     }
     taskSupervisor.replace(.debugEvents) { [weak self] lease in
-      for await event in backend.debugEvents {
+      for await envelope in backend.debugEventEnvelopes {
         guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
           generation == self.backendObservationGeneration,
           !self.isShuttingDown, !self.hasShutDown
         else { return }
-        await self.handleDebugEvent(event, backend: backend)
+        await self.handleDebugEvent(
+          envelope.event,
+          backend: backend,
+          backendGeneration: envelope.generation
+        )
       }
     }
     taskSupervisor.replace(.debugStandardError) { [weak self] lease in
-      for await line in backend.debugAdapterStandardError {
+      for await envelope in backend.debugAdapterStandardErrorEnvelopes {
         guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
           generation == self.backendObservationGeneration,
+          self.activeBackendDebugGeneration == envelope.generation,
           !self.isShuttingDown, !self.hasShutDown
-        else { return }
-        self.appendDebugMessage("DAP stderr: \(line)")
+        else { continue }
+        self.appendDebugMessage(
+          "DAP stderr: \(envelope.text)",
+          channel: .adapter,
+          severity: .warning
+        )
       }
     }
     taskSupervisor.replace(.debugTransportErrors) { [weak self] lease in
-      for await error in backend.debugTransportErrors {
+      for await envelope in backend.debugTransportErrorEnvelopes {
         guard !Task.isCancelled, let self, self.taskSupervisor.isCurrent(lease),
           generation == self.backendObservationGeneration,
+          self.activeBackendDebugGeneration == envelope.generation,
           !self.isShuttingDown, !self.hasShutDown
-        else { return }
-        self.appendDebugMessage("DAP: \(error)")
-        if error.hasPrefix(Self.unexpectedDebugAdapterTerminationPrefix) {
+        else { continue }
+        let error = envelope.text
+        self.appendDebugMessage(
+          "DAP: \(error)",
+          channel: .adapter,
+          severity: .error
+        )
+        if error.hasPrefix(Self.unexpectedDebugAdapterTerminationPrefix),
+          !self.isReplacingDebugSession
+        {
           self.activeThreadID = nil
+          self.activeBackendDebugGeneration = nil
           self.clearDebugInspection()
           self.debugBreakpointVerification.removeAll(keepingCapacity: true)
           self.debugPhase = .failed(error)
@@ -1824,10 +3712,36 @@ final class EditorWorkspaceController: ObservableObject {
     for task in tasks { await task.value }
   }
 
+  private func recordRecentlyChangedSourceFiles(from event: SourceWorkspaceEvent) {
+    let urls: [URL] =
+      switch event {
+      case .added(let file), .changed(let file), .saved(let file), .conflict(let file),
+        .reloaded(let file):
+        [file.url]
+      case .moved(_, _, let file):
+        [file.url]
+      case .removed(_, let relativePath):
+        [workspaceURL.appendingPathComponent(relativePath)]
+      case .scanned, .scanFailed, .restored:
+        []
+      }
+    guard !urls.isEmpty else { return }
+    let sourceExtensions = ExternalSourceIndexConfiguration.commonExternalSourceExtensions
+    var ordered = recentlyChangedSourceFiles
+    for url in urls.map(\.standardizedFileURL) {
+      guard sourceExtensions.contains(url.pathExtension.lowercased()) else { continue }
+      ordered.removeAll { $0 == url }
+      ordered.append(url)
+    }
+    if ordered.count > 128 { ordered.removeFirst(ordered.count - 128) }
+    recentlyChangedSourceFiles = ordered
+  }
+
   private func handleSourceWorkspaceEvent(
     _ event: SourceWorkspaceEvent,
     backend: MultiLanguageEditorBackend
   ) async {
+    recordRecentlyChangedSourceFiles(from: event)
     let changes = await workspaceFileChanges(for: event, backend: backend)
     if !changes.isEmpty {
       do {
@@ -2044,23 +3958,76 @@ final class EditorWorkspaceController: ObservableObject {
 
   private func handleDebugEvent(
     _ event: DAPEvent,
-    backend: MultiLanguageEditorBackend
+    backend: MultiLanguageEditorBackend,
+    backendGeneration: UInt64
   ) async {
-    appendDebugMessage("DAP event: \(event.event)")
+    guard activeBackendDebugGeneration == backendGeneration else {
+      appendDebugMessage(
+        "Ignored stale DAP event \(event.event) from generation \(backendGeneration)."
+      )
+      return
+    }
+    if isReplacingDebugSession,
+      event.event == "terminated" || event.event == "exited"
+    {
+      appendDebugMessage("Ignored \(event.event) from the debug session being replaced.")
+      return
+    }
+    let sessionGeneration = debugSessionGeneration
+    appendDebugMessage("DAP event: \(event.event)", channel: .adapter)
     switch event.event {
+    case "output":
+      if let body = event.body,
+        let output = try? body.decode(OutputEventBody.self)
+      {
+        let channel: EditorExecutionChannel
+        switch output.category?.lowercased() {
+        case "stderr", "stdout": channel = .debuggee
+        case "console", "telemetry": channel = .adapter
+        default: channel = .debugger
+        }
+        let location: EditorExecutionSourceLocation? = {
+          guard let path = output.source?.path, !path.isEmpty else { return nil }
+          return EditorExecutionSourceLocation(
+            url: URL(fileURLWithPath: path),
+            line: output.line ?? 1,
+            column: output.column ?? 1
+          )
+        }()
+        appendExecutionMessage(
+          output.output,
+          channel: channel,
+          severity: output.category?.lowercased() == "stderr" ? .warning : .info,
+          sourceLocation: location
+        )
+        if !output.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          debugConsole.append(output.output.trimmingCharacters(in: .newlines))
+          if debugConsole.count > 500 { debugConsole.removeFirst(debugConsole.count - 500) }
+        }
+      }
     case "stopped":
       debugPhase = .stopped
-      await refreshDebugInspection(using: backend)
+      await refreshDebugInspection(using: backend, sessionGeneration: sessionGeneration)
     case "continued":
       clearDebugInspection()
       debugPhase = .running
     case "terminated":
       activeThreadID = nil
+      activeDebugSourceFingerprint = nil
+      activeBackendDebugGeneration = nil
+      debugExecutionSessionID = nil
+      activeDebugLanguage = nil
+      activeDebugLaunchTarget = nil
       clearDebugInspection()
       try? await backend.disconnectDebugger()
       debugPhase = .idle
     case "exited":
       activeThreadID = nil
+      activeDebugSourceFingerprint = nil
+      activeBackendDebugGeneration = nil
+      debugExecutionSessionID = nil
+      activeDebugLanguage = nil
+      activeDebugLaunchTarget = nil
       clearDebugInspection()
       debugPhase = .idle
     default:
@@ -2068,9 +4035,13 @@ final class EditorWorkspaceController: ObservableObject {
     }
   }
 
-  private func refreshDebugInspection(using backend: MultiLanguageEditorBackend) async {
+  private func refreshDebugInspection(
+    using backend: MultiLanguageEditorBackend,
+    sessionGeneration: UInt64
+  ) async {
     do {
       let threads = try await backend.debugThreads()
+      guard sessionGeneration == debugSessionGeneration, !isReplacingDebugSession else { return }
       debugThreads = threads
       guard let thread = threads.first else {
         activeThreadID = nil
@@ -2080,6 +4051,7 @@ final class EditorWorkspaceController: ObservableObject {
       }
       activeThreadID = thread.id
       let trace = try await backend.stackTrace(threadID: thread.id, levels: 100)
+      guard sessionGeneration == debugSessionGeneration, !isReplacingDebugSession else { return }
       debugFrames = trace.stackFrames
       guard let frame = trace.stackFrames.first else {
         selectedDebugFrameID = nil
@@ -2367,34 +4339,28 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func persistWorkspaceSession(includeRecoveries: Bool = true) async {
-    let pendingStates = pendingRuntimeTabRestoration ?? []
-    let pendingSelectedURL = pendingRuntimeSelectedTabID.flatMap { selectedID in
-      pendingStates.first(where: { $0.id == selectedID })?.url
-    }
-    let selectedURL = activeTab?.url ?? pendingSelectedURL
-    let openURLs = tabs.map(\.url) + pendingStates.map(\.url)
-    let liveRecoveries = tabs.compactMap { tab -> EditorSessionRecoveryInput? in
-      guard tab.isDirty else { return nil }
-      return EditorSessionRecoveryInput(
-        url: tab.url,
-        text: tab.text,
-        diskModificationTime: tab.diskModificationTime
-      )
-    }
-    let pendingRecoveries = pendingStates.compactMap { state -> EditorSessionRecoveryInput? in
-      guard state.isDirty else { return nil }
-      return EditorSessionRecoveryInput(
-        url: state.url,
-        text: state.text,
-        diskModificationTime: state.diskModificationTime
-      )
-    }
-    let recoveries = includeRecoveries ? liveRecoveries + pendingRecoveries : []
+    let selectedURL = activeTab?.url
+    let recoveries =
+      includeRecoveries
+      ? tabs.compactMap { tab -> EditorSessionRecoveryInput? in
+        guard tab.isDirty else { return nil }
+        return EditorSessionRecoveryInput(
+          url: tab.url,
+          text: tab.text,
+          diskModificationTime: tab.diskModificationTime
+        )
+      }
+      : []
+    let presentation = capturePresentationSnapshot?()
+
     do {
       let report = try await sessionStore.save(
-        openURLs: openURLs,
+        openDocuments: tabs.map {
+          EditorSessionOpenDocumentInput(id: $0.id, url: $0.url)
+        },
         selectedURL: selectedURL,
-        recoveredDocuments: recoveries
+        recoveredDocuments: recoveries,
+        presentation: presentation
       )
       if report.hasOmissions {
         let message =
@@ -2409,6 +4375,7 @@ final class EditorWorkspaceController: ObservableObject {
   }
 
   private func restoreWorkspaceSession() async {
+    guard let workspace = ideWorkspace else { return }
     let restoration = await sessionStore.load()
     guard !restoration.openRelativePaths.isEmpty || !restoration.recoveredDocuments.isEmpty else {
       return
@@ -2417,16 +4384,32 @@ final class EditorWorkspaceController: ObservableObject {
     let recoveryByPath = Dictionary(
       uniqueKeysWithValues: restoration.recoveredDocuments.map { ($0.relativePath, $0) }
     )
-    var restoredTabs: [String: EditorTab.ID] = [:]
+    var restoredTabsByPath: [String: EditorTab.ID] = [:]
+    var newlyRestoredTabs: [EditorTab] = []
     var recoveryWarnings: [String] = []
 
     for path in restoration.openRelativePaths {
       guard let url = await sessionStore.url(forRelativePath: path), isRegularFile(url) else {
         continue
       }
-      await openDocument(at: url)
-      guard let tab = tabs.first(where: { $0.url.standardizedFileURL == url }) else { continue }
-      restoredTabs[path] = tab.id
+
+      let tab: EditorTab
+      if let existing = tabs.first(where: { $0.url.standardizedFileURL == url }) {
+        tab = existing
+      } else {
+        do {
+          tab = try await makeEditorTab(
+            at: url,
+            using: workspace,
+            id: restoration.documentID(forRelativePath: path) ?? UUID()
+          )
+          newlyRestoredTabs.append(tab)
+        } catch {
+          recoveryWarnings.append("\(url.lastPathComponent): \(error.localizedDescription)")
+          continue
+        }
+      }
+      restoredTabsByPath[path] = tab.id
 
       guard let recovery = recoveryByPath[path] else { continue }
       if await sessionStore.diskStillMatches(recovery, at: url) {
@@ -2442,20 +4425,59 @@ final class EditorWorkspaceController: ObservableObject {
       }
     }
 
-    if let selected = restoration.selectedRelativePath, let id = restoredTabs[selected] {
+    if !newlyRestoredTabs.isEmpty {
+      tabs.append(contentsOf: newlyRestoredTabs)
+    }
+    if let selected = restoration.selectedRelativePath,
+      let id = restoredTabsByPath[selected]
+    {
       selectedTabID = id
+    } else if selectedTabID == nil {
+      selectedTabID = tabs.first?.id
+    }
+    if let presentation = restoration.presentation {
+      restorePresentationSnapshot?(presentation)
     }
     if !recoveryWarnings.isEmpty {
       fileOperationError = recoveryWarnings.joined(separator: "\n")
-      recoveryWarnings.forEach(appendDebugMessage)
+      for warning in recoveryWarnings {
+        appendDebugMessage(warning)
+      }
     }
     scheduleSessionPersistence()
   }
 
-  private func appendDebugMessage(_ message: String) {
+  private func appendDebugMessage(
+    _ message: String,
+    channel: EditorExecutionChannel = .system,
+    severity: EditorExecutionSeverity = .info,
+    sourceLocation: EditorExecutionSourceLocation? = nil
+  ) {
     logStore.log(.debug, category: "Editor", message: message)
     debugConsole.append(message)
     if debugConsole.count > 500 { debugConsole.removeFirst(debugConsole.count - 500) }
+    appendExecutionMessage(
+      message.hasSuffix("\n") ? message : message + "\n",
+      channel: channel,
+      severity: severity,
+      sourceLocation: sourceLocation
+    )
+  }
+
+  private func appendExecutionMessage(
+    _ text: String,
+    channel: EditorExecutionChannel,
+    severity: EditorExecutionSeverity = .info,
+    sourceLocation: EditorExecutionSourceLocation? = nil
+  ) {
+    buildController.executionEvents.append(
+      operationID: debugExecutionOperationID,
+      sessionID: debugExecutionSessionID,
+      channel: channel,
+      severity: severity,
+      text: text,
+      sourceLocation: sourceLocation
+    )
   }
 
   private func performFileOperation(
@@ -2640,7 +4662,7 @@ extension SourceWorkspaceError {
   }
 }
 
-private enum ShellArgumentParser {
+enum ShellArgumentParser {
   static func parse(_ source: String) -> [String] {
     var values: [String] = []
     var current = ""

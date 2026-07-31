@@ -33,8 +33,12 @@ final class EditorBuildController: ObservableObject {
   @Published private(set) var selectedPythonInterpreterURL: URL?
   @Published private(set) var detectedPythonEnvironment: EditorPythonEnvironment?
   @Published var selectedCommandID: String?
+  @Published private(set) var activeSourceSnapshot: EditorPreparedSourceSnapshot?
+  @Published private(set) var lastSuccessfulArtifact: EditorBuildArtifactSnapshot?
+  let executionEvents = EditorExecutionEventStore()
 
   var onDiagnostics: (@MainActor ([EditorBuildDiagnostic]) -> Void)?
+  var onBuildProjectChange: (@MainActor () -> Void)?
 
   private let runner = EditorBuildRunner()
   private let logStore = CalciteLogStore.shared
@@ -138,6 +142,7 @@ final class EditorBuildController: ObservableObject {
     selectedPythonInterpreterURL = EditorPythonInterpreterSelectionStore.load(
       workspaceURL: buildProjectURL)
     rediscover()
+    onBuildProjectChange?()
   }
 
   func useWorkspaceAsBuildProject() {
@@ -148,34 +153,69 @@ final class EditorBuildController: ObservableObject {
     selectedPythonInterpreterURL = EditorPythonInterpreterSelectionStore.load(
       workspaceURL: buildProjectURL)
     rediscover()
+    onBuildProjectChange?()
   }
 
   @discardableResult
-  func run(kind: EditorBuildTaskKind) async -> Bool {
+  func run(
+    kind: EditorBuildTaskKind,
+    sourceSnapshot: EditorPreparedSourceSnapshot? = nil
+  ) async -> Bool {
     guard let command = plan.command(for: kind) else {
       phase = .failed("No \(kind.rawValue) task was detected for this project.")
       return false
     }
-    return await run(command)
+    return await run(command, sourceSnapshot: sourceSnapshot)
   }
 
   @discardableResult
-  func runSingleFile(_ fileURL: URL, kind: EditorBuildTaskKind) async -> Bool {
-    guard let filePlan = EditorBuildDiscovery.singleFilePlan(fileURL: fileURL) else {
-      phase = .failed("No standalone runner is available for \(fileURL.lastPathComponent).")
+  func runSingleFile(
+    _ fileURL: URL,
+    kind: EditorBuildTaskKind,
+    sourceSnapshot: EditorPreparedSourceSnapshot? = nil,
+    runtimeArguments: [String] = [],
+    runtimeEnvironment: [String: String] = [:],
+    runtimeWorkingDirectory: URL? = nil
+  ) async -> Bool {
+    let resolution = EditorBuildDiscovery.singleFileResolution(
+      fileURL: fileURL,
+      workspaceURL: workspaceURL
+    )
+    switch resolution.capability {
+    case .toolMissing(let tool):
+      phase = .failed("The required single-file tool is unavailable: \(tool)")
+      return false
+    case .temporaryProjectRequired(let reason), .unsupported(let reason):
+      phase = .failed(reason)
+      return false
+    case .standalone, .projectContextRequired:
+      break
+    }
+    guard let filePlan = resolution.plan else {
+      phase = .failed(
+        "No single-file execution plan is available for \(fileURL.lastPathComponent).")
       return false
     }
-    if kind == .run, let build = filePlan.command(for: .build) {
-      guard await run(build, resettingOutput: true) else { return false }
-      guard let runCommand = filePlan.command(for: .run) else { return true }
-      return await run(runCommand, resettingOutput: false)
+    if kind == .run, var build = filePlan.command(for: .build) {
+      build.environment.merge(runtimeEnvironment) { _, configured in configured }
+      guard await run(build, resettingOutput: true, sourceSnapshot: sourceSnapshot) else {
+        return false
+      }
+      guard var runCommand = filePlan.command(for: .run) else { return true }
+      runCommand.arguments += runtimeArguments
+      runCommand.environment.merge(runtimeEnvironment) { _, configured in configured }
+      if let runtimeWorkingDirectory { runCommand.workingDirectory = runtimeWorkingDirectory }
+      return await run(runCommand, resettingOutput: false, sourceSnapshot: sourceSnapshot)
     }
-    guard let command = filePlan.command(for: kind) else {
+    guard var command = filePlan.command(for: kind) else {
       phase = .failed(
         "No standalone \(kind.rawValue) task is available for \(fileURL.lastPathComponent).")
       return false
     }
-    return await run(command, resettingOutput: true)
+    command.arguments += runtimeArguments
+    command.environment.merge(runtimeEnvironment) { _, configured in configured }
+    if let runtimeWorkingDirectory { command.workingDirectory = runtimeWorkingDirectory }
+    return await run(command, resettingOutput: true, sourceSnapshot: sourceSnapshot)
   }
 
   @discardableResult
@@ -188,12 +228,19 @@ final class EditorBuildController: ObservableObject {
   }
 
   @discardableResult
-  func run(_ command: EditorBuildCommand) async -> Bool {
-    await run(command, resettingOutput: true)
+  func run(
+    _ command: EditorBuildCommand,
+    sourceSnapshot: EditorPreparedSourceSnapshot? = nil
+  ) async -> Bool {
+    await run(command, resettingOutput: true, sourceSnapshot: sourceSnapshot)
   }
 
   @discardableResult
-  private func run(_ command: EditorBuildCommand, resettingOutput: Bool) async -> Bool {
+  private func run(
+    _ command: EditorBuildCommand,
+    resettingOutput: Bool,
+    sourceSnapshot: EditorPreparedSourceSnapshot?
+  ) async -> Bool {
     guard !phase.isRunning else { return false }
     runGeneration &+= 1
     let generation = runGeneration
@@ -211,7 +258,35 @@ final class EditorBuildController: ObservableObject {
     } else {
       append("\n")
     }
+    activeSourceSnapshot = sourceSnapshot
     phase = .running(command.title)
+    let processOwner: EditorProcessOwner =
+      switch command.kind {
+      case .run: .run(workspacePath: workspaceURL.path, generation: generation)
+      case .test: .test(workspacePath: workspaceURL.path, generation: generation)
+      case .build, .check, .clean, .custom:
+        .build(workspacePath: workspaceURL.path, generation: generation)
+      }
+    let processLease = await EditorProcessRegistry.shared.register(owner: processOwner) { [runner] in
+      await runner.cancel(gracePeriod: .milliseconds(250))
+    }
+    defer {
+      Task { await EditorProcessRegistry.shared.unregister(processLease) }
+    }
+    let executionOperationID = UUID()
+    executionEvents.activeOperationID = executionOperationID
+    let executionChannel: EditorExecutionChannel =
+      switch command.kind {
+      case .build, .check, .clean, .custom: .build
+      case .run: .run
+      case .test: .test
+      }
+    executionEvents.append(
+      operationID: executionOperationID,
+      channel: executionChannel,
+      severity: .notice,
+      text: "Starting \(command.title)\n"
+    )
     let operationID = logStore.beginOperation(
       command.title,
       category: "Build",
@@ -234,6 +309,14 @@ final class EditorBuildController: ObservableObject {
           metadata: ["command": command.executable])
       }
     }
+    append("Task: \(command.title)\n")
+    append("Project kind: \(plan.projectKind.rawValue)\n")
+    if let sourceSnapshot {
+      append("Execution input: \(sourceSnapshot.reason.rawValue)\n")
+      append("Workspace: \(sourceSnapshot.workspaceURL.path)\n")
+      append("Source files: \(sourceSnapshot.documentCount)\n")
+      append("Source fingerprint: \(sourceSnapshot.fingerprint)\n")
+    }
     append("$ cd \(command.workingDirectory.path)\n")
     let executable = URL(fileURLWithPath: command.executable).lastPathComponent
     append("$ \(([executable] + command.arguments).map(shellQuote).joined(separator: " "))\n")
@@ -253,14 +336,19 @@ final class EditorBuildController: ObservableObject {
       // Keep the selected project environment authoritative for build commands. The runner
       // also prepares GUI-safe PATH values, but must receive the activated venv first so
       // commands such as `python`, `pytest`, and project task wrappers resolve inside it.
-      let buildEnvironment = activated.environment.merging(command.environment) { _, value in value }
+      let buildEnvironment = activated.environment.merging(command.environment) { _, value in value
+      }
       let stream = try await runner.run(command, environment: buildEnvironment)
       var receivedFinishedEvent = false
       await withTaskCancellationHandler {
         for await event in stream {
           guard generation == runGeneration, !Task.isCancelled else { break }
           if case .finished = event { receivedFinishedEvent = true }
-          self.consume(event)
+          self.consume(
+            event,
+            operationID: executionOperationID,
+            channel: executionChannel
+          )
         }
       } onCancel: { [runner] in
         Task { await runner.cancel(gracePeriod: .milliseconds(200)) }
@@ -283,8 +371,59 @@ final class EditorBuildController: ObservableObject {
       append("\(error.localizedDescription)\n")
       flushPendingOutput()
     }
-    if case .succeeded = phase { return true }
+    if case .succeeded = phase {
+      if let sourceSnapshot {
+        let resolvedArtifact = await EditorArtifactResolver.resolve(
+          command: command,
+          projectKind: plan.projectKind,
+          buildProjectURL: buildProjectURL,
+          buildOutput: output,
+          sourceSnapshot: sourceSnapshot
+        )
+        lastSuccessfulArtifact = EditorBuildArtifactSnapshot(
+          id: UUID(),
+          commandID: command.id,
+          sourceSnapshotID: sourceSnapshot.id,
+          sourceFingerprint: sourceSnapshot.fingerprint,
+          executableURL: resolvedArtifact?.executableURL,
+          productName: resolvedArtifact?.productName,
+          architecture: resolvedArtifact?.architecture,
+          resolver: resolvedArtifact?.resolver,
+          completedAt: Date()
+        )
+        if let resolvedArtifact {
+          append("Resolved artifact: \(resolvedArtifact.executableURL.path)\n")
+          append("Artifact resolver: \(resolvedArtifact.resolver.rawValue)\n")
+        } else if command.kind == .build {
+          append("No executable artifact was resolved for this build.\n")
+        }
+        flushPendingOutput()
+      }
+      return true
+    }
     return false
+  }
+
+  func invalidateLastArtifact(_ reason: String) {
+    lastSuccessfulArtifact = nil
+    append("\nSource changed after execution preparation: \(reason)\n")
+    flushPendingOutput()
+    if case .succeeded = phase {
+      phase = .succeeded("Completed, but source changed")
+    }
+  }
+
+  func reportPreparationFailure(_ message: String) {
+    guard !phase.isRunning else { return }
+    outputFlushTask?.cancel()
+    outputFlushTask = nil
+    pendingOutput = ""
+    pendingOutputUTF8Count = 0
+    output = "Execution preparation failed\n\n\(message)\n"
+    outputUTF8Count = output.utf8.count
+    diagnostics = []
+    onDiagnostics?([])
+    phase = .failed(message)
   }
 
   func cancel() {
@@ -333,20 +472,31 @@ final class EditorBuildController: ObservableObject {
     EditorPythonEnvironmentResolver.detect(
       workspaceURL: buildProjectURL,
       explicitInterpreterURL: explicitInterpreterURL
-    ) ?? {
-      guard buildProjectURL.standardizedFileURL != workspaceURL.standardizedFileURL else {
-        return nil
-      }
-      return EditorPythonEnvironmentResolver.detect(
-        workspaceURL: workspaceURL,
-        explicitInterpreterURL: explicitInterpreterURL
-      )
-    }()
+    )
+      ?? {
+        guard buildProjectURL.standardizedFileURL != workspaceURL.standardizedFileURL else {
+          return nil
+        }
+        return EditorPythonEnvironmentResolver.detect(
+          workspaceURL: workspaceURL,
+          explicitInterpreterURL: explicitInterpreterURL
+        )
+      }()
   }
 
-  private func consume(_ event: EditorBuildEvent) {
+  private func consume(
+    _ event: EditorBuildEvent,
+    operationID: UUID,
+    channel: EditorExecutionChannel
+  ) {
     switch event {
     case .started:
+      executionEvents.append(
+        operationID: operationID,
+        channel: channel,
+        severity: .notice,
+        text: "Process started\n"
+      )
       if let python = detectedPythonEnvironment
         ?? EditorPythonEnvironmentResolver.detect(
           workspaceURL: buildProjectURL,
@@ -355,8 +505,14 @@ final class EditorBuildController: ObservableObject {
       {
         append("Python: \(python.rootURL.lastPathComponent)\n")
       }
-    case .output(let text, _):
+    case .output(let text, let standardError):
       append(text)
+      executionEvents.append(
+        operationID: operationID,
+        channel: channel,
+        severity: standardError ? .warning : .info,
+        text: text
+      )
     case .diagnostic(let diagnostic):
       let duplicate = diagnostics.contains {
         $0.url == diagnostic.url && $0.line == diagnostic.line && $0.column == diagnostic.column
@@ -365,10 +521,27 @@ final class EditorBuildController: ObservableObject {
             == diagnostic.message.trimmingCharacters(in: .whitespacesAndNewlines)
       }
       if !duplicate {
+        executionEvents.append(
+          operationID: operationID,
+          channel: channel,
+          severity: diagnostic.severity == .error ? .error : .warning,
+          text: diagnostic.message + "\n",
+          sourceLocation: EditorExecutionSourceLocation(
+            url: diagnostic.url, line: diagnostic.line, column: diagnostic.column
+          )
+        )
         diagnostics.append(diagnostic)
         onDiagnostics?(diagnostics)
       }
     case .finished(let result):
+      executionEvents.append(
+        operationID: operationID,
+        channel: channel,
+        severity: result.succeeded ? .notice : (result.wasCancelled ? .warning : .error),
+        text: result.wasCancelled
+          ? "Cancelled\n"
+          : "Exited with status \(result.exitCode)\n"
+      )
       cancellationTask?.cancel()
       cancellationTask = nil
       flushPendingOutput()

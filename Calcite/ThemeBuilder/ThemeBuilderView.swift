@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
+import EditorCore
 
 struct ThemeBuilderView: View {
   @ObservedObject var controller: EditorWorkspaceController
@@ -9,6 +11,19 @@ struct ThemeBuilderView: View {
   var body: some View {
     VStack(spacing: 0) {
       toolbar
+      if let importMessage = session.importMessage, !importMessage.isEmpty {
+        HStack(spacing: 8) {
+          Image(systemName: importMessage.hasPrefix("Could not") ? "exclamationmark.triangle" : "info.circle")
+          Text(importMessage)
+            .font(.caption)
+            .lineLimit(2)
+            .textSelection(.enabled)
+          Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(controller.profile.workbench.panelBackground.color)
+      }
       Divider()
       HSplitView {
         tokenBrowser
@@ -22,6 +37,18 @@ struct ThemeBuilderView: View {
     .background(controller.profile.workbench.windowBackground.color)
     .onAppear { session.beginEditing() }
     .onDisappear { session.endEditing() }
+    .confirmationDialog(
+      "Choose Theme Variant",
+      isPresented: pendingThemeCandidatesBinding,
+      titleVisibility: .visible
+    ) {
+      ForEach(session.pendingThemeCandidates) { candidate in
+        Button(candidate.name) { session.importPendingThemeCandidate(candidate) }
+      }
+      Button("Cancel", role: .cancel) { session.cancelPendingThemeImport() }
+    } message: {
+      Text("This source contains multiple themes. Choose the variant to import.")
+    }
   }
 
   private var toolbar: some View {
@@ -41,6 +68,21 @@ struct ThemeBuilderView: View {
       Menu("Copy Theme", systemImage: "square.on.square") {
         Button("Copy Light to Dark") { session.copyTheme(from: .light, to: .dark) }
         Button("Copy Dark to Light") { session.copyTheme(from: .dark, to: .light) }
+      }
+
+      Menu("Theme", systemImage: "square.and.arrow.down") {
+        Button("Import Theme…", systemImage: "square.and.arrow.down") { importTheme() }
+        Button("Reimport Current Theme", systemImage: "arrow.clockwise") {
+          session.reimportTheme()
+        }
+        .disabled(!session.canReimportTheme)
+        Divider()
+        Button("Derive Workbench Palette", systemImage: "wand.and.stars") {
+          session.deriveWorkbenchPalette()
+        }
+        Button("Repair Readability", systemImage: "circle.lefthalf.filled") {
+          session.repairReadableContrast()
+        }
       }
 
       Spacer()
@@ -169,6 +211,25 @@ struct ThemeBuilderView: View {
       set: { session.activateThemeSlot($0) }
     )
   }
+
+  private var pendingThemeCandidatesBinding: Binding<Bool> {
+    Binding(
+      get: { !session.pendingThemeCandidates.isEmpty },
+      set: { if !$0 { session.cancelPendingThemeImport() } }
+    )
+  }
+
+  private func importTheme() {
+    let panel = NSOpenPanel()
+    panel.title = "Import Editor Theme, Folder, VSIX, or ZIP"
+    panel.prompt = "Import"
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = true
+    panel.allowedContentTypes = [.json, .xmlPropertyList, .plainText, .data, .directory, .zip]
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    session.importTheme(from: url)
+  }
 }
 
 private struct ThemeTokenEditor: View {
@@ -214,6 +275,46 @@ private struct ThemeTokenEditor: View {
         hslSlider("Lightness", value: color.hsl.lightness * 100, range: 0...100) { lightness in
           color.settingHSL(lightness: lightness / 100)
         }
+      }
+
+      Section("Typography & Surface") {
+        TextField("Font Family", text: fontFamilyBinding)
+        LabeledContent("Font Size") {
+          HStack(spacing: 8) {
+            Slider(value: fontSizeBinding, in: 8...36, step: 0.5)
+            Text(controller.profile.font.size.formatted(.number.precision(.fractionLength(1))))
+              .font(.caption.monospacedDigit())
+              .frame(width: 38, alignment: .trailing)
+          }
+        }
+        LabeledContent("Line Spacing") {
+          HStack(spacing: 8) {
+            Slider(value: lineSpacingBinding, in: 0...16, step: 0.5)
+            Text(controller.profile.font.lineSpacing.formatted(.number.precision(.fractionLength(1))))
+              .font(.caption.monospacedDigit())
+              .frame(width: 38, alignment: .trailing)
+          }
+        }
+        LabeledContent("Editor Opacity") {
+          HStack(spacing: 8) {
+            Slider(value: backgroundOpacityBinding, in: 0.2...1, step: 0.01)
+            Text(controller.profile.surface.backgroundOpacity.formatted(.percent.precision(.fractionLength(0))))
+              .font(.caption.monospacedDigit())
+              .frame(width: 38, alignment: .trailing)
+          }
+        }
+      }
+
+      Section("Palette Tools") {
+        Button("Derive Workbench from Editor Colors", systemImage: "wand.and.stars") {
+          session.deriveWorkbenchPalette()
+        }
+        Button("Repair Low-Contrast Text", systemImage: "circle.lefthalf.filled") {
+          session.repairReadableContrast()
+        }
+        Text("Palette tools are undoable and keep the active light or dark slot isolated.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
 
       Section("Comparison") {
@@ -282,6 +383,34 @@ private struct ThemeTokenEditor: View {
         in: range
       )
     }
+  }
+
+  private var fontFamilyBinding: Binding<String> {
+    Binding(
+      get: { controller.profile.font.family },
+      set: { value in session.updateActiveProfile { $0.font.family = value } }
+    )
+  }
+
+  private var fontSizeBinding: Binding<Double> {
+    Binding(
+      get: { controller.profile.font.size },
+      set: { value in session.updateActiveProfile { $0.font.size = value } }
+    )
+  }
+
+  private var lineSpacingBinding: Binding<Double> {
+    Binding(
+      get: { controller.profile.font.lineSpacing },
+      set: { value in session.updateActiveProfile { $0.font.lineSpacing = value } }
+    )
+  }
+
+  private var backgroundOpacityBinding: Binding<Double> {
+    Binding(
+      get: { controller.profile.surface.backgroundOpacity },
+      set: { value in session.updateActiveProfile { $0.surface.backgroundOpacity = value } }
+    )
   }
 
   private var colorBinding: Binding<Color> {

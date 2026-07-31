@@ -82,11 +82,13 @@ enum EditorVimCursorStyle: String, CaseIterable, Codable, Identifiable, Sendable
     }
   }
 
-  /// `nil` deliberately leaves the editor-wide cursor untouched; non-nil values
-  /// are the Vim-only override.
-  var overrideStyle: EditorCursorStyle? {
+  /// Resolves a Vim cursor setting to a concrete renderer shape. `default`
+  /// means the conventional shape for the current Vim mode, not the editor-wide
+  /// GUI caret. This prevents a newly created or migrated profile from silently
+  /// collapsing Normal and Replace modes back to the line caret.
+  func resolvedStyle(default fallback: EditorCursorStyle) -> EditorCursorStyle {
     switch self {
-    case .default: nil
+    case .default: fallback
     case .line: .line
     case .block: .block
     case .underline: .underline
@@ -269,10 +271,11 @@ struct EditorBehaviorProfile: Codable, Equatable, Sendable {
   var showLineNumbers: Bool
   var showDiagnostics: Bool
   var showInlineDiagnosticMessages: Bool
+  var showGeometryDiagnostics: Bool
 
   private enum CodingKeys: String, CodingKey {
     case tabWidth, insertSpaces, suggestionDelay, showLineNumbers, showDiagnostics
-    case showInlineDiagnosticMessages
+    case showInlineDiagnosticMessages, showGeometryDiagnostics
   }
 
   init(
@@ -281,7 +284,8 @@ struct EditorBehaviorProfile: Codable, Equatable, Sendable {
     suggestionDelay: Double,
     showLineNumbers: Bool,
     showDiagnostics: Bool,
-    showInlineDiagnosticMessages: Bool = true
+    showInlineDiagnosticMessages: Bool = true,
+    showGeometryDiagnostics: Bool = false
   ) {
     self.tabWidth = tabWidth
     self.insertSpaces = insertSpaces
@@ -289,6 +293,7 @@ struct EditorBehaviorProfile: Codable, Equatable, Sendable {
     self.showLineNumbers = showLineNumbers
     self.showDiagnostics = showDiagnostics
     self.showInlineDiagnosticMessages = showInlineDiagnosticMessages
+    self.showGeometryDiagnostics = showGeometryDiagnostics
   }
 
   init(from decoder: Decoder) throws {
@@ -303,6 +308,8 @@ struct EditorBehaviorProfile: Codable, Equatable, Sendable {
         Bool.self,
         forKey: .showInlineDiagnosticMessages
       ) ?? true
+    showGeometryDiagnostics =
+      try container.decodeIfPresent(Bool.self, forKey: .showGeometryDiagnostics) ?? false
   }
 }
 
@@ -453,9 +460,9 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     keyboardPolicy: EditorVimKeyboardPolicy = .automatic,
     languageMap: String = "",
     mappingTimeoutMilliseconds: Int = 800,
-    normalCursorStyle: EditorVimCursorStyle = .default,
-    insertCursorStyle: EditorVimCursorStyle = .default,
-    replaceCursorStyle: EditorVimCursorStyle = .default,
+    normalCursorStyle: EditorVimCursorStyle = .block,
+    insertCursorStyle: EditorVimCursorStyle = .line,
+    replaceCursorStyle: EditorVimCursorStyle = .underline,
     mappings: [EditorVimMappingProfile]
   ) {
     self.enabled = enabled
@@ -576,6 +583,9 @@ struct EditorVimProfile: Codable, Equatable, Sendable {
     startInInsertMode: false,
     leader: " ",
     relativeLineNumbers: false,
+    normalCursorStyle: .block,
+    insertCursorStyle: .line,
+    replaceCursorStyle: .underline,
     mappings: [
       .init(sequence: "<leader>w", command: ":w"),
       .init(sequence: "<leader>b", command: "<host:build>"),
@@ -784,6 +794,13 @@ struct EditorCustomProfile: Codable, Equatable, Sendable {
   }()
 }
 
+private func firstImportedColor(_ theme: EditorTheme, keys: [String]) -> EditorColor? {
+  for key in keys {
+    if let color = theme[color: key] { return color }
+  }
+  return nil
+}
+
 extension EditorCustomProfile {
   var detectedThemeSlot: EditorThemeSlot {
     surface.background.relativeLuminance >= 0.45 ? .light : .dark
@@ -826,13 +843,164 @@ extension EditorCustomProfile {
     let newBaseline = imported.visualSnapshot
 
     if let previousBaseline {
-      if current.surface != previousBaseline.surface { imported.surface = current.surface }
-      if current.highlights != previousBaseline.highlights {
-        imported.highlights = current.highlights
+      func preserve<Value: Equatable>(
+        _ currentValue: Value,
+        baseline baselineValue: Value,
+        apply: (Value) -> Void
+      ) {
+        if currentValue != baselineValue { apply(currentValue) }
       }
-      if current.syntax != previousBaseline.syntax { imported.syntax = current.syntax }
-      if current.workbench != previousBaseline.workbench { imported.workbench = current.workbench }
-      if current.terminal != previousBaseline.terminal { imported.terminal = current.terminal }
+
+      preserve(current.surface.foreground, baseline: previousBaseline.surface.foreground) {
+        imported.surface.foreground = $0
+      }
+      preserve(current.surface.background, baseline: previousBaseline.surface.background) {
+        imported.surface.background = $0
+      }
+      preserve(
+        current.surface.backgroundOpacity, baseline: previousBaseline.surface.backgroundOpacity
+      ) {
+        imported.surface.backgroundOpacity = $0
+      }
+      preserve(current.surface.cursor, baseline: previousBaseline.surface.cursor) {
+        imported.surface.cursor = $0
+      }
+      preserve(current.surface.cursorStyle, baseline: previousBaseline.surface.cursorStyle) {
+        imported.surface.cursorStyle = $0
+      }
+      preserve(current.surface.selection, baseline: previousBaseline.surface.selection) {
+        imported.surface.selection = $0
+      }
+
+      preserve(current.highlights.currentLine, baseline: previousBaseline.highlights.currentLine) {
+        imported.highlights.currentLine = $0
+      }
+      preserve(current.highlights.searchResult, baseline: previousBaseline.highlights.searchResult)
+      {
+        imported.highlights.searchResult = $0
+      }
+      preserve(current.highlights.error, baseline: previousBaseline.highlights.error) {
+        imported.highlights.error = $0
+      }
+      preserve(current.highlights.warning, baseline: previousBaseline.highlights.warning) {
+        imported.highlights.warning = $0
+      }
+      preserve(current.highlights.information, baseline: previousBaseline.highlights.information) {
+        imported.highlights.information = $0
+      }
+      preserve(current.highlights.hint, baseline: previousBaseline.highlights.hint) {
+        imported.highlights.hint = $0
+      }
+
+      preserve(current.syntax.literals.keyword, baseline: previousBaseline.syntax.literals.keyword)
+      {
+        imported.syntax.literals.keyword = $0
+      }
+      preserve(current.syntax.literals.string, baseline: previousBaseline.syntax.literals.string) {
+        imported.syntax.literals.string = $0
+      }
+      preserve(current.syntax.literals.number, baseline: previousBaseline.syntax.literals.number) {
+        imported.syntax.literals.number = $0
+      }
+      preserve(current.syntax.literals.comment, baseline: previousBaseline.syntax.literals.comment)
+      {
+        imported.syntax.literals.comment = $0
+      }
+      preserve(
+        current.syntax.literals.directive, baseline: previousBaseline.syntax.literals.directive
+      ) {
+        imported.syntax.literals.directive = $0
+      }
+      preserve(current.syntax.symbols.type, baseline: previousBaseline.syntax.symbols.type) {
+        imported.syntax.symbols.type = $0
+      }
+      preserve(current.syntax.symbols.function, baseline: previousBaseline.syntax.symbols.function)
+      {
+        imported.syntax.symbols.function = $0
+      }
+      preserve(current.syntax.symbols.variable, baseline: previousBaseline.syntax.symbols.variable)
+      {
+        imported.syntax.symbols.variable = $0
+      }
+      preserve(current.syntax.symbols.property, baseline: previousBaseline.syntax.symbols.property)
+      {
+        imported.syntax.symbols.property = $0
+      }
+      preserve(current.syntax.symbols.operator, baseline: previousBaseline.syntax.symbols.operator)
+      {
+        imported.syntax.symbols.operator = $0
+      }
+      preserve(
+        current.syntax.symbols.punctuation, baseline: previousBaseline.syntax.symbols.punctuation
+      ) {
+        imported.syntax.symbols.punctuation = $0
+      }
+
+      preserve(current.workbench.foreground, baseline: previousBaseline.workbench.foreground) {
+        imported.workbench.foreground = $0
+      }
+      preserve(
+        current.workbench.mutedForeground, baseline: previousBaseline.workbench.mutedForeground
+      ) {
+        imported.workbench.mutedForeground = $0
+      }
+      preserve(
+        current.workbench.windowBackground, baseline: previousBaseline.workbench.windowBackground
+      ) {
+        imported.workbench.windowBackground = $0
+      }
+      preserve(
+        current.workbench.sidebarBackground, baseline: previousBaseline.workbench.sidebarBackground
+      ) {
+        imported.workbench.sidebarBackground = $0
+      }
+      preserve(
+        current.workbench.panelBackground, baseline: previousBaseline.workbench.panelBackground
+      ) {
+        imported.workbench.panelBackground = $0
+      }
+      preserve(
+        current.workbench.toolbarBackground, baseline: previousBaseline.workbench.toolbarBackground
+      ) {
+        imported.workbench.toolbarBackground = $0
+      }
+      preserve(
+        current.workbench.activeTabBackground,
+        baseline: previousBaseline.workbench.activeTabBackground
+      ) {
+        imported.workbench.activeTabBackground = $0
+      }
+      preserve(
+        current.workbench.inactiveTabBackground,
+        baseline: previousBaseline.workbench.inactiveTabBackground
+      ) {
+        imported.workbench.inactiveTabBackground = $0
+      }
+      preserve(
+        current.workbench.inputBackground, baseline: previousBaseline.workbench.inputBackground
+      ) {
+        imported.workbench.inputBackground = $0
+      }
+      preserve(current.workbench.border, baseline: previousBaseline.workbench.border) {
+        imported.workbench.border = $0
+      }
+      preserve(current.workbench.accent, baseline: previousBaseline.workbench.accent) {
+        imported.workbench.accent = $0
+      }
+
+      preserve(current.terminal.foreground, baseline: previousBaseline.terminal.foreground) {
+        imported.terminal.foreground = $0
+      }
+      preserve(current.terminal.background, baseline: previousBaseline.terminal.background) {
+        imported.terminal.background = $0
+      }
+      let count = min(current.terminal.ansi.count, previousBaseline.terminal.ansi.count)
+      for index in 0..<count
+      where current.terminal.ansi[index] != previousBaseline.terminal.ansi[index] {
+        if imported.terminal.ansi.indices.contains(index) {
+          imported.terminal.ansi[index] = current.terminal.ansi[index]
+        }
+      }
     }
 
     var metadata = EditorThemeMetadataProfile(
@@ -874,9 +1042,33 @@ extension EditorCustomProfile {
     surface.foreground = rgba(theme.editorForeground) ?? surface.foreground
     surface.background = rgba(theme.editorBackground) ?? surface.background
     surface.backgroundOpacity = 1
-    let cursor = rgba(theme[color: "editorCursor.foreground"])
-    let selection = rgba(theme[color: "editor.selectionBackground"])
+    let cursor =
+      rgba(theme[color: "editorCursor.foreground"])
+      ?? rgba(theme[color: "editorCursor.background"])
+    let selection =
+      rgba(theme[color: "editor.selectionBackground"])
+      ?? rgba(theme[color: "editor.inactiveSelectionBackground"])
     let currentLine = rgba(theme[color: "editor.lineHighlightBackground"])
+    let searchResult = firstImportedColor(
+      theme,
+      keys: ["editor.findMatchBackground", "editor.findMatchHighlightBackground"]
+    ).flatMap(rgba)
+    let error = firstImportedColor(
+      theme,
+      keys: ["editorError.foreground", "errorForeground", "editorOverviewRuler.errorForeground"]
+    ).flatMap(rgba)
+    let warning = firstImportedColor(
+      theme,
+      keys: ["editorWarning.foreground", "editorOverviewRuler.warningForeground"]
+    ).flatMap(rgba)
+    let information = firstImportedColor(
+      theme,
+      keys: ["editorInfo.foreground", "editorOverviewRuler.infoForeground"]
+    ).flatMap(rgba)
+    let hint = firstImportedColor(
+      theme,
+      keys: ["editorHint.foreground", "editorOverviewRuler.infoForeground"]
+    ).flatMap(rgba)
 
     syntax.literals.keyword = syntaxColor("keyword") ?? syntax.literals.keyword
     syntax.literals.string = syntaxColor("string") ?? syntax.literals.string
@@ -900,6 +1092,11 @@ extension EditorCustomProfile {
     assign(cursor, to: \.surface.cursor)
     assign(selection, to: \.surface.selection)
     assign(currentLine, to: \.highlights.currentLine)
+    assign(searchResult, to: \.highlights.searchResult)
+    assign(error, to: \.highlights.error)
+    assign(warning, to: \.highlights.warning)
+    assign(information, to: \.highlights.information)
+    assign(hint, to: \.highlights.hint)
 
     func firstColor(_ keys: [String]) -> EditorRGBAColor? {
       for key in keys {

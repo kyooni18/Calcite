@@ -44,11 +44,24 @@ public enum VimOperator: String, Hashable, Sendable, Codable, CaseIterable {
   case delete, change, yank, indent, outdent, uppercase, lowercase, swapCase, format, rot13
 }
 
+public enum VimWindowDirection: String, Hashable, Sendable, Codable {
+  case left, right, up, down
+}
+
+public enum VimWindowCycleDirection: String, Hashable, Sendable, Codable {
+  case next, previous
+}
+
 public enum VimHostRequest: Hashable, Sendable {
   case write, quit, writeAndQuit
   case openFile(String)
   case switchBuffer(Int)
   case split(horizontal: Bool)
+  case focusWindow(direction: VimWindowDirection, count: Int)
+  case cycleWindow(direction: VimWindowCycleDirection, count: Int)
+  case focusPreviousWindow
+  case closeOtherWindows
+  case newWindow(horizontal: Bool)
   case closeWindow
   case nextTab, previousTab, newTab, closeTab
   case scroll(lines: Int)
@@ -521,7 +534,8 @@ public final class VimEngine: @unchecked Sendable {
       currentBuffer: bufferID,
       alternateBuffer: nil,
       tabPageID: nil,
-      views: [bufferID: viewID]
+      views: [bufferID: viewID],
+      viewMRU: [bufferID]
     )
     session.views[viewID] = VimEngineViewStateStorage(
       id: viewID,

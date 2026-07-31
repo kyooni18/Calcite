@@ -45,7 +45,9 @@ enum EditorCustomBuildTaskStore {
             kind: task.kind ?? .custom,
             executable: invocation.executable,
             arguments: invocation.arguments,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            environment: task.environment ?? [:],
+            artifactPath: task.artifactPath
           )
         )
       }
@@ -95,7 +97,9 @@ enum EditorCustomBuildTaskStore {
             "kind": "check",
             "executable": "echo",
             "arguments": ["Configure this task in .calcite/tasks.json"],
-            "workingDirectory": "."
+            "workingDirectory": ".",
+            "environment": {},
+            "artifactPath": null
           }
         ]
       }
@@ -132,6 +136,8 @@ enum EditorCustomBuildTaskStore {
     var executable: String?
     var arguments: [String]?
     var workingDirectory: String?
+    var environment: [String: String]?
+    var artifactPath: String?
   }
 
   private static func resolvedInvocation(

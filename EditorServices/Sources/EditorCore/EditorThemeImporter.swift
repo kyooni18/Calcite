@@ -4,7 +4,10 @@ public enum EditorThemeFormat: String, Hashable, Codable, Sendable, CaseIterable
   case automatic
   case editorServicesJSON
   case vsCodeJSON
+  case textMateJSON
   case textMatePropertyList
+  case sublimeColorScheme
+  case xcodeColorTheme
   case neovimJSON
   case vimColorScheme
   case neovimLua
@@ -97,7 +100,7 @@ extension EditorThemeImportError: LocalizedError {
   }
 }
 
-/// Imports VS Code, TextMate, Vim, and Neovim themes into ``EditorTheme``.
+/// Imports VS Code, TextMate, Sublime Text, Xcode, Vim, and Neovim themes into ``EditorTheme``.
 ///
 /// Lua files are parsed as data and are never executed. Literal
 /// `nvim_set_hl` calls and literal `vim.cmd` highlight blocks are supported;
@@ -299,7 +302,10 @@ public enum EditorThemeImporter {
           continue
         }
         let ext = item.pathExtension.lowercased()
-        guard ["json", "jsonc", "vim", "lua", "tmtheme", "plist"].contains(ext) else {
+        guard [
+          "json", "jsonc", "vim", "lua", "tmtheme", "plist",
+          "sublime-color-scheme", "sublime-theme", "xccolortheme"
+        ].contains(ext) else {
           continue
         }
         let lowerPath = item.path.lowercased()
@@ -366,7 +372,8 @@ public enum EditorThemeImporter {
     containerURL: URL
   ) -> [EditorThemeImportCandidate] {
     guard let data = try? Data(contentsOf: url),
-      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let normalized = try? normalizedJSONData(data),
+      let root = try? JSONSerialization.jsonObject(with: normalized) as? [String: Any],
       let contributes = root["contributes"] as? [String: Any],
       let themes = contributes["themes"] as? [[String: Any]]
     else { return [] }
@@ -397,7 +404,7 @@ public enum EditorThemeImporter {
     if lower.contains("theme") { score += 25 }
     if lower.contains("palette") { score += 10 }
     switch url.pathExtension.lowercased() {
-    case "json", "jsonc", "tmtheme": score += 20
+    case "json", "jsonc", "tmtheme", "sublime-color-scheme", "xccolortheme": score += 20
     case "vim": score += 15
     case "lua": score += 10
     default: break
@@ -435,40 +442,60 @@ public enum EditorThemeImporter {
     }
 
     var accumulated: EditorThemeImportResult?
+    var referenceDiagnostics: [EditorThemeImportDiagnostic] = []
     if let includePath = object["include"] as? String, !includePath.isEmpty {
       let includeURL = resolve(includePath, relativeTo: canonicalURL)
-      accumulated = try load(
-        from: includeURL,
-        format: .automatic,
-        depth: depth + 1,
-        activeURLs: &activeURLs
-      )
+      do {
+        accumulated = try load(
+          from: includeURL,
+          format: .automatic,
+          depth: depth + 1,
+          activeURLs: &activeURLs
+        )
+      } catch {
+        referenceDiagnostics.append(
+          .warning(
+            "Could not load included theme \(includePath): \(error.localizedDescription). Imported the current file without it.",
+            source: canonicalURL
+          )
+        )
+      }
     }
 
     if let tokenPath = object["tokenColors"] as? String, !tokenPath.isEmpty {
       let tokenURL = resolve(tokenPath, relativeTo: canonicalURL)
-      let tokenResult = try load(
-        from: tokenURL,
-        format: .automatic,
-        depth: depth + 1,
-        activeURLs: &activeURLs
-      )
-      if let current = accumulated {
-        accumulated = EditorThemeImportResult(
-          theme: current.theme.overlaying(tokenResult.theme),
-          diagnostics: current.diagnostics + tokenResult.diagnostics
+      do {
+        let tokenResult = try load(
+          from: tokenURL,
+          format: .automatic,
+          depth: depth + 1,
+          activeURLs: &activeURLs
         )
-      } else {
-        accumulated = tokenResult
+        if let current = accumulated {
+          accumulated = EditorThemeImportResult(
+            theme: current.theme.overlaying(tokenResult.theme),
+            diagnostics: current.diagnostics + tokenResult.diagnostics
+          )
+        } else {
+          accumulated = tokenResult
+        }
+      } catch {
+        referenceDiagnostics.append(
+          .warning(
+            "Could not load external token colors \(tokenPath): \(error.localizedDescription). Imported the remaining theme colors.",
+            source: canonicalURL
+          )
+        )
       }
     }
 
-    let current = try parse(
+    var current = try parse(
       data,
       format: .vsCodeJSON,
       sourceURL: canonicalURL,
       externalReferencesResolved: true
     )
+    current.diagnostics.insert(contentsOf: referenceDiagnostics, at: 0)
     guard let accumulated else { return current }
     return EditorThemeImportResult(
       theme: accumulated.theme.overlaying(current.theme),
@@ -493,8 +520,14 @@ public enum EditorThemeImporter {
         sourceURL: sourceURL,
         externalReferencesResolved: externalReferencesResolved
       )
+    case .textMateJSON:
+      return try parseTextMateJSON(data, sourceURL: sourceURL)
     case .textMatePropertyList:
       return try parseTextMatePropertyList(data, sourceURL: sourceURL)
+    case .sublimeColorScheme:
+      return try parseSublimeColorScheme(data, sourceURL: sourceURL)
+    case .xcodeColorTheme:
+      return try parseXcodeColorTheme(data, sourceURL: sourceURL)
     case .neovimJSON:
       return try parseNeovimJSON(data, sourceURL: sourceURL)
     case .vimColorScheme:
@@ -515,6 +548,8 @@ public enum EditorThemeImporter {
     case "vim": return .vimColorScheme
     case "lua": return .neovimLua
     case "tmtheme", "plist": return .textMatePropertyList
+    case "sublime-color-scheme", "sublime-theme": return .sublimeColorScheme
+    case "xccolortheme": return .xcodeColorTheme
     default: break
     }
 
@@ -536,6 +571,13 @@ public enum EditorThemeImporter {
            object["source"] != nil || object["appearance"] != nil {
           return .editorServicesJSON
         }
+        if object["variables"] != nil,
+           object["globals"] != nil || object["rules"] is [Any] {
+          return .sublimeColorScheme
+        }
+        if object["settings"] is [Any] {
+          return .textMateJSON
+        }
         if object["tokenColors"] != nil || object["semanticTokenColors"] != nil || object["include"] != nil {
           return .vsCodeJSON
         }
@@ -546,11 +588,23 @@ public enum EditorThemeImporter {
         if object["highlights"] != nil || object["groups"] != nil || object["highlightGroups"] != nil {
           return .neovimJSON
         }
-        if let colors = object["colors"] as? [String: Any],
-           colors.keys.contains(where: { $0.contains(".") }) {
+        if let colors = object["colors"] as? [String: Any], !colors.isEmpty {
           return .vsCodeJSON
         }
         if looksLikeNeovimGroupObject(object) { return .neovimJSON }
+      } else if let array = root as? [Any] {
+        if array.contains(where: { item in
+          guard let object = item as? [String: Any] else { return false }
+          return object["scope"] != nil || object["settings"] != nil
+        }) {
+          return .textMateJSON
+        }
+        if array.contains(where: { item in
+          guard let object = item as? [String: Any] else { return false }
+          return object["name"] != nil || object["group"] != nil
+        }) {
+          return .neovimJSON
+        }
       }
       throw EditorThemeImportError.unsupportedFormat
     }
@@ -690,6 +744,280 @@ public enum EditorThemeImporter {
     )
   }
 
+  private static func parseTextMateJSON(
+    _ data: Data,
+    sourceURL: URL?
+  ) throws -> EditorThemeImportResult {
+    let root = try jsonObject(from: data)
+    let object: [String: Any]
+    if let value = root as? [String: Any] {
+      object = value
+    } else if let settings = root as? [Any] {
+      object = ["settings": settings]
+    } else {
+      throw EditorThemeImportError.invalidRoot("TextMate JSON themes require an object or a settings array")
+    }
+    guard let settingsArray = object["settings"] as? [Any] else {
+      throw EditorThemeImportError.invalidRoot("TextMate JSON themes require a settings array")
+    }
+    return parseTextMateSettings(
+      object: object,
+      settingsArray: settingsArray,
+      sourceURL: sourceURL,
+      formatName: "textmate-json"
+    )
+  }
+
+  private static func parseSublimeColorScheme(
+    _ data: Data,
+    sourceURL: URL?
+  ) throws -> EditorThemeImportResult {
+    let root = try jsonObject(from: data)
+    guard let object = root as? [String: Any] else {
+      throw EditorThemeImportError.invalidRoot("Sublime color schemes require a JSON object")
+    }
+
+    let variables = (object["variables"] as? [String: Any]) ?? [:]
+    var diagnostics: [EditorThemeImportDiagnostic] = []
+
+    func resolved(_ value: Any?) -> Any? {
+      guard let value else { return nil }
+      guard let string = value as? String else { return value }
+      var current = string.trimmingCharacters(in: .whitespacesAndNewlines)
+      var visited = Set<String>()
+      for _ in 0..<16 {
+        guard current.hasPrefix("var("), current.hasSuffix(")") else { return current }
+        let name = String(current.dropFirst(4).dropLast())
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard visited.insert(name).inserted, let next = variables[name] else { return nil }
+        if let nextString = next as? String { current = nextString }
+        else { return next }
+      }
+      return nil
+    }
+
+    func color(_ value: Any?) -> EditorColor? {
+      guard let value = resolved(value) else { return nil }
+      return parseColor(value)
+    }
+
+    var colors: [String: EditorColor] = [:]
+    if let globals = object["globals"] as? [String: Any] {
+      let mappings: [(String, String)] = [
+        ("foreground", "editor.foreground"),
+        ("background", "editor.background"),
+        ("caret", "editorCursor.foreground"),
+        ("line_highlight", "editor.lineHighlightBackground"),
+        ("selection", "editor.selectionBackground"),
+        ("selection_border", "editor.selectionHighlightBorder"),
+        ("inactive_selection", "editor.inactiveSelectionBackground"),
+        ("find_highlight", "editor.findMatchBackground"),
+        ("find_highlight_foreground", "editor.findMatchForeground"),
+        ("gutter", "editorGutter.background"),
+        ("gutter_foreground", "editorLineNumber.foreground"),
+        ("guide", "editorIndentGuide.background1"),
+        ("active_guide", "editorIndentGuide.activeBackground1"),
+        ("stack_guide", "editorBracketPairGuide.background1"),
+      ]
+      for (sourceKey, targetKey) in mappings {
+        if let parsed = color(globals[sourceKey]) { colors[targetKey] = parsed }
+      }
+    }
+
+    var rules: [EditorThemeRule] = []
+    if let rawRules = object["rules"] as? [Any] {
+      for (index, rawRule) in rawRules.enumerated() {
+        guard let rule = rawRule as? [String: Any] else {
+          diagnostics.append(.warning("Ignored malformed Sublime rule at index \(index)", source: sourceURL))
+          continue
+        }
+        let scopes = parseScopes(rule["scope"])
+        guard !scopes.isEmpty else { continue }
+        var style = EditorTextStyle()
+        if let parsed = color(rule["foreground"]) { style.foreground = parsed }
+        if let parsed = color(rule["background"]) { style.background = parsed }
+        if let fontStyle = rule["font_style"] as? String {
+          style.fontStyles = parseFontStyles(fontStyle)
+        }
+        guard !style.isEmpty else { continue }
+        var selectors: [EditorThemeSelector] = []
+        for scope in scopes {
+          appendUnique(.textMate(scope), to: &selectors)
+          for capture in EditorThemeScopeMapping.syntaxCaptures(forTextMateScope: scope) {
+            appendUnique(.syntax(capture), to: &selectors)
+          }
+        }
+        rules.append(
+          EditorThemeRule(
+            name: nonEmptyString(rule["name"]),
+            selectors: selectors,
+            style: style
+          )
+        )
+      }
+    }
+
+    let name = nonEmptyString(object["name"])
+      ?? sourceURL?.deletingPathExtension().lastPathComponent
+      ?? "Imported Sublime Theme"
+    return EditorThemeImportResult(
+      theme: EditorTheme(
+        name: name,
+        appearance: inferAppearance(from: colors["editor.background"]),
+        source: .vsCode,
+        colors: colors,
+        rules: rules,
+        metadata: ["format": "sublime-color-scheme"]
+      ),
+      diagnostics: diagnostics
+    )
+  }
+
+  private static func parseXcodeColorTheme(
+    _ data: Data,
+    sourceURL: URL?
+  ) throws -> EditorThemeImportResult {
+    let root: Any
+    do {
+      root = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+    } catch {
+      throw EditorThemeImportError.invalidPropertyList(error.localizedDescription)
+    }
+    guard let object = root as? [String: Any] else {
+      throw EditorThemeImportError.invalidRoot("Xcode color themes require a property-list object")
+    }
+
+    func xcodeColor(_ value: Any?) -> EditorColor? {
+      guard let value else { return nil }
+      if let parsed = parseColor(value) { return parsed }
+      guard let string = value as? String else { return nil }
+      let components = string
+        .split(whereSeparator: { $0.isWhitespace || $0 == "," })
+        .compactMap { Double($0) }
+      guard components.count >= 3 else { return nil }
+      let scale = components.prefix(3).contains(where: { $0 > 1 }) ? 255.0 : 1.0
+      func channel(_ index: Int) -> UInt8 {
+        UInt8(max(0, min(255, (components[index] / scale * 255).rounded())))
+      }
+      let alpha: UInt8
+      if components.count > 3 {
+        let value = components[3] > 1 ? components[3] : components[3] * 255
+        alpha = UInt8(max(0, min(255, value.rounded())))
+      } else {
+        alpha = 255
+      }
+      return EditorColor(red: channel(0), green: channel(1), blue: channel(2), alpha: alpha)
+    }
+
+    var colors: [String: EditorColor] = [:]
+    let uiMappings: [(String, String)] = [
+      ("DVTSourceTextPlainTextColor", "editor.foreground"),
+      ("DVTSourceTextBackground", "editor.background"),
+      ("DVTSourceTextInsertionPointColor", "editorCursor.foreground"),
+      ("DVTSourceTextSelectionColor", "editor.selectionBackground"),
+      ("DVTSourceTextCurrentLineHighlightColor", "editor.lineHighlightBackground"),
+      ("DVTSourceTextInvisibleCharactersColor", "editorWhitespace.foreground"),
+    ]
+    for (sourceKey, targetKey) in uiMappings {
+      if let parsed = xcodeColor(object[sourceKey]) { colors[targetKey] = parsed }
+    }
+
+    var rules: [EditorThemeRule] = []
+    if let syntax = object["DVTSourceTextSyntaxColors"] as? [String: Any] {
+      let mappings: [(String, [String])] = [
+        ("xcode.syntax.comment", ["comment"]),
+        ("xcode.syntax.comment.doc", ["comment.documentation", "comment"]),
+        ("xcode.syntax.string", ["string"]),
+        ("xcode.syntax.character", ["character", "string.special"]),
+        ("xcode.syntax.number", ["number"]),
+        ("xcode.syntax.keyword", ["keyword"]),
+        ("xcode.syntax.identifier.function", ["function"]),
+        ("xcode.syntax.identifier.type", ["type"]),
+        ("xcode.syntax.identifier.variable", ["variable"]),
+        ("xcode.syntax.attribute", ["attribute"]),
+        ("xcode.syntax.preprocessor", ["keyword.directive"]),
+        ("xcode.syntax.url", ["markup.link"]),
+      ]
+      for (key, captures) in mappings {
+        guard let parsed = xcodeColor(syntax[key]) else { continue }
+        rules.append(
+          EditorThemeRule(
+            name: key,
+            selectors: captures.map { .syntax($0) },
+            style: EditorTextStyle(foreground: parsed)
+          )
+        )
+      }
+    }
+
+    let name = sourceURL?.deletingPathExtension().lastPathComponent ?? "Imported Xcode Theme"
+    return EditorThemeImportResult(
+      theme: EditorTheme(
+        name: name,
+        appearance: inferAppearance(from: colors["editor.background"]),
+        source: .editorServices,
+        colors: colors,
+        rules: rules,
+        metadata: ["format": "xcode-color-theme"]
+      )
+    )
+  }
+
+  private static func parseTextMateSettings(
+    object: [String: Any],
+    settingsArray: [Any],
+    sourceURL: URL?,
+    formatName: String
+  ) -> EditorThemeImportResult {
+    var diagnostics: [EditorThemeImportDiagnostic] = []
+    var colors: [String: EditorColor] = [:]
+    var rules: [EditorThemeRule] = []
+    for (index, rawRule) in settingsArray.enumerated() {
+      guard let rule = rawRule as? [String: Any],
+            let settings = rule["settings"] as? [String: Any] else {
+        diagnostics.append(.warning("Ignored malformed TextMate rule at index \(index)", source: sourceURL))
+        continue
+      }
+      let scopes = parseScopes(rule["scope"])
+      let style = parseVSCodeStyle(settings, diagnostics: &diagnostics, sourceURL: sourceURL)
+      if scopes.isEmpty {
+        if let foreground = style.foreground { colors["editor.foreground"] = foreground }
+        if let background = style.background { colors["editor.background"] = background }
+        continue
+      }
+      guard !style.isEmpty else { continue }
+      var selectors: [EditorThemeSelector] = []
+      for scope in scopes {
+        appendUnique(.textMate(scope), to: &selectors)
+        for capture in EditorThemeScopeMapping.syntaxCaptures(forTextMateScope: scope) {
+          appendUnique(.syntax(capture), to: &selectors)
+        }
+      }
+      rules.append(
+        EditorThemeRule(
+          name: rule["name"] as? String,
+          selectors: selectors,
+          style: style
+        )
+      )
+    }
+
+    let name = nonEmptyString(object["name"])
+      ?? sourceURL?.deletingPathExtension().lastPathComponent
+      ?? "Imported TextMate Theme"
+    return EditorThemeImportResult(
+      theme: EditorTheme(
+        name: name,
+        appearance: inferAppearance(from: colors["editor.background"]),
+        source: .vsCode,
+        colors: colors,
+        rules: rules,
+        metadata: ["format": formatName]
+      ),
+      diagnostics: diagnostics
+    )
+  }
+
   private static func parseTextMatePropertyList(
     _ data: Data,
     sourceURL: URL?
@@ -765,10 +1093,27 @@ public enum EditorThemeImporter {
     }
 
     var result: [String] = []
+    func append(_ value: String) {
+      let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !normalized.isEmpty, !result.contains(normalized) else { return }
+      result.append(normalized)
+    }
+
     for raw in rawValues {
-      for scope in raw.split(separator: ",") {
-        let value = scope.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.isEmpty, !result.contains(value) { result.append(value) }
+      for selector in raw.split(separator: ",") {
+        var value = selector.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("L:") || value.hasPrefix("R:") || value.hasPrefix("B:") {
+          value = String(value.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let positiveComponents = value
+          .split(whereSeparator: { $0.isWhitespace })
+          .map(String.init)
+          .prefix { !$0.hasPrefix("-") }
+        guard !positiveComponents.isEmpty else { continue }
+        append(value)
+        if positiveComponents.count > 1, let mostSpecific = positiveComponents.last {
+          append(mostSpecific)
+        }
       }
     }
     return result
@@ -845,7 +1190,7 @@ public enum EditorThemeImporter {
     guard !groups.isEmpty else {
       throw EditorThemeImportError.invalidRoot("No Neovim highlight groups were found")
     }
-    return makeNeovimTheme(
+    var result = makeNeovimTheme(
       name: name,
       appearance: appearance,
       groups: groups,
@@ -853,6 +1198,19 @@ public enum EditorThemeImporter {
       sourceURL: sourceURL,
       diagnostics: diagnostics
     )
+    if let terminalColors = object["terminal_colors"] as? [Any] {
+      let keys = [
+        "terminal.ansiBlack", "terminal.ansiRed", "terminal.ansiGreen", "terminal.ansiYellow",
+        "terminal.ansiBlue", "terminal.ansiMagenta", "terminal.ansiCyan", "terminal.ansiWhite",
+        "terminal.ansiBrightBlack", "terminal.ansiBrightRed", "terminal.ansiBrightGreen",
+        "terminal.ansiBrightYellow", "terminal.ansiBrightBlue", "terminal.ansiBrightMagenta",
+        "terminal.ansiBrightCyan", "terminal.ansiBrightWhite",
+      ]
+      for (index, value) in terminalColors.prefix(keys.count).enumerated() {
+        if let color = parseColor(value) { result.theme.colors[keys[index]] = color }
+      }
+    }
+    return result
   }
 
   private static func parseVimColorScheme(
@@ -1423,12 +1781,58 @@ public enum EditorThemeImporter {
     if let string = value as? String {
       let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
       if isNone(trimmed) { return nil }
-      return EditorColor(hex: trimmed) ?? namedColor(trimmed)
+      if let direct = EditorColor(hex: trimmed) ?? namedColor(trimmed) { return direct }
+      if trimmed.lowercased().hasPrefix("0x"),
+        let integer = UInt32(trimmed.dropFirst(2), radix: 16), integer <= 0xFF_FF_FF
+      {
+        return EditorColor(rgb: integer)
+      }
+      return parseCSSColor(trimmed)
     }
     if let number = value as? NSNumber, !(value is Bool) {
       let integer = number.int64Value
       guard integer >= 0, integer <= 0xFF_FF_FF else { return nil }
       return EditorColor(rgb: UInt32(integer))
+    }
+    return nil
+  }
+
+  private static func parseCSSColor(_ value: String) -> EditorColor? {
+    let lower = value.lowercased()
+    guard let open = lower.firstIndex(of: "("), lower.last == ")" else { return nil }
+    let function = lower[..<open].trimmingCharacters(in: .whitespacesAndNewlines)
+    let body = lower[lower.index(after: open)..<lower.index(before: lower.endIndex)]
+    let components = body
+      .split(separator: ",", omittingEmptySubsequences: false)
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    func rgbChannel(_ component: String) -> UInt8? {
+      if component.hasSuffix("%") {
+        guard let value = Double(component.dropLast()) else { return nil }
+        return UInt8(max(0, min(255, (value / 100 * 255).rounded())))
+      }
+      guard let value = Double(component) else { return nil }
+      return UInt8(max(0, min(255, value.rounded())))
+    }
+
+    func alphaChannel(_ component: String) -> UInt8? {
+      if component.hasSuffix("%") {
+        guard let value = Double(component.dropLast()) else { return nil }
+        return UInt8(max(0, min(255, (value / 100 * 255).rounded())))
+      }
+      guard let value = Double(component) else { return nil }
+      return UInt8(max(0, min(255, (value <= 1 ? value * 255 : value).rounded())))
+    }
+
+    if function == "rgb" || function == "rgba" {
+      guard components.count == (function == "rgb" ? 3 : 4),
+        let red = rgbChannel(components[0]),
+        let green = rgbChannel(components[1]),
+        let blue = rgbChannel(components[2])
+      else { return nil }
+      let alpha = components.count == 4 ? alphaChannel(components[3]) : 255
+      guard let alpha else { return nil }
+      return EditorColor(red: red, green: green, blue: blue, alpha: alpha)
     }
     return nil
   }
@@ -1484,16 +1888,44 @@ public enum EditorThemeImporter {
   }
 
   private static func parseLuaPalettes(_ text: String) -> [String: [String: String]] {
+    func entries(in body: String) -> [String: String] {
+      let entryPattern = #"(?:\[\s*[\"']([^\"']+)[\"']\s*\]|([A-Za-z_][A-Za-z0-9_]*))\s*=\s*[\"'](#[0-9A-Fa-f]{3,8}|[A-Za-z]+|rgba?\([^\"']+\))[\"']"#
+      var values: [String: String] = [:]
+      for entry in regexMatches(entryPattern, in: body) where entry.count >= 4 {
+        let key = entry[1].isEmpty ? entry[2] : entry[1]
+        values[key] = entry[3]
+      }
+      return values
+    }
+
     let tablePattern = #"(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^{}]*)\}"#
     var palettes: [String: [String: String]] = [:]
     for match in regexMatches(tablePattern, in: text, options: [.dotMatchesLineSeparators]) where match.count >= 3 {
-      let name = match[1]
-      let entryPattern = #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[\"'](#[0-9A-Fa-f]{3,8}|[A-Za-z]+)[\"']"#
-      var values: [String: String] = [:]
-      for entry in regexMatches(entryPattern, in: match[2]) where entry.count >= 3 {
-        values[entry[1]] = entry[2]
+      let values = entries(in: match[2])
+      if !values.isEmpty { palettes[match[1]] = values }
+    }
+
+    var locals: [String: String] = [:]
+    let localPattern = #"(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[\"'](#[0-9A-Fa-f]{3,8}|[A-Za-z]+|rgba?\([^\"']+\))[\"']"#
+    for match in regexMatches(localPattern, in: text) where match.count >= 3 {
+      locals[match[1]] = match[2]
+    }
+    if !locals.isEmpty { palettes["__locals"] = locals }
+
+    var returned: [String: String] = [:]
+    let returnPattern = #"return\s*\{([^{}]*)\}"#
+    for match in regexMatches(returnPattern, in: text, options: [.dotMatchesLineSeparators]) where match.count >= 2 {
+      returned.merge(entries(in: match[1])) { _, new in new }
+    }
+    if !returned.isEmpty {
+      palettes["__return"] = returned
+      let requirePattern = #"(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\("#
+      for match in regexMatches(requirePattern, in: text) where match.count >= 2 {
+        if palettes[match[1]] == nil { palettes[match[1]] = returned }
       }
-      if !values.isEmpty { palettes[name] = values }
+      for alias in ["colors", "colours", "palette", "c"] where palettes[alias] == nil {
+        palettes[alias] = returned
+      }
     }
     return palettes
   }
@@ -1502,18 +1934,28 @@ public enum EditorThemeImporter {
     _ body: String,
     palettes: [String: [String: String]] = [:]
   ) -> [String: Any] {
-    let pattern = #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[\"']([^\"']*)[\"']|(true|false)|(-?\d+)|([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*))"#
+    let pattern = #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:[\"']([^\"']*)[\"']|(true|false)|(0x[0-9A-Fa-f]+|-?\d+)|([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*))"#
     var result: [String: Any] = [:]
     for match in regexMatches(pattern, in: body, options: [.caseInsensitive]) where match.count >= 6 {
       let key = match[1]
       if !match[2].isEmpty { result[key] = match[2] }
       else if !match[3].isEmpty { result[key] = match[3].lowercased() == "true" }
-      else if let integer = Int(match[4]) { result[key] = integer }
+      else if match[4].lowercased().hasPrefix("0x"), let integer = Int(match[4].dropFirst(2), radix: 16) {
+        result[key] = integer
+      } else if let integer = Int(match[4]) { result[key] = integer }
       else if !match[5].isEmpty {
         let parts = match[5].split(separator: ".", maxSplits: 1).map(String.init)
         if parts.count == 2, let value = palettes[parts[0]]?[parts[1]] {
           result[key] = value
         }
+      }
+    }
+
+    let barePattern = #"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|$)"#
+    for match in regexMatches(barePattern, in: body) where match.count >= 3 {
+      guard result[match[1]] == nil else { continue }
+      if let value = palettes["__locals"]?[match[2]] ?? palettes["__return"]?[match[2]] {
+        result[match[1]] = value
       }
     }
     return result

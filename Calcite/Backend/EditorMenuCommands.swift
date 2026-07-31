@@ -10,12 +10,17 @@ nonisolated enum EditorCommand: Equatable, Sendable {
 
   case build
   case run
+  case runCurrentFile
   case test
   case check
   case clean
   case stopBuild
 
   case startDebug
+  case startDebugCurrentFile
+  case startLiveDebug
+  case startLiveDebugCurrentFile
+  case stopLiveDebug
   case stopDebug
   case continueDebug
   case pauseDebug
@@ -108,13 +113,16 @@ nonisolated struct EditorCommandAvailability: Equatable, Sendable {
   var canSaveAll: Bool
   var canBuild: Bool
   var canRun: Bool
+  var canRunCurrentFile: Bool
   var canTest: Bool
   var canCheck: Bool
   var isBuilding: Bool
   var canStartDebug: Bool
+  var canDebugCurrentFile: Bool
   var debugIsActive: Bool
   var debugIsRunning: Bool
   var debugIsPaused: Bool
+  var liveDebugIsEnabled: Bool
 }
 
 private struct EditorCommandHandlerKey: FocusedValueKey {
@@ -185,6 +193,11 @@ struct EditorProjectCommands: Commands {
         .keyboardShortcut("r", modifiers: .command)
         .disabled(
           handler == nil || availability?.canRun != true || availability?.isBuilding == true)
+      Button("Run Current File") { handler?.perform(.runCurrentFile) }
+        .keyboardShortcut("r", modifiers: [.command, .option])
+        .disabled(
+          handler == nil || availability?.canRunCurrentFile != true
+            || availability?.isBuilding == true)
       Button("Test") { handler?.perform(.test) }
         .keyboardShortcut("u", modifiers: [.command, .shift])
         .disabled(
@@ -204,6 +217,26 @@ struct EditorProjectCommands: Commands {
       Button("Start Debugging") { handler?.perform(.startDebug) }
         .keyboardShortcut("d", modifiers: [.command, .shift])
         .disabled(handler == nil || availability?.canStartDebug != true)
+      Button("Debug Current File") { handler?.perform(.startDebugCurrentFile) }
+        .disabled(
+          handler == nil || availability?.canDebugCurrentFile != true
+            || availability?.debugIsActive == true || availability?.isBuilding == true
+        )
+      Button("Start Live Debug") { handler?.perform(.startLiveDebug) }
+        .disabled(
+          handler == nil || availability?.isBuilding == true
+            || availability?.liveDebugIsEnabled == true
+            || (availability?.canStartDebug != true && availability?.debugIsActive != true)
+        )
+      Button("Start Live Debug for Current File") {
+        handler?.perform(.startLiveDebugCurrentFile)
+      }
+      .disabled(
+        handler == nil || availability?.canDebugCurrentFile != true
+          || availability?.isBuilding == true || availability?.liveDebugIsEnabled == true
+      )
+      Button("Stop Live Debug") { handler?.perform(.stopLiveDebug) }
+        .disabled(handler == nil || availability?.liveDebugIsEnabled != true)
       Button("Continue") { handler?.perform(.continueDebug) }
         .disabled(handler == nil || availability?.debugIsPaused != true)
       Button("Pause") { handler?.perform(.pauseDebug) }

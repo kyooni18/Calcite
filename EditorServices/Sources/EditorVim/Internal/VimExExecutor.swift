@@ -103,18 +103,18 @@ extension VimEngine {
     }
     if VimExParser.matches(name, command: "new") {
       return arguments.isEmpty
-        ? [.custom("vim-window-new-horizontal")]
+        ? [.newWindow(horizontal: true)]
         : [.custom("vim-window-split-horizontal:\(unescapeExArgument(arguments))")]
     }
     if VimExParser.matches(name, command: "vnew", minimum: 2) {
       return arguments.isEmpty
-        ? [.custom("vim-window-new-vertical")]
+        ? [.newWindow(horizontal: false)]
         : [.custom("vim-window-split-vertical:\(unescapeExArgument(arguments))")]
     }
     if VimExParser.matches(name, command: "close") {
       return parsed.bang ? [.custom("vim-window-force-close")] : [.closeWindow]
     }
-    if VimExParser.matches(name, command: "only") { return [.custom("vim-window-only")] }
+    if VimExParser.matches(name, command: "only") { return [.closeOtherWindows] }
     if VimExParser.matches(name, command: "wincmd") {
       return [.custom("vim-wincmd:\(arguments)")]
     }

@@ -58,13 +58,7 @@ struct CalciteSymbolsView: View {
       return
     }
 
-    if let editor = windowSession.activeEditorSession,
-      editor.documentID == document.id
-    {
-      editor.updateSelection(selection)
-    } else {
-      document.updateSelection(selection)
-    }
+    _ = windowSession.revealSelection(selection, in: document.id)
   }
 }
 
@@ -510,11 +504,5 @@ private extension EditorSymbolKind {
     case .string, .number, .boolean, .array, .object, .null:
       .secondary
     }
-  }
-}
-
-extension String {
-  fileprivate var nilIfEmpty: String? {
-    isEmpty ? nil : self
   }
 }

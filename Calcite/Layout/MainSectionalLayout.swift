@@ -1194,7 +1194,7 @@ final class MainSectionalLayoutController: ObservableObject {
   }
 
   func activateSection(_ id: UUID) {
-    guard root.containsSection(id) else { return }
+    guard root.sectionNode(id: id)?.hasVisibleContent == true else { return }
     activeSectionID = id
   }
 
@@ -1218,10 +1218,10 @@ final class MainSectionalLayoutController: ObservableObject {
 
   func setSectionVisible(_ isVisible: Bool, for sectionID: UUID) {
     updateWithoutHistory { $0.setSectionVisible(sectionID: sectionID, isVisible: isVisible) }
-    if isVisible {
+    if isVisible, root.sectionNode(id: sectionID)?.hasVisibleContent == true {
       activeSectionID = sectionID
     } else if activeSectionID == sectionID {
-      activeSectionID = root.visibleSectionIDs.first
+      activeSectionID = preferredVisibleSectionID()
     }
   }
 
@@ -1247,7 +1247,7 @@ final class MainSectionalLayoutController: ObservableObject {
     if shouldShow {
       activeSectionID = sectionIDs.first
     } else if let activeSectionID, sectionIDs.contains(activeSectionID) {
-      self.activeSectionID = root.visibleSectionIDs.first
+      self.activeSectionID = preferredVisibleSectionID()
     }
   }
 
@@ -1636,6 +1636,15 @@ final class MainSectionalLayoutController: ObservableObject {
     return sectionID
   }
 
+  private func preferredVisibleSectionID() -> UUID? {
+    root.sectionNodes.first { section in
+      section.hasVisibleContent
+        && (section.contains(kind: .workspace) || section.contains(kind: .editor))
+    }?.id
+      ?? root.visibleSectionIDs.first
+      ?? root.firstSectionID()
+  }
+
   private func preferredTargetSectionID() -> UUID? {
     if let activeSectionID, root.containsSection(activeSectionID) { return activeSectionID }
     return root.firstSectionID(preferredKinds: [.workspace, .editor]) ?? root.firstSectionID()
@@ -1794,12 +1803,7 @@ final class MainSectionalLayoutController: ObservableObject {
       !root.containsSection(activeSectionID)
         || root.sectionNode(id: activeSectionID)?.hasVisibleContent != true
     {
-      self.activeSectionID =
-        root.sectionNodes.first {
-          $0.hasVisibleContent && ($0.contains(kind: .workspace) || $0.contains(kind: .editor))
-        }?.id
-        ?? root.visibleSectionIDs.first
-        ?? root.firstSectionID()
+      self.activeSectionID = preferredVisibleSectionID()
     }
   }
 

@@ -498,16 +498,16 @@ struct VimCommandParser: Sendable {
     switch token {
     case "s", "S": request = .split(horizontal: true)
     case "v": request = .split(horizontal: false)
-    case "h": request = .custom("vim-window-left:\(count)")
-    case "j": request = .custom("vim-window-down:\(count)")
-    case "k": request = .custom("vim-window-up:\(count)")
-    case "l": request = .custom("vim-window-right:\(count)")
-    case "w", "<c-w>": request = .custom("vim-window-next:\(count)")
-    case "W": request = .custom("vim-window-previous:\(count)")
-    case "p": request = .custom("vim-window-previous-active")
+    case "h": request = .focusWindow(direction: .left, count: count)
+    case "j": request = .focusWindow(direction: .down, count: count)
+    case "k": request = .focusWindow(direction: .up, count: count)
+    case "l": request = .focusWindow(direction: .right, count: count)
+    case "w", "<c-w>": request = .cycleWindow(direction: .next, count: count)
+    case "W": request = .cycleWindow(direction: .previous, count: count)
+    case "p": request = .focusPreviousWindow
     case "q", "c": request = .closeWindow
-    case "o": request = .custom("vim-window-only")
-    case "n": request = .custom("vim-window-new-horizontal")
+    case "o": request = .closeOtherWindows
+    case "n": request = .newWindow(horizontal: true)
     default:
       reset()
       return .cancelled
