@@ -9,44 +9,109 @@ nonisolated struct MainSectionSplitGeometry: Codable, Equatable, Sendable {
   var childFractions: [UUID: Double]
   var collapsedChildIDs: Set<UUID>
 
+  /// Preferred geometry for an exact visible-child configuration. Older Calcite builds only
+  /// persisted `childFractions`; keeping that map as a fallback makes this a lossless migration.
+  /// A dedicated configuration prevents hiding one pane and resizing its neighbors from corrupting
+  /// the geometry restored when the hidden pane returns.
+  var visibilityChildFractions: [String: [UUID: Double]]
+
   init(
     splitID: UUID,
     childFractions: [UUID: Double] = [:],
-    collapsedChildIDs: Set<UUID> = []
+    collapsedChildIDs: Set<UUID> = [],
+    visibilityChildFractions: [String: [UUID: Double]] = [:]
   ) {
     self.splitID = splitID
     self.childFractions = childFractions
     self.collapsedChildIDs = collapsedChildIDs
+    self.visibilityChildFractions = visibilityChildFractions
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case splitID
+    case childFractions
+    case collapsedChildIDs
+    case visibilityChildFractions
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    splitID = try container.decode(UUID.self, forKey: .splitID)
+    childFractions =
+      try container.decodeIfPresent([UUID: Double].self, forKey: .childFractions) ?? [:]
+    collapsedChildIDs =
+      try container.decodeIfPresent(Set<UUID>.self, forKey: .collapsedChildIDs) ?? []
+    visibilityChildFractions =
+      try container.decodeIfPresent(
+        [String: [UUID: Double]].self,
+        forKey: .visibilityChildFractions
+      ) ?? [:]
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(splitID, forKey: .splitID)
+    try container.encode(childFractions, forKey: .childFractions)
+    try container.encode(collapsedChildIDs, forKey: .collapsedChildIDs)
+    if !visibilityChildFractions.isEmpty {
+      try container.encode(visibilityChildFractions, forKey: .visibilityChildFractions)
+    }
   }
 
   func resolvedFractions(
     for childIDs: [UUID],
+    configurationID: String? = nil,
     fallback: [Double]
   ) -> [Double] {
     guard !childIDs.isEmpty else { return [] }
     let fallback = Self.normalized(fallback, count: childIDs.count)
+    let visibilityMap = visibilityChildFractions[
+      Self.configurationKey(configurationID, childIDs: childIDs)
+    ]
     let values = childIDs.enumerated().map { index, childID in
-      let stored = childFractions[childID] ?? fallback[index]
+      let stored = visibilityMap?[childID] ?? childFractions[childID] ?? fallback[index]
       return stored.isFinite && stored > 0 ? stored : fallback[index]
     }
     return Self.normalized(values, count: childIDs.count)
   }
 
-  mutating func update(childIDs: [UUID], fractions: [Double]) {
+  mutating func update(
+    childIDs: [UUID],
+    fractions: [Double],
+    configurationID: String? = nil
+  ) {
     guard childIDs.count == fractions.count, !childIDs.isEmpty else { return }
     let normalized = Self.normalized(fractions, count: childIDs.count)
+    var configuration: [UUID: Double] = [:]
+    configuration.reserveCapacity(childIDs.count)
     for (childID, fraction) in zip(childIDs, normalized) {
       childFractions[childID] = fraction
+      configuration[childID] = fraction
       collapsedChildIDs.remove(childID)
     }
+    visibilityChildFractions[
+      Self.configurationKey(configurationID, childIDs: childIDs)
+    ] = configuration
   }
 
   mutating func reconcile(with childIDs: [UUID], fallback: [Double]) {
     let validIDs = Set(childIDs)
     childFractions = childFractions.filter { validIDs.contains($0.key) }
     collapsedChildIDs.formIntersection(validIDs)
+    visibilityChildFractions = visibilityChildFractions.filter { _, values in
+      !values.isEmpty && values.keys.allSatisfy(validIDs.contains)
+    }
     let resolved = resolvedFractions(for: childIDs, fallback: fallback)
-    update(childIDs: childIDs, fractions: resolved)
+    if childFractions.count != childIDs.count {
+      for (childID, fraction) in zip(childIDs, resolved) where childFractions[childID] == nil {
+        childFractions[childID] = fraction
+      }
+    }
+  }
+
+  private static func configurationKey(_ configurationID: String?, childIDs: [UUID]) -> String {
+    if let configurationID, !configurationID.isEmpty { return "state:\(configurationID)" }
+    return "children:" + childIDs.map(\.uuidString).joined(separator: "|")
   }
 
   private static func normalized(_ values: [Double], count: Int) -> [Double] {

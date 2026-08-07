@@ -64,6 +64,7 @@ final class CodeEditorTextView: NSTextView {
   var keyEventHandler: ((NSEvent, NSTextView) -> Bool)?
   var textInputHandler: ((Any, NSRange, NSTextView) -> Bool)?
   var markedTextHandler: ((Any, NSRange, NSRange, NSTextView) -> Bool)?
+  var markedTextDidChangeHandler: ((NSTextView) -> Void)?
   var unmarkTextHandler: ((NSTextView) -> Bool)?
   var zoomHandler: ((CGFloat, NSTextView) -> Bool)?
   var goToDefinitionHandler: (() -> Void)?
@@ -765,6 +766,7 @@ final class CodeEditorTextView: NSTextView {
       replacementRange: replacementRange
     )
     refreshInsertionPointRendering()
+    markedTextDidChangeHandler?(self)
   }
 
   override func unmarkText() {
@@ -1271,26 +1273,97 @@ extension NSString {
 @MainActor
 final class CodeTextScrollView: NSScrollView {
   var wrapsLines = false
-  private var documentSizeSyncScheduled = false
+  private var documentSizeSyncTask: Task<Void, Never>?
   private var isSynchronizingDocumentSize = false
+  private var lastViewportSize: NSSize = .zero
+  private var liveScrollInteractionDepth = 0
+  private var wheelScrollInteractionActive = false
+  private var wheelScrollInteractionReleaseTask: Task<Void, Never>?
+  private var needsDocumentSizeSyncAfterLiveScroll = false
 
-  override func tile() {
-    super.tile()
+  var isUserScrollInteractionActive: Bool {
+    liveScrollInteractionDepth > 0 || wheelScrollInteractionActive
+  }
+
+  isolated deinit {
+    documentSizeSyncTask?.cancel()
+    wheelScrollInteractionReleaseTask?.cancel()
+  }
+
+  override func layout() {
+    super.layout()
+    let viewport = contentSize
+    defer { lastViewportSize = viewport }
+    guard lastViewportSize != .zero,
+      abs(lastViewportSize.width - viewport.width) > 0.5
+        || abs(lastViewportSize.height - viewport.height) > 0.5
+    else { return }
+    requestDocumentSizeSync()
+  }
+
+  override func scrollWheel(with event: NSEvent) {
+    beginWheelScrollInteraction()
+    super.scrollWheel(with: event)
+  }
+
+  func beginLiveScrollInteraction() {
+    liveScrollInteractionDepth += 1
+    suspendDocumentSizeSyncForScrollInteraction()
+  }
+
+  func endLiveScrollInteraction() {
+    liveScrollInteractionDepth = max(0, liveScrollInteractionDepth - 1)
+    resumeDocumentSizeSyncAfterScrollInteractionIfNeeded()
+  }
+
+  private func beginWheelScrollInteraction() {
+    wheelScrollInteractionActive = true
+    suspendDocumentSizeSyncForScrollInteraction()
+    wheelScrollInteractionReleaseTask?.cancel()
+    wheelScrollInteractionReleaseTask = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .milliseconds(160))
+      guard let self, !Task.isCancelled else { return }
+      self.wheelScrollInteractionReleaseTask = nil
+      self.wheelScrollInteractionActive = false
+      self.resumeDocumentSizeSyncAfterScrollInteractionIfNeeded()
+    }
+  }
+
+  private func suspendDocumentSizeSyncForScrollInteraction() {
+    if documentSizeSyncTask != nil {
+      needsDocumentSizeSyncAfterLiveScroll = true
+    }
+    documentSizeSyncTask?.cancel()
+    documentSizeSyncTask = nil
+  }
+
+  private func resumeDocumentSizeSyncAfterScrollInteractionIfNeeded() {
+    guard !isUserScrollInteractionActive, needsDocumentSizeSyncAfterLiveScroll else { return }
+    needsDocumentSizeSyncAfterLiveScroll = false
     requestDocumentSizeSync()
   }
 
   func requestDocumentSizeSync() {
-    guard !documentSizeSyncScheduled else { return }
-    documentSizeSyncScheduled = true
-    Task { @MainActor [weak self] in
-      await Task.yield()
+    guard !isUserScrollInteractionActive else {
+      needsDocumentSizeSyncAfterLiveScroll = true
+      return
+    }
+    documentSizeSyncTask?.cancel()
+    documentSizeSyncTask = Task { @MainActor [weak self] in
+      // Debounce content/presentation/viewport-size changes. Scrolling itself never schedules this
+      // work, and continuous divider drags do not force a whole-document layout every frame.
+      try? await Task.sleep(for: .milliseconds(32))
       guard let self, !Task.isCancelled else { return }
-      self.documentSizeSyncScheduled = false
+      self.documentSizeSyncTask = nil
       self.synchronizeDocumentSize()
     }
   }
 
   func synchronizeDocumentSize() {
+    guard !isUserScrollInteractionActive else {
+      needsDocumentSizeSyncAfterLiveScroll = true
+      return
+    }
     guard !isSynchronizingDocumentSize else { return }
     guard window?.inLiveResize != true else {
       Task { @MainActor [weak self] in
@@ -1372,11 +1445,26 @@ struct EditorTextStyler {
 
     let font = resolvedFont
     let paragraph = paragraphStyle(font: font)
-    let presentationRange = normalizedPresentationRange(
+    let isLargeDocument = storage.length > editorRichPresentationUTF16Limit
+    let isLiveMarkdown =
+      liveMarkdownStyling
+      && !isLargeDocument
+      && languageID.lowercased() == "markdown"
+    let normalizedRange = normalizedPresentationRange(
       affectedRange,
       source: textView.string,
       storageLength: storage.length
     )
+    let presentationRange =
+      isLiveMarkdown && affectedRange != nil
+      ? expandedMarkdownPresentationRange(
+        normalizedRange,
+        source: textView.string,
+        storageLength: storage.length
+      )
+      : normalizedRange
+    let isFullPresentation =
+      presentationRange.location == 0 && presentationRange.length == storage.length
     let background = profile.surface.background.nsColor.withAlphaComponent(
       profile.surface.background.nsColor.alphaComponent
         * CGFloat(min(max(profile.surface.backgroundOpacity, 0), 1))
@@ -1414,7 +1502,6 @@ struct EditorTextStyler {
       clearPresentationAttributes(from: layoutManager, range: presentationRange)
     }
     let snapshot = TextSnapshot(text: textView.string)
-    let isLargeDocument = storage.length > editorRichPresentationUTF16Limit
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.editorCursorStyle = profile.surface.cursorStyle
       codeTextView.editorCursorColor = profile.surface.cursor.nsColor
@@ -1444,10 +1531,6 @@ struct EditorTextStyler {
       ]
       codeTextView.diagnosticMessageTextColor = profile.surface.foreground.nsColor
     }
-    let isLiveMarkdown =
-      liveMarkdownStyling
-      && !isLargeDocument
-      && languageID.lowercased() == "markdown"
     if !isLiveMarkdown {
       applyCurrentLine(
         to: layoutManager,
@@ -1464,7 +1547,7 @@ struct EditorTextStyler {
         limitingTo: presentationRange
       )
     }
-    if let codeTextView = textView as? CodeEditorTextView {
+    if let codeTextView = textView as? CodeEditorTextView, !isLiveMarkdown {
       codeTextView.codeBlockDecorations = []
       codeTextView.markdownBulletRanges = []
       codeTextView.markdownRuleRanges = []
@@ -1497,14 +1580,35 @@ struct EditorTextStyler {
         source: textView.string,
         baseFont: font,
         showsSyntax: showsMarkdownSyntax,
-        selectedRange: selectedRange
+        selectedRange: selectedRange,
+        limitingTo: presentationRange
       )
       if let codeTextView = textView as? CodeEditorTextView {
-        codeTextView.codeBlockDecorations = codeBlocks
-        codeTextView.markdownBulletRanges =
+        let bullets =
           showsMarkdownSyntax
-          ? [] : markdownBulletRanges(in: textView.string)
-        codeTextView.markdownRuleRanges = markdownRuleRanges(in: textView.string)
+          ? [] : markdownBulletRanges(in: textView.string, limitingTo: presentationRange)
+        let rules = markdownRuleRanges(in: textView.string, limitingTo: presentationRange)
+        if isFullPresentation {
+          codeTextView.codeBlockDecorations = codeBlocks
+          codeTextView.markdownBulletRanges = bullets
+          codeTextView.markdownRuleRanges = rules
+        } else {
+          codeTextView.codeBlockDecorations = mergeMarkdownDecorations(
+            existing: codeTextView.codeBlockDecorations,
+            replacements: codeBlocks,
+            replacing: presentationRange
+          )
+          codeTextView.markdownBulletRanges = mergeMarkdownRanges(
+            existing: codeTextView.markdownBulletRanges,
+            replacements: bullets,
+            replacing: presentationRange
+          )
+          codeTextView.markdownRuleRanges = mergeMarkdownRanges(
+            existing: codeTextView.markdownRuleRanges,
+            replacements: rules,
+            replacing: presentationRange
+          )
+        }
       }
     }
     for diagnostic in diagnostics {
@@ -1544,6 +1648,111 @@ struct EditorTextStyler {
     )
   }
 
+  private func expandedMarkdownPresentationRange(
+    _ requested: NSRange,
+    source: String,
+    storageLength: Int
+  ) -> NSRange {
+    guard storageLength > 0, requested.length > 0 else { return requested }
+    let text = source as NSString
+    var lower = min(max(0, requested.location), storageLength - 1)
+    var upper = min(max(NSMaxRange(requested), lower + 1), storageLength)
+
+    // Markdown constructs that affect neighboring lines (setext headings, lists and tables)
+    // only need a small context window. Expanding locally avoids rescanning and relaying out
+    // the whole document on every keystroke.
+    for _ in 0..<2 {
+      if lower > 0 {
+        lower = text.lineRange(for: NSRange(location: lower - 1, length: 0)).location
+      }
+      if upper < storageLength {
+        let probe = min(upper, storageLength - 1)
+        upper = min(
+          storageLength,
+          NSMaxRange(text.lineRange(for: NSRange(location: probe, length: 0)))
+        )
+      }
+    }
+
+    func isFenceLine(_ range: NSRange) -> Bool {
+      let value = text.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+      return value.hasPrefix("```")
+    }
+
+    // Track fenced blocks with parity so a closing fence from a previous block can never be
+    // mistaken for the opening fence of the next block.
+    var openFence: NSRange?
+    var cursor = 0
+    while cursor < lower {
+      let line = text.lineRange(for: NSRange(location: cursor, length: 0))
+      if isFenceLine(line) {
+        openFence = openFence == nil ? line : nil
+      }
+      let next = NSMaxRange(line)
+      guard next > cursor else { break }
+      cursor = next
+    }
+
+    func nextFence(after location: Int) -> NSRange? {
+      var cursor = min(max(0, location), storageLength)
+      while cursor < storageLength {
+        let line = text.lineRange(
+          for: NSRange(location: min(cursor, storageLength - 1), length: 0)
+        )
+        if isFenceLine(line) { return line }
+        let next = NSMaxRange(line)
+        guard next > cursor else { break }
+        cursor = next
+      }
+      return nil
+    }
+
+    if let openFence, let closingFence = nextFence(after: lower) {
+      lower = min(lower, openFence.location)
+      upper = max(upper, NSMaxRange(closingFence))
+    } else {
+      // If the changed context itself introduces an opening fence, include its matching close.
+      var localCursor = lower
+      var localOpening: NSRange?
+      while localCursor < upper {
+        let line = text.lineRange(
+          for: NSRange(location: min(localCursor, storageLength - 1), length: 0)
+        )
+        if isFenceLine(line) {
+          localOpening = line
+          break
+        }
+        let next = NSMaxRange(line)
+        guard next > localCursor else { break }
+        localCursor = next
+      }
+      if let localOpening, let closingFence = nextFence(after: NSMaxRange(localOpening)) {
+        lower = min(lower, localOpening.location)
+        upper = max(upper, NSMaxRange(closingFence))
+      }
+    }
+
+    return NSRange(location: lower, length: max(0, upper - lower))
+  }
+
+  private func mergeMarkdownRanges(
+    existing: [NSRange],
+    replacements: [NSRange],
+    replacing affectedRange: NSRange
+  ) -> [NSRange] {
+    existing.filter { NSIntersectionRange($0, affectedRange).length == 0 }
+      + replacements
+  }
+
+  private func mergeMarkdownDecorations(
+    existing: [MarkdownCodeBlockDecoration],
+    replacements: [MarkdownCodeBlockDecoration],
+    replacing affectedRange: NSRange
+  ) -> [MarkdownCodeBlockDecoration] {
+    existing.filter { NSIntersectionRange($0.contentRange, affectedRange).length == 0 }
+      + replacements
+  }
+
   func updateSelection(
     in textView: NSTextView,
     languageID: String,
@@ -1557,8 +1766,8 @@ struct EditorTextStyler {
     else { return }
     let isLiveMarkdown = liveMarkdownStyling && languageID.lowercased() == "markdown"
     if isLiveMarkdown {
-      // Hidden Markdown markers are handled by a full restyle only when the active line changes.
-      // Moving within the same line does not change presentation at all.
+      // Hidden Markdown markers are refreshed by the coordinator only for the old/new active-line
+      // context. Moving within the same line does not change presentation at all.
       return
     }
 
@@ -1607,10 +1816,10 @@ struct EditorTextStyler {
     source: String,
     baseFont: NSFont,
     showsSyntax: Bool,
-    selectedRange: NSRange
+    selectedRange: NSRange,
+    limitingTo presentationRange: NSRange
   ) -> [MarkdownCodeBlockDecoration] {
-    let fullRange = NSRange(location: 0, length: storage.length)
-    guard fullRange.length > 0 else { return [] }
+    guard presentationRange.length > 0 else { return [] }
     let muted = profile.surface.foreground.nsColor.withAlphaComponent(0.45)
     let syntaxColor = profile.syntax.symbols.punctuation.nsColor
     let accent = profile.syntax.literals.keyword.nsColor
@@ -1620,7 +1829,7 @@ struct EditorTextStyler {
       -> [NSTextCheckingResult]
     {
       (try? NSRegularExpression(pattern: pattern, options: options))?
-        .matches(in: source, range: fullRange) ?? []
+        .matches(in: source, range: presentationRange) ?? []
     }
     func add(_ attributes: [NSAttributedString.Key: Any], range: NSRange) {
       guard range.location != NSNotFound, NSMaxRange(range) <= storage.length else { return }
@@ -1816,7 +2025,6 @@ struct EditorTextStyler {
     }
 
     if !showsSyntax {
-      let collapsedFont = NSFont.systemFont(ofSize: 0.1)
       let sourceText = source as NSString
       let cursorLocation = min(max(selectedRange.location, 0), sourceText.length)
       let activeLineRange = sourceText.lineRange(
@@ -1824,7 +2032,11 @@ struct EditorTextStyler {
       )
       func collapse(_ range: NSRange) {
         guard NSIntersectionRange(range, activeLineRange).length == 0 else { return }
-        add([.foregroundColor: NSColor.clear, .font: collapsedFont, .kern: -0.1], range: range)
+        // Hide source markers without changing glyph metrics. The previous implementation shrank
+        // markers to a 0.1pt font and applied negative kerning; moving the selection then changed
+        // line widths/heights above the viewport and made NSClipView appear to jump. Transparent
+        // glyphs keep TextKit geometry invariant while preserving the clean Markdown presentation.
+        add([.foregroundColor: NSColor.clear], range: range)
       }
       func collapseOutside(_ result: NSTextCheckingResult, content: NSRange) {
         collapse(
@@ -1963,26 +2175,24 @@ struct EditorTextStyler {
     }
   }
 
-  private func markdownBulletRanges(in source: String) -> [NSRange] {
-    let fullRange = NSRange(location: 0, length: (source as NSString).length)
+  private func markdownBulletRanges(in source: String, limitingTo range: NSRange) -> [NSRange] {
     guard
       let expression = try? NSRegularExpression(
         pattern: "^[\\t ]*[-+*][\\t ]+.+$",
         options: .anchorsMatchLines
       )
     else { return [] }
-    return expression.matches(in: source, range: fullRange).map(\.range)
+    return expression.matches(in: source, range: range).map(\.range)
   }
 
-  private func markdownRuleRanges(in source: String) -> [NSRange] {
-    let fullRange = NSRange(location: 0, length: (source as NSString).length)
+  private func markdownRuleRanges(in source: String, limitingTo range: NSRange) -> [NSRange] {
     guard
       let expression = try? NSRegularExpression(
         pattern: "^[\\t ]*(?:---+|___+|\\*\\*\\*+)[\\t ]*$",
         options: .anchorsMatchLines
       )
     else { return [] }
-    return expression.matches(in: source, range: fullRange).map(\.range)
+    return expression.matches(in: source, range: range).map(\.range)
   }
 
   private var resolvedFont: NSFont {

@@ -21,16 +21,22 @@ struct EditorWindowLayoutPersistence: NSViewRepresentable {
   @MainActor
   final class Coordinator {
     private let frameKey: String
+    private let legacyFrameKey: String?
     private weak var observedWindow: NSWindow?
     // `deinit` is nonisolated even though the coordinator is main-actor isolated.
     // Observer installation and removal otherwise remain main-actor confined.
     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
-    private var didRestoreFrame = false
+    private var didCompleteInitialRestore = false
     private var isRestoringFrame = false
 
     init(workspaceURL: URL) {
-      frameKey =
-        "calcite.windowFrame.\(Self.stableIdentifier(workspaceURL.standardizedFileURL.path))"
+      let standardizedPath = workspaceURL.standardizedFileURL.path
+      let canonicalPath = workspaceURL.standardizedFileURL.resolvingSymlinksInPath().path
+      frameKey = "calcite.windowFrame.\(Self.stableIdentifier(canonicalPath))"
+      legacyFrameKey =
+        canonicalPath == standardizedPath
+        ? nil
+        : "calcite.windowFrame.\(Self.stableIdentifier(standardizedPath))"
     }
 
     deinit {
@@ -61,7 +67,9 @@ struct EditorWindowLayoutPersistence: NSViewRepresentable {
           queue: .main
         ) { [weak self, weak window] _ in
           Task { @MainActor [weak self, weak window] in
-            guard let self, let window, !self.isRestoringFrame else { return }
+            guard let self, let window, self.didCompleteInitialRestore,
+              !self.isRestoringFrame
+            else { return }
             self.saveFrame(window.frame)
           }
         },
@@ -71,7 +79,19 @@ struct EditorWindowLayoutPersistence: NSViewRepresentable {
           queue: .main
         ) { [weak self, weak window] _ in
           Task { @MainActor [weak self, weak window] in
-            guard let self, let window, !self.isRestoringFrame else { return }
+            guard let self, let window, self.didCompleteInitialRestore,
+              !self.isRestoringFrame
+            else { return }
+            self.saveFrame(window.frame)
+          }
+        },
+        center.addObserver(
+          forName: NSWindow.willCloseNotification,
+          object: window,
+          queue: .main
+        ) { [weak self, weak window] _ in
+          Task { @MainActor [weak self, weak window] in
+            guard let self, let window, self.didCompleteInitialRestore else { return }
             self.saveFrame(window.frame)
           }
         },
@@ -79,9 +99,12 @@ struct EditorWindowLayoutPersistence: NSViewRepresentable {
     }
 
     private func restoreFrame(on window: NSWindow) {
-      guard !didRestoreFrame else { return }
-      didRestoreFrame = true
-      guard let value = UserDefaults.standard.string(forKey: frameKey) else { return }
+      guard !didCompleteInitialRestore else { return }
+      didCompleteInitialRestore = true
+      let defaults = UserDefaults.standard
+      let canonicalValue = defaults.string(forKey: frameKey)
+      let legacyValue = legacyFrameKey.flatMap { defaults.string(forKey: $0) }
+      guard let value = canonicalValue ?? legacyValue else { return }
       let savedFrame = NSRectFromString(value)
       guard savedFrame.width.isFinite, savedFrame.height.isFinite,
         savedFrame.origin.x.isFinite, savedFrame.origin.y.isFinite,
@@ -91,6 +114,10 @@ struct EditorWindowLayoutPersistence: NSViewRepresentable {
       let frame = Self.constrainedFrame(savedFrame, screens: NSScreen.screens)
       isRestoringFrame = true
       window.setFrame(frame, display: false)
+      if canonicalValue == nil {
+        defaults.set(NSStringFromRect(frame), forKey: frameKey)
+        if let legacyFrameKey { defaults.removeObject(forKey: legacyFrameKey) }
+      }
       Task { @MainActor [weak self] in
         await Task.yield()
         self?.isRestoringFrame = false

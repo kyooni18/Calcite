@@ -358,18 +358,23 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
   }
 
   /// Stable recursive identity used only to distinguish split geometry for temporary visibility
-  /// states. It intentionally ignores selected tabs and other presentation state.
+  /// states. It intentionally ignores selected tabs and other presentation state. Hidden fast-panel
+  /// placeholders remain part of the identity because they are still rendered as split children.
   func geometryVisibilitySignature(visibleOnly: Bool) -> String {
     switch type {
     case .section:
-      guard !visibleOnly || hasVisibleContent else { return "" }
-      return "section:\(id.uuidString)"
+      let visibility = hasVisibleContent ? "visible" : "hidden"
+      let fastPanel = isFastPanel ? "fast" : "normal"
+      return "section:\(id.uuidString):\(visibility):\(fastPanel)"
     case .split:
-      let includedChildren = visibleOnly ? children.filter(\.hasVisibleContent) : children
       let childSignature =
-        includedChildren
-        .map { $0.geometryVisibilitySignature(visibleOnly: visibleOnly) }
-        .filter { !$0.isEmpty }
+        children
+        .map { child -> String in
+          if visibleOnly, !child.hasVisibleContent, child.fastPanelSectionIDs.isEmpty {
+            return "omitted:\(child.id.uuidString)"
+          }
+          return child.geometryVisibilitySignature(visibleOnly: visibleOnly)
+        }
         .joined(separator: ",")
       return "split:\(id.uuidString)[\(childSignature)]"
     }
@@ -939,6 +944,16 @@ nonisolated struct MainSectionLayoutNode: Codable, Equatable, Identifiable, Send
   }
 }
 
+/// Serializable window-local copy of a sectional layout. The workspace layout file remains the
+/// fallback for newly created windows, while session restoration can reapply the exact layout that
+/// belonged to each individual window.
+nonisolated struct MainSectionalLayoutSnapshot: Codable, Equatable, Sendable {
+  var root: MainSectionLayoutNode
+  var splitGeometries: [UUID: MainSectionSplitGeometry]
+  var activeLayoutProfileID: UUID?
+  var activeSectionID: UUID?
+}
+
 @MainActor
 final class MainSectionalLayoutController: ObservableObject {
   @Published private(set) var root: MainSectionLayoutNode
@@ -956,12 +971,14 @@ final class MainSectionalLayoutController: ObservableObject {
     var root: MainSectionLayoutNode
     var splitGeometries: [UUID: MainSectionSplitGeometry]
     var activeLayoutProfileID: UUID?
+    var activeSectionID: UUID?
   }
 
   private struct LayoutSnapshot {
     var root: MainSectionLayoutNode
     var splitGeometries: [UUID: MainSectionSplitGeometry]
     var activeLayoutProfileID: UUID?
+    var activeSectionID: UUID?
   }
 
   private let workspaceURL: URL
@@ -971,8 +988,9 @@ final class MainSectionalLayoutController: ObservableObject {
   private let profileStore: CalciteLayoutProfileStore
   private var undoStack: [LayoutSnapshot] = []
   private var redoStack: [LayoutSnapshot] = []
-  private var pendingGeometrySnapshot: LayoutSnapshot?
-  private var geometryEditWorkItem: DispatchWorkItem?
+  private var persistenceWorkItem: DispatchWorkItem?
+  private var hasPendingPersistence = false
+  private var writesWorkspaceFallback = true
 
   init(
     workspaceURL: URL,
@@ -980,14 +998,20 @@ final class MainSectionalLayoutController: ObservableObject {
     includesPanelByDefault _: Bool = false,
     includesSidebarByDefault: Bool = true
   ) {
-    self.workspaceURL = workspaceURL.standardizedFileURL
+    let legacyWorkspaceURL = workspaceURL.standardizedFileURL
+    let canonicalWorkspaceURL = legacyWorkspaceURL.resolvingSymlinksInPath().standardizedFileURL
+    self.workspaceURL = canonicalWorkspaceURL
     self.defaults = defaults
     self.usesFileStorage = defaults === UserDefaults.standard
     self.includesSidebarByDefault = includesSidebarByDefault
     let profileStore = CalciteLayoutProfileStore(defaults: defaults)
     self.profileStore = profileStore
 
-    let persisted = Self.loadState(workspaceURL: workspaceURL, defaults: defaults)
+    let persisted = Self.loadState(
+      workspaceURL: canonicalWorkspaceURL,
+      legacyWorkspaceURL: legacyWorkspaceURL,
+      defaults: defaults
+    )
     let initialRoot =
       persisted?.root
       ?? Self.makePreset(.standard, includesSidebar: includesSidebarByDefault)
@@ -997,22 +1021,25 @@ final class MainSectionalLayoutController: ObservableObject {
     self.layoutProfiles =
       Self.builtInProfiles(includesSidebar: includesSidebarByDefault)
       + profileStore.loadCustomProfiles()
-    self.activeSectionID = nil
+    self.activeSectionID = persisted?.activeSectionID
     reconcileSplitGeometries()
     if activeLayoutProfileID.flatMap({ id in layoutProfiles.first(where: { $0.id == id }) }) == nil
     {
       activeLayoutProfileID = nil
     }
-    self.activeSectionID =
-      root.sectionNodes.first {
-        $0.hasVisibleContent && ($0.contains(kind: .workspace) || $0.contains(kind: .editor))
-      }?.id
-      ?? root.visibleSectionIDs.first
-      ?? root.firstSectionID()
+    if activeSectionID.flatMap({ root.sectionNode(id: $0) })?.hasVisibleContent != true {
+      self.activeSectionID =
+        root.sectionNodes.first {
+          $0.hasVisibleContent && ($0.contains(kind: .workspace) || $0.contains(kind: .editor))
+        }?.id
+        ?? root.visibleSectionIDs.first
+        ?? root.firstSectionID()
+    }
   }
 
   isolated deinit {
-    geometryEditWorkItem?.cancel()
+    persistenceWorkItem?.cancel()
+    if writesWorkspaceFallback, hasPendingPersistence { persistImmediately() }
   }
 
   var leafCount: Int { root.leafCount }
@@ -1042,25 +1069,10 @@ final class MainSectionalLayoutController: ObservableObject {
     root.sectionNode(id: sectionID)?.hasVisibleContent == true
   }
 
-  func splitAutosaveName(for splitID: UUID) -> String {
-    let workspaceID = Self.stableIdentifier(workspaceURL.standardizedFileURL.path)
-    return "Calcite.mainSectionalSplit.\(workspaceID).\(splitID.uuidString)"
-  }
-
-  func splitAutosaveName(
-    for splitID: UUID,
-    visibleGeometrySignature _: String,
-    fullGeometrySignature _: String
-  ) -> String {
-    // Split identity must not change when a child is temporarily hidden. A visibility-specific
-    // autosave key caused AppKit to restore an unrelated divider position after every topology
-    // edit or fast-panel toggle.
-    splitAutosaveName(for: splitID)
-  }
-
   func splitFractions(
     for splitID: UUID,
     visibleChildIDs: [UUID],
+    configurationID: String? = nil,
     defaultSecondaryFraction: Double?
   ) -> [Double] {
     let fallback = Self.defaultFractions(
@@ -1069,24 +1081,36 @@ final class MainSectionalLayoutController: ObservableObject {
     )
     return splitGeometries[splitID]?.resolvedFractions(
       for: visibleChildIDs,
+      configurationID: configurationID,
       fallback: fallback
     ) ?? fallback
   }
 
+  /// Commits one completed divider drag. Interactive split resizing stays entirely inside AppKit;
+  /// the controller only receives the final preferred geometry once the drag transaction ends.
   func updateSplitFractions(
     splitID: UUID,
     visibleChildIDs: [UUID],
+    configurationID: String? = nil,
     fractions: [Double]
   ) {
     guard visibleChildIDs.count == fractions.count, !visibleChildIDs.isEmpty else { return }
     var geometry = splitGeometries[splitID] ?? MainSectionSplitGeometry(splitID: splitID)
-    let previous = geometry
-    geometry.update(childIDs: visibleChildIDs, fractions: fractions)
-    guard geometry != previous else { return }
-    if pendingGeometrySnapshot == nil { pendingGeometrySnapshot = currentSnapshot() }
+    let previousGeometry = geometry
+    geometry.update(
+      childIDs: visibleChildIDs,
+      fractions: fractions,
+      configurationID: configurationID
+    )
+    guard geometry != previousGeometry else { return }
+
+    let before = currentSnapshot()
     splitGeometries[splitID] = geometry
-    persist()
-    scheduleGeometryEditCommit()
+    undoStack.append(before)
+    if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
+    redoStack.removeAll(keepingCapacity: true)
+    refreshHistoryAvailability()
+    scheduleGeometryPersistence()
   }
 
   var activeLayoutProfile: CalciteLayoutProfile? {
@@ -1195,7 +1219,51 @@ final class MainSectionalLayoutController: ObservableObject {
 
   func activateSection(_ id: UUID) {
     guard root.sectionNode(id: id)?.hasVisibleContent == true else { return }
+    guard activeSectionID != id else { return }
     activeSectionID = id
+    persist()
+  }
+
+  func captureSnapshot() -> MainSectionalLayoutSnapshot {
+    MainSectionalLayoutSnapshot(
+      root: root,
+      splitGeometries: splitGeometries,
+      activeLayoutProfileID: activeLayoutProfileID,
+      activeSectionID: activeSectionID
+    )
+  }
+
+  func restoreSnapshot(
+    _ snapshot: MainSectionalLayoutSnapshot,
+    persistWorkspaceFallback: Bool = true
+  ) {
+    let normalizedRoot = snapshot.root.normalized()
+    guard normalizedRoot.leafCount > 0 else { return }
+    root = normalizedRoot
+    splitGeometries = snapshot.splitGeometries
+    activeLayoutProfileID = snapshot.activeLayoutProfileID
+    activeSectionID = snapshot.activeSectionID
+    reconcileSplitGeometries()
+    clearInvalidSelections()
+    if activeLayoutProfileID.flatMap({ id in layoutProfiles.first(where: { $0.id == id }) }) == nil
+    {
+      activeLayoutProfileID = nil
+    }
+    if activeSectionID == nil { activeSectionID = preferredVisibleSectionID() }
+    undoStack.removeAll(keepingCapacity: false)
+    redoStack.removeAll(keepingCapacity: false)
+    refreshHistoryAvailability()
+    if persistWorkspaceFallback {
+      writesWorkspaceFallback = true
+      persist()
+    } else {
+      // A restored window owns its layout through the window-session snapshot. It must never
+      // overwrite the workspace fallback merely because focus, tabs, or dividers change later.
+      persistenceWorkItem?.cancel()
+      persistenceWorkItem = nil
+      hasPendingPersistence = false
+      writesWorkspaceFallback = false
+    }
   }
 
   func setFastPanel(_ isFastPanel: Bool, for sectionID: UUID) {
@@ -1223,6 +1291,7 @@ final class MainSectionalLayoutController: ObservableObject {
     } else if activeSectionID == sectionID {
       activeSectionID = preferredVisibleSectionID()
     }
+    persist()
   }
 
   func toggleFastPanels() {
@@ -1249,6 +1318,7 @@ final class MainSectionalLayoutController: ObservableObject {
     } else if let activeSectionID, sectionIDs.contains(activeSectionID) {
       self.activeSectionID = preferredVisibleSectionID()
     }
+    persist()
   }
 
   @discardableResult
@@ -1266,6 +1336,7 @@ final class MainSectionalLayoutController: ObservableObject {
     }
     let sectionID = sectionIDs[nextIndex]
     activeSectionID = sectionID
+    persist()
     return sectionID
   }
 
@@ -1289,6 +1360,7 @@ final class MainSectionalLayoutController: ObservableObject {
     }
     let sectionID = ids[targetIndex]
     self.activeSectionID = sectionID
+    persist()
     return sectionID
   }
 
@@ -1353,11 +1425,13 @@ final class MainSectionalLayoutController: ObservableObject {
         return visibilityChanged || selectionChanged
       }
       activeSectionID = sectionID
+      persist()
       return
     }
 
     mutate { root in root.addTab(sectionID: sectionID, kind: kind) != nil }
     activeSectionID = sectionID
+    persist()
   }
 
   func removeTab(sectionID: UUID, tabID: UUID) {
@@ -1367,11 +1441,13 @@ final class MainSectionalLayoutController: ObservableObject {
   func replaceTab(sectionID: UUID, tabID: UUID, with kind: MainSectionKind) {
     mutate { $0.replaceTab(sectionID: sectionID, tabID: tabID, with: kind) }
     activeSectionID = sectionID
+    persist()
   }
 
   func replaceSection(id: UUID, with kind: MainSectionKind) {
     mutate { $0.replaceSection(id: id, with: kind) }
     activeSectionID = id
+    persist()
   }
 
   func splitSection(
@@ -1412,6 +1488,7 @@ final class MainSectionalLayoutController: ObservableObject {
     else { return nil }
     commit(updated.normalized())
     activeSectionID = newSectionID
+    persist()
     return (newSectionID, editorTab.id)
   }
 
@@ -1510,6 +1587,7 @@ final class MainSectionalLayoutController: ObservableObject {
         root.firstSectionID(preferredKinds: [.workspace, .editor])
         ?? root.firstSectionID()
     }
+    persist()
   }
 
   func toggleBottomPanel() {
@@ -1537,6 +1615,7 @@ final class MainSectionalLayoutController: ObservableObject {
         return visibilityChanged || sectionChanged || selectionChanged
       }
       activeSectionID = sectionID
+      persist()
       return
     }
 
@@ -1555,6 +1634,7 @@ final class MainSectionalLayoutController: ObservableObject {
         return visibilityChanged || selectionChanged
       }
       activeSectionID = sectionID
+      persist()
       return
     }
 
@@ -1575,7 +1655,6 @@ final class MainSectionalLayoutController: ObservableObject {
   }
 
   func undo() {
-    finalizePendingGeometryEdit()
     guard let previous = undoStack.popLast() else { return }
     redoStack.append(currentSnapshot())
     restore(previous)
@@ -1584,7 +1663,6 @@ final class MainSectionalLayoutController: ObservableObject {
   }
 
   func redo() {
-    finalizePendingGeometryEdit()
     guard let next = redoStack.popLast() else { return }
     undoStack.append(currentSnapshot())
     restore(next)
@@ -1715,7 +1793,8 @@ final class MainSectionalLayoutController: ObservableObject {
     LayoutSnapshot(
       root: root,
       splitGeometries: splitGeometries,
-      activeLayoutProfileID: activeLayoutProfileID
+      activeLayoutProfileID: activeLayoutProfileID,
+      activeSectionID: activeSectionID
     )
   }
 
@@ -1723,37 +1802,14 @@ final class MainSectionalLayoutController: ObservableObject {
     root = snapshot.root.normalized()
     splitGeometries = snapshot.splitGeometries
     activeLayoutProfileID = snapshot.activeLayoutProfileID
+    activeSectionID = snapshot.activeSectionID
     reconcileSplitGeometries()
     clearInvalidSelections()
   }
 
   private func pushUndoSnapshot() {
-    finalizePendingGeometryEdit()
     undoStack.append(currentSnapshot())
     if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
-  }
-
-  private func scheduleGeometryEditCommit() {
-    geometryEditWorkItem?.cancel()
-    let workItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        self?.finalizePendingGeometryEdit()
-      }
-    }
-    geometryEditWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
-  }
-
-  private func finalizePendingGeometryEdit() {
-    geometryEditWorkItem?.cancel()
-    geometryEditWorkItem = nil
-    guard let snapshot = pendingGeometrySnapshot else { return }
-    pendingGeometrySnapshot = nil
-    guard snapshot.splitGeometries != splitGeometries else { return }
-    undoStack.append(snapshot)
-    if undoStack.count > 50 { undoStack.removeFirst(undoStack.count - 50) }
-    redoStack.removeAll(keepingCapacity: true)
-    refreshHistoryAvailability()
   }
 
   private func reconcileSplitGeometries() {
@@ -1807,12 +1863,57 @@ final class MainSectionalLayoutController: ObservableObject {
     }
   }
 
+  /// Persists structural changes immediately. Any pending geometry-only save is folded into the
+  /// same atomic write so a delayed divider transaction can never overwrite newer state.
   private func persist() {
+    persistenceWorkItem?.cancel()
+    persistenceWorkItem = nil
+    hasPendingPersistence = false
+    guard writesWorkspaceFallback else { return }
+    persistImmediately()
+  }
+
+  private func scheduleGeometryPersistence() {
+    guard writesWorkspaceFallback else { return }
+    // XCTest and alternate defaults stores expect synchronous visibility of writes. Production
+    // file storage is debounced because divider transactions can occur in quick succession.
+    guard usesFileStorage else {
+      persist()
+      return
+    }
+    persistenceWorkItem?.cancel()
+    hasPendingPersistence = true
+    let workItem = DispatchWorkItem { [weak self] in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.persistenceWorkItem = nil
+        guard self.hasPendingPersistence else { return }
+        self.hasPendingPersistence = false
+        self.persistImmediately()
+      }
+    }
+    persistenceWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
+  }
+
+  func flushPendingPersistence() {
+    persistenceWorkItem?.cancel()
+    persistenceWorkItem = nil
+    guard writesWorkspaceFallback, hasPendingPersistence else {
+      hasPendingPersistence = false
+      return
+    }
+    hasPendingPersistence = false
+    persistImmediately()
+  }
+
+  private func persistImmediately() {
     let state = PersistedState(
-      version: 2,
+      version: 4,
       root: root,
       splitGeometries: splitGeometries,
-      activeLayoutProfileID: activeLayoutProfileID
+      activeLayoutProfileID: activeLayoutProfileID,
+      activeSectionID: activeSectionID
     )
     if usesFileStorage {
       let encoder = JSONEncoder()
@@ -1834,10 +1935,12 @@ final class MainSectionalLayoutController: ObservableObject {
 
   private static func loadState(
     workspaceURL: URL,
+    legacyWorkspaceURL: URL,
     defaults: UserDefaults
   ) -> PersistedState? {
     let usesFileStorage = defaults === UserDefaults.standard
-    let legacyKey = storageKey(for: workspaceURL)
+    let canonicalKey = storageKey(for: workspaceURL)
+    let previousKey = storageKey(for: legacyWorkspaceURL)
     let data: Data?
     if usesFileStorage {
       let fileURL = CalciteStateStorage.workspaceURL(workspaceURL, filename: "layout.json")
@@ -1846,9 +1949,28 @@ final class MainSectionalLayoutController: ObservableObject {
       {
         return normalizedState(state)
       }
-      data = defaults.data(forKey: legacyKey)
+      let previousFileURL = CalciteStateStorage.workspaceURL(
+        legacyWorkspaceURL,
+        filename: "layout.json"
+      )
+      if previousFileURL != fileURL,
+        let state = CalciteStateStorage.load(PersistedState.self, from: previousFileURL),
+        state.root.leafCount > 0
+      {
+        let normalized = normalizedState(state)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? CalciteStateStorage.save(normalized, to: fileURL, encoder: encoder)
+        try? CalciteStateStorage.remove(at: previousFileURL)
+        return normalized
+      }
+      data =
+        defaults.data(forKey: canonicalKey)
+        ?? (previousKey == canonicalKey ? nil : defaults.data(forKey: previousKey))
     } else {
-      data = defaults.data(forKey: legacyKey)
+      data =
+        defaults.data(forKey: canonicalKey)
+        ?? (previousKey == canonicalKey ? nil : defaults.data(forKey: previousKey))
     }
 
     guard let data else { return nil }
@@ -1861,10 +1983,11 @@ final class MainSectionalLayoutController: ObservableObject {
       root.leafCount > 0
     {
       migrated = PersistedState(
-        version: 2,
+        version: 4,
         root: root.normalized(),
         splitGeometries: [:],
-        activeLayoutProfileID: nil
+        activeLayoutProfileID: nil,
+        activeSectionID: nil
       )
     } else {
       migrated = nil
@@ -1878,17 +2001,23 @@ final class MainSectionalLayoutController: ObservableObject {
         to: CalciteStateStorage.workspaceURL(workspaceURL, filename: "layout.json"),
         encoder: encoder
       )
-      defaults.removeObject(forKey: legacyKey)
+      defaults.removeObject(forKey: canonicalKey)
+      if previousKey != canonicalKey { defaults.removeObject(forKey: previousKey) }
     }
     return migrated
   }
 
   private static func normalizedState(_ state: PersistedState) -> PersistedState {
-    PersistedState(
-      version: max(2, state.version),
-      root: state.root.normalized(),
+    let root = state.root.normalized()
+    let activeSectionID = state.activeSectionID.flatMap { id in
+      root.sectionNode(id: id)?.hasVisibleContent == true ? id : nil
+    }
+    return PersistedState(
+      version: max(4, state.version),
+      root: root,
       splitGeometries: state.splitGeometries,
-      activeLayoutProfileID: state.activeLayoutProfileID
+      activeLayoutProfileID: state.activeLayoutProfileID,
+      activeSectionID: activeSectionID
     )
   }
 
@@ -1896,15 +2025,6 @@ final class MainSectionalLayoutController: ObservableObject {
     let path = workspaceURL.standardizedFileURL.path
     let encodedPath = Data(path.utf8).base64EncodedString()
     return "Calcite.mainSectionalLayout.\(encodedPath)"
-  }
-
-  private static func stableIdentifier(_ value: String) -> String {
-    var hash: UInt64 = 14_695_981_039_346_656_037
-    for byte in value.utf8 {
-      hash ^= UInt64(byte)
-      hash &*= 1_099_511_628_211
-    }
-    return String(hash, radix: 16)
   }
 
   private static func defaultFractions(

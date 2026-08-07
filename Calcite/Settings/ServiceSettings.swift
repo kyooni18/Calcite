@@ -953,8 +953,10 @@ private struct ThemeEditorPreview: View {
         zoomScale: 1,
         horizontalScrollOffset: 0,
         verticalScrollOffset: 0,
+        viewportAnchorCharacterOffset: nil,
+        viewportAnchorVerticalOffset: nil,
         onZoomChange: { _ in },
-        onScrollChange: { _, _ in },
+        onScrollChange: { _, _, _, _ in },
         onVimStateChange: {},
         onCaretRectChange: { _ in }
       )

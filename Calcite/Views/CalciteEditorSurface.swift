@@ -148,9 +148,16 @@ struct CalciteEditorSurface: View {
         zoomScale: effectiveZoomScale,
         horizontalScrollOffset: effectiveHorizontalScrollOffset,
         verticalScrollOffset: effectiveVerticalScrollOffset,
+        viewportAnchorCharacterOffset: editorSession.viewportAnchor?.characterOffset,
+        viewportAnchorVerticalOffset: editorSession.viewportAnchor?.verticalOffset,
         onZoomChange: { updateZoom(by: $0) },
-        onScrollChange: { horizontal, vertical in
-          editorSession.updateScroll(horizontal: horizontal, vertical: vertical)
+        onScrollChange: { horizontal, vertical, anchorCharacterOffset, anchorVerticalOffset in
+          editorSession.updateScroll(
+            horizontal: horizontal,
+            vertical: vertical,
+            anchorCharacterOffset: anchorCharacterOffset,
+            anchorVerticalOffset: anchorVerticalOffset
+          )
         },
         onVimStateChange: {
           vimPresentationRevision &+= 1
@@ -639,8 +646,10 @@ struct CodeTextEditor: NSViewRepresentable {
   let zoomScale: CGFloat
   let horizontalScrollOffset: Double
   let verticalScrollOffset: Double
+  let viewportAnchorCharacterOffset: Int?
+  let viewportAnchorVerticalOffset: Double?
   let onZoomChange: (CGFloat) -> Void
-  let onScrollChange: (Double, Double) -> Void
+  let onScrollChange: (Double, Double, Int?, Double?) -> Void
   let onVimStateChange: () -> Void
   let onCaretRectChange: (CGRect) -> Void
   var onActivate: () -> Void = {}
@@ -690,11 +699,14 @@ struct CodeTextEditor: NSViewRepresentable {
         in: view
       ) ?? false
     }
+    textView.markedTextDidChangeHandler = { [weak coordinator = context.coordinator] view in
+      coordinator?.scheduleMarkedTextPublication(in: view)
+    }
     textView.unmarkTextHandler = { [weak coordinator = context.coordinator] view in
       coordinator?.handleUnmarkText(in: view) ?? false
     }
     textView.languageID = languageID
-    textView.requiresPresentationAwareInsertionPoint = usesRichMarkdownPresentation
+    textView.requiresPresentationAwareInsertionPoint = false
     textView.zoomHandler = context.coordinator.handleZoom
     textView.goToDefinitionHandler = onGoToDefinition
     textView.findReferencesHandler = onFindReferences
@@ -735,7 +747,7 @@ struct CodeTextEditor: NSViewRepresentable {
 
     scrollView.documentView = textView
     context.coordinator.observe(textView: textView, clipView: scrollView.contentView)
-    configureLineWrapping(scrollView: scrollView, textView: textView)
+    _ = configureLineWrapping(scrollView: scrollView, textView: textView)
     let ruler = LineNumberRulerView(
       textView: textView,
       scrollView: scrollView,
@@ -748,7 +760,7 @@ struct CodeTextEditor: NSViewRepresentable {
     scrollView.rulersVisible = showsLineNumbers
 
     context.coordinator.configureVim(for: textView)
-    context.coordinator.applyPresentationIfNeeded(to: textView)
+    _ = context.coordinator.applyPresentationIfNeeded(to: textView)
     context.coordinator.updateSurfaceActivation(in: textView)
     context.coordinator.scheduleCaretPublication(for: textView)
     scrollView.requestDocumentSizeSync()
@@ -771,7 +783,7 @@ struct CodeTextEditor: NSViewRepresentable {
     }
     if let codeTextView = textView as? CodeEditorTextView {
       codeTextView.languageID = languageID
-      codeTextView.requiresPresentationAwareInsertionPoint = usesRichMarkdownPresentation
+      codeTextView.requiresPresentationAwareInsertionPoint = false
       codeTextView.textInputHandler = {
         [weak coordinator = context.coordinator] value, range, view in
         coordinator?.handleTextInput(value, replacementRange: range, in: view) ?? false
@@ -784,6 +796,10 @@ struct CodeTextEditor: NSViewRepresentable {
           replacementRange: replacementRange,
           in: view
         ) ?? false
+      }
+      codeTextView.markedTextDidChangeHandler = {
+        [weak coordinator = context.coordinator] view in
+        coordinator?.scheduleMarkedTextPublication(in: view)
       }
       codeTextView.unmarkTextHandler = { [weak coordinator = context.coordinator] view in
         coordinator?.handleUnmarkText(in: view) ?? false
@@ -803,9 +819,10 @@ struct CodeTextEditor: NSViewRepresentable {
     let hasExternalSelectionRequest =
       !bindingChanged && context.coordinator.observeParentSelection(selectedRange)
 
-    if context.coordinator.renderedTextRevision != textRevision
+    let textContentChanged =
+      context.coordinator.renderedTextRevision != textRevision
       || context.coordinator.renderedDocumentID != documentID
-    {
+    if textContentChanged {
       let incoming = context.coordinator.documentSynchronizer.classify(
         text: text,
         revision: textRevision,
@@ -855,9 +872,11 @@ struct CodeTextEditor: NSViewRepresentable {
     }
 
     context.coordinator.configureVim(for: textView)
-    context.coordinator.applyPresentationIfNeeded(to: textView)
-    configureLineWrapping(scrollView: scrollView, textView: textView)
-    (scrollView as? CodeTextScrollView)?.requestDocumentSizeSync()
+    let presentationChanged = context.coordinator.applyPresentationIfNeeded(to: textView)
+    let wrappingChanged = configureLineWrapping(scrollView: scrollView, textView: textView)
+    if textContentChanged || presentationChanged || wrappingChanged {
+      (scrollView as? CodeTextScrollView)?.requestDocumentSizeSync()
+    }
     scrollView.backgroundColor = resolvedBackgroundColor
     scrollView.hasVerticalRuler = showsLineNumbers
     scrollView.rulersVisible = showsLineNumbers
@@ -880,24 +899,26 @@ struct CodeTextEditor: NSViewRepresentable {
     usesRichMarkdownPresentation && wrapsMarkdownLines
   }
 
-  private func configureLineWrapping(scrollView: NSScrollView, textView: NSTextView) {
+  @discardableResult
+  private func configureLineWrapping(scrollView: NSScrollView, textView: NSTextView) -> Bool {
     let wraps = wrapsLongLines
+    let codeScrollView = scrollView as? CodeTextScrollView
+    let previousWraps = codeScrollView?.wrapsLines ?? !scrollView.hasHorizontalScroller
+    let previousContainerWidth = textView.textContainer?.containerSize.width ?? 0
+    let targetWidth = max(scrollView.contentSize.width, 1)
+
     scrollView.hasHorizontalScroller = !wraps
-    (scrollView as? CodeTextScrollView)?.wrapsLines = wraps
+    codeScrollView?.wrapsLines = wraps
     textView.isHorizontallyResizable = !wraps
     textView.autoresizingMask = wraps ? [.width] : []
     textView.textContainer?.widthTracksTextView = wraps
     textView.textContainer?.containerSize = NSSize(
-      width: wraps ? max(scrollView.contentSize.width, 1) : CGFloat.greatestFiniteMagnitude,
+      width: wraps ? targetWidth : CGFloat.greatestFiniteMagnitude,
       height: CGFloat.greatestFiniteMagnitude
     )
-    if wraps {
-      textView.setFrameSize(
-        NSSize(
-          width: max(scrollView.contentSize.width, 1),
-          height: max(textView.frame.height, scrollView.contentSize.height))
-      )
-    }
+
+    return previousWraps != wraps
+      || (wraps && abs(previousContainerWidth - targetWidth) > 0.5)
   }
 
   private var resolvedBackgroundColor: NSColor {
@@ -953,20 +974,22 @@ struct CodeTextEditor: NSViewRepresentable {
     )
   }
 
-  private func selectionChangeRequiresMarkdownRestyle(
+  private func markdownSelectionRestyleRange(
     in source: String,
     previousSelection: NSRange?,
     currentSelection: NSRange
-  ) -> Bool {
+  ) -> NSRange? {
     guard liveMarkdownStyling, !showsMarkdownSyntax, languageID.lowercased() == "markdown",
       (source as NSString).length <= editorRichPresentationUTF16Limit,
       let previousSelection
-    else { return false }
+    else { return nil }
     let text = source as NSString
     let oldLocation = min(max(previousSelection.location, 0), text.length)
     let newLocation = min(max(currentSelection.location, 0), text.length)
-    return text.lineRange(for: NSRange(location: oldLocation, length: 0))
-      != text.lineRange(for: NSRange(location: newLocation, length: 0))
+    let oldLine = text.lineRange(for: NSRange(location: oldLocation, length: 0))
+    let newLine = text.lineRange(for: NSRange(location: newLocation, length: 0))
+    guard oldLine != newLine else { return nil }
+    return NSUnionRange(oldLine, newLine)
   }
 
   @MainActor
@@ -1062,8 +1085,12 @@ struct CodeTextEditor: NSViewRepresentable {
     private var suppressesScrollPublication = true
     private var scrollInteractionRevision: UInt64 = 0
     private var scrollRestorationTask: Task<Void, Never>?
+    private var isUserLiveScrolling = false
+    private var isTransientScrollInteractionActive = false
+    private var transientScrollInteractionReleaseTask: Task<Void, Never>?
     private var vimWindowRestorationTask: Task<Void, Never>?
     private var caretPublicationTask: Task<Void, Never>?
+    private var markedTextPublicationTask: Task<Void, Never>?
     private var lastPublishedCaretRect: CGRect?
 
     private struct PresentationState: Equatable {
@@ -1096,7 +1123,9 @@ struct CodeTextEditor: NSViewRepresentable {
 
     isolated deinit {
       caretPublicationTask?.cancel()
+      markedTextPublicationTask?.cancel()
       scrollRestorationTask?.cancel()
+      transientScrollInteractionReleaseTask?.cancel()
       vimWindowRestorationTask?.cancel()
       publicationFlushTask?.cancel()
       NotificationCenter.default.removeObserver(self)
@@ -1127,6 +1156,12 @@ struct CodeTextEditor: NSViewRepresentable {
           name: NSScrollView.willStartLiveScrollNotification,
           object: scrollView
         )
+        NotificationCenter.default.addObserver(
+          self,
+          selector: #selector(scrollViewDidEndLiveScroll(_:)),
+          name: NSScrollView.didEndLiveScrollNotification,
+          object: scrollView
+        )
       }
     }
 
@@ -1154,7 +1189,7 @@ struct CodeTextEditor: NSViewRepresentable {
 
       if let selection { parent.onSelectionChange(selection) }
       if let scrollPosition {
-        parent.onScrollChange(Double(scrollPosition.x), Double(scrollPosition.y))
+        sendScrollPositionToParent(scrollPosition)
       }
       if publishesVimState { parent.onVimStateChange() }
     }
@@ -1163,13 +1198,72 @@ struct CodeTextEditor: NSViewRepresentable {
       guard let scrollView = notification.object as? NSScrollView,
         scrollView.contentView === observedClipView
       else { return }
+      isUserLiveScrolling = true
+      (scrollView as? CodeTextScrollView)?.beginLiveScrollInteraction()
       cancelPendingScrollRestoreForUserInteraction()
+    }
+
+    @objc private func scrollViewDidEndLiveScroll(_ notification: Notification) {
+      guard let scrollView = notification.object as? NSScrollView,
+        scrollView.contentView === observedClipView
+      else { return }
+      isUserLiveScrolling = false
+      (scrollView as? CodeTextScrollView)?.endLiveScrollInteraction()
+      if !isTransientScrollInteractionActive {
+        finalizeUserScrollInteraction(in: scrollView)
+      }
+    }
+
+    private var isUserScrollInteractionActive: Bool {
+      isUserLiveScrolling || isTransientScrollInteractionActive
+    }
+
+    private func noteTransientScrollInteraction(in scrollView: NSScrollView) {
+      if !isTransientScrollInteractionActive {
+        isTransientScrollInteractionActive = true
+        cancelPendingScrollRestoreForUserInteraction()
+      }
+      transientScrollInteractionReleaseTask?.cancel()
+      transientScrollInteractionReleaseTask = Task { @MainActor [weak self, weak scrollView] in
+        try? await Task.sleep(for: .milliseconds(160))
+        guard let self, let scrollView, !Task.isCancelled else { return }
+        self.transientScrollInteractionReleaseTask = nil
+        self.isTransientScrollInteractionActive = false
+        if !self.isUserLiveScrolling {
+          self.finalizeUserScrollInteraction(in: scrollView)
+        }
+      }
+    }
+
+    private func finalizeUserScrollInteraction(in scrollView: NSScrollView) {
+      // Rich Markdown can change glyph metrics. Never mutate those metrics while AppKit is in a
+      // momentum/live-scroll transaction: doing so changes the clip view's coordinate space under
+      // the scroll gesture and is perceived as a hitch or jump. Apply any deferred presentation
+      // once the gesture has ended, preserving the current viewport anchor.
+      if let textView = observedTextView, applyPresentationIfNeeded(to: textView) {
+        (scrollView as? CodeTextScrollView)?.requestDocumentSizeSync()
+      }
+
+      if let clipView = observedClipView, let textView = observedTextView {
+        let origin = clipView.bounds.origin
+        publishScrollPosition(
+          CGPoint(
+            x: normalizedHorizontalScrollOffset(origin.x, in: textView),
+            y: max(0, origin.y)
+          )
+        )
+        scheduleCaretPublication(for: textView)
+      }
     }
 
     private func cancelPendingScrollRestoreForUserInteraction() {
       scrollInteractionRevision &+= 1
       scrollRestorationTask?.cancel()
       scrollRestorationTask = nil
+      transientScrollInteractionReleaseTask?.cancel()
+      transientScrollInteractionReleaseTask = nil
+      isTransientScrollInteractionActive = false
+      isUserLiveScrolling = false
       vimWindowRestorationTask?.cancel()
       vimWindowRestorationTask = nil
       suppressesScrollPublication = false
@@ -1185,10 +1279,21 @@ struct CodeTextEditor: NSViewRepresentable {
         x: normalizedHorizontalScrollOffset(origin.x, in: textView),
         y: max(0, origin.y)
       )
-      if let event = NSApp.currentEvent,
-        event.type == .scrollWheel || event.type == .leftMouseDragged
-      {
-        cancelPendingScrollRestoreForUserInteraction()
+      if let event = NSApp.currentEvent {
+        if event.type == .scrollWheel, let scrollView = clipView.enclosingScrollView {
+          noteTransientScrollInteraction(in: scrollView)
+        } else if event.type == .leftMouseDragged {
+          cancelPendingScrollRestoreForUserInteraction()
+        }
+      }
+      if isUserScrollInteractionActive {
+        // Keep the hot scroll path AppKit-local. Computing the visible character range/anchor and
+        // persisting it on every bounds notification forces TextKit work at trackpad frequency.
+        lastObservedParentScrollPosition = position
+        if parent.isActiveSurface, parent.profile.vim.enabled, let controller = vimController {
+          updateVimViewport(controller, in: textView)
+        }
+        return
       }
       guard !suppressesScrollPublication else {
         scheduleCaretPublication(for: textView)
@@ -1201,6 +1306,68 @@ struct CodeTextEditor: NSViewRepresentable {
       scheduleCaretPublication(for: textView)
     }
 
+    private struct ViewportAnchor {
+      var characterOffset: Int
+      var verticalOffset: CGFloat
+    }
+
+    private func viewportAnchor(
+      in textView: NSTextView?,
+      clipView: NSClipView?
+    ) -> ViewportAnchor? {
+      guard let textView, let clipView,
+        let layoutManager = textView.layoutManager,
+        let visibleRange = CalciteVimViewportProvider.visibleUTF16Range(in: textView)
+      else { return nil }
+      let textLength = (textView.string as NSString).length
+      guard textLength > 0 else {
+        return ViewportAnchor(characterOffset: 0, verticalOffset: 0)
+      }
+      let characterOffset = min(max(0, visibleRange.lowerBound), textLength - 1)
+      layoutManager.ensureLayout(
+        forCharacterRange: NSRange(location: characterOffset, length: 1)
+      )
+      let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterOffset)
+      let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+      let lineTop = lineRect.minY + textView.textContainerOrigin.y
+      return ViewportAnchor(
+        characterOffset: characterOffset,
+        verticalOffset: lineTop - clipView.bounds.minY
+      )
+    }
+
+    private func origin(
+      restoring anchor: ViewportAnchor,
+      fallback: CGPoint,
+      in textView: NSTextView,
+      clipView: NSClipView
+    ) -> CGPoint {
+      guard let layoutManager = textView.layoutManager else { return fallback }
+      let textLength = (textView.string as NSString).length
+      guard textLength > 0 else { return CGPoint(x: fallback.x, y: 0) }
+      let characterOffset = min(max(0, anchor.characterOffset), textLength - 1)
+      layoutManager.ensureLayout(
+        forCharacterRange: NSRange(location: characterOffset, length: 1)
+      )
+      let glyphIndex = layoutManager.glyphIndexForCharacter(at: characterOffset)
+      let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
+      let lineTop = lineRect.minY + textView.textContainerOrigin.y
+      return CGPoint(
+        x: fallback.x,
+        y: max(0, lineTop - anchor.verticalOffset)
+      )
+    }
+
+    private func sendScrollPositionToParent(_ position: CGPoint) {
+      let anchor = viewportAnchor(in: observedTextView, clipView: observedClipView)
+      parent.onScrollChange(
+        Double(position.x),
+        Double(position.y),
+        anchor?.characterOffset,
+        anchor.map { Double($0.verticalOffset) }
+      )
+    }
+
     func restoreScrollPosition(in scrollView: NSScrollView, force: Bool) {
       guard !parent.profile.vim.enabled else {
         scrollRestorationTask?.cancel()
@@ -1208,6 +1375,7 @@ struct CodeTextEditor: NSViewRepresentable {
         suppressesScrollPublication = false
         return
       }
+      guard force else { return }
 
       let targetTextView = observedTextView ?? (scrollView.documentView as? NSTextView)
       let target = CGPoint(
@@ -1216,31 +1384,52 @@ struct CodeTextEditor: NSViewRepresentable {
         } ?? CGFloat(max(0, parent.horizontalScrollOffset)),
         y: CGFloat(max(0, parent.verticalScrollOffset))
       )
-      guard force else { return }
+      let storedAnchor: ViewportAnchor? = {
+        guard let characterOffset = parent.viewportAnchorCharacterOffset,
+          let verticalOffset = parent.viewportAnchorVerticalOffset,
+          verticalOffset.isFinite
+        else { return nil }
+        return ViewportAnchor(
+          characterOffset: max(0, characterOffset),
+          verticalOffset: CGFloat(verticalOffset)
+        )
+      }()
       lastObservedParentScrollPosition = target
 
       scrollRestorationTask?.cancel()
       let generation = bindingGeneration
       let interactionRevision = scrollInteractionRevision
       scrollRestorationTask = Task { @MainActor [weak self, weak scrollView] in
-        await Task.yield()
+        // The split hierarchy and TextKit container can both settle one run loop after the
+        // representable appears. Never write an early constrained position back into the model.
+        for _ in 0..<3 { await Task.yield() }
         guard let self, let scrollView, !Task.isCancelled,
           generation == self.bindingGeneration,
-          interactionRevision == self.scrollInteractionRevision
+          interactionRevision == self.scrollInteractionRevision,
+          !self.isUserLiveScrolling
         else { return }
 
         self.suppressesScrollPublication = true
-        (scrollView as? CodeTextScrollView)?.synchronizeDocumentSize()
+        if let codeScrollView = scrollView as? CodeTextScrollView {
+          codeScrollView.synchronizeDocumentSize()
+        }
         let clipView = scrollView.contentView
+        let textView = self.observedTextView ?? (scrollView.documentView as? NSTextView)
+        let anchoredTarget =
+          textView.flatMap { textView in
+            storedAnchor.map {
+              self.origin(restoring: $0, fallback: target, in: textView, clipView: clipView)
+            }
+          } ?? target
         let requested = NSRect(
-          x: target.x,
-          y: target.y,
+          x: anchoredTarget.x,
+          y: anchoredTarget.y,
           width: clipView.bounds.width,
           height: clipView.bounds.height
         )
         let constrained = clipView.constrainBoundsRect(requested)
         let restored = CGPoint(
-          x: targetTextView.map {
+          x: textView.map {
             self.normalizedHorizontalScrollOffset(constrained.origin.x, in: $0)
           } ?? max(0, constrained.origin.x),
           y: max(0, constrained.origin.y)
@@ -1248,18 +1437,14 @@ struct CodeTextEditor: NSViewRepresentable {
         clipView.scroll(to: restored)
         scrollView.reflectScrolledClipView(clipView)
         self.lastPublishedScrollPosition = restored
+        self.lastObservedParentScrollPosition = target
         self.suppressesScrollPublication = false
         self.scrollRestorationTask = nil
-        if let textView = self.observedTextView ?? (scrollView.documentView as? NSTextView) {
-          if self.parent.profile.vim.enabled, let controller = self.vimController {
-            self.updateVimViewport(controller, in: textView)
-          }
+        if let textView {
           self.scheduleCaretPublication(for: textView)
         }
-        if !Self.nearlyEqual(restored, target) {
-          self.lastObservedParentScrollPosition = restored
-          self.parent.onScrollChange(Double(restored.x), Double(restored.y))
-        }
+        // Do not publish a constrained fallback here. If the view was still too narrow or short,
+        // the persisted x/y + character anchor remain authoritative for the next real restore.
       }
     }
 
@@ -1286,7 +1471,13 @@ struct CodeTextEditor: NSViewRepresentable {
         deferredScrollPosition = position
         scheduleDeferredPublicationsIfNeeded()
       } else {
-        parent.onScrollChange(Double(position.x), Double(position.y))
+        let anchor = viewportAnchor(in: observedTextView, clipView: observedClipView)
+        parent.onScrollChange(
+          Double(position.x),
+          Double(position.y),
+          anchor?.characterOffset,
+          anchor.map { Double($0.verticalOffset) }
+        )
       }
     }
 
@@ -1389,7 +1580,8 @@ struct CodeTextEditor: NSViewRepresentable {
       pendingNativeSelectionRange = range
     }
 
-    func applyPresentationIfNeeded(to textView: NSTextView) {
+    @discardableResult
+    func applyPresentationIfNeeded(to textView: NSTextView) -> Bool {
       let currentSelection = parent.clampedSelection(textView.selectedRange(), for: textView.string)
       let next = PresentationState(
         textRevision: parent.textRevision,
@@ -1413,18 +1605,36 @@ struct CodeTextEditor: NSViewRepresentable {
         } ?? true
       let selectionChanged = styledSelection != currentSelection
       guard contentChanged || presentationChanged || configurationChanged || selectionChanged else {
-        return
+        return false
       }
 
-      let isLiveMarkdown =
-        parent.liveMarkdownStyling
-        && (textView.string as NSString).length <= editorRichPresentationUTF16Limit
-        && parent.languageID.lowercased() == "markdown"
+      let isRichMarkdown =
+        parent.liveMarkdownStyling && parent.languageID.lowercased() == "markdown"
+      if isUserScrollInteractionActive && isRichMarkdown {
+        // Keep the existing presentation state untouched. The end-of-live-scroll notification will
+        // call this method again and consume the pending content/selection/configuration update.
+        return false
+      }
+
       let needsFullPresentation =
         previous == nil
         || presentationChanged
         || configurationChanged
-        || (contentChanged && (pendingPresentationRange == nil || isLiveMarkdown))
+        || (contentChanged && pendingPresentationRange == nil)
+      let selectionMarkdownRange = parent.markdownSelectionRestyleRange(
+        in: textView.string,
+        previousSelection: styledSelection,
+        currentSelection: currentSelection
+      )
+      let changesTextMetrics =
+        needsFullPresentation
+        || (contentChanged && pendingPresentationRange != nil)
+      let preservedAnchor =
+        changesTextMetrics && !isUserScrollInteractionActive
+        ? viewportAnchor(in: textView, clipView: textView.enclosingScrollView?.contentView)
+        : nil
+      let preservedHorizontalOffset =
+        changesTextMetrics ? textView.enclosingScrollView?.contentView.bounds.origin.x : nil
 
       let wasApplyingExternalUpdate = isApplyingExternalUpdate
       isApplyingExternalUpdate = true
@@ -1432,12 +1642,8 @@ struct CodeTextEditor: NSViewRepresentable {
         parent.applyPresentation(to: textView)
       } else if contentChanged, let affectedRange = pendingPresentationRange {
         parent.applyPresentation(to: textView, affectedRange: affectedRange)
-      } else if parent.selectionChangeRequiresMarkdownRestyle(
-        in: textView.string,
-        previousSelection: styledSelection,
-        currentSelection: currentSelection
-      ) {
-        parent.applyPresentation(to: textView)
+      } else if let selectionMarkdownRange {
+        parent.applyPresentation(to: textView, affectedRange: selectionMarkdownRange)
       } else if selectionChanged {
         parent.refreshSelectionPresentation(
           to: textView,
@@ -1449,6 +1655,33 @@ struct CodeTextEditor: NSViewRepresentable {
       pendingPresentationRange = nil
       styledSelection = currentSelection
       isApplyingExternalUpdate = wasApplyingExternalUpdate
+
+      if let preservedAnchor,
+        let horizontalOffset = preservedHorizontalOffset,
+        let scrollView = textView.enclosingScrollView,
+        !isUserScrollInteractionActive
+      {
+        let clipView = scrollView.contentView
+        let fallback = CGPoint(x: horizontalOffset, y: clipView.bounds.origin.y)
+        let anchored = origin(
+          restoring: preservedAnchor,
+          fallback: fallback,
+          in: textView,
+          clipView: clipView
+        )
+        let constrained = clipView.constrainBoundsRect(
+          NSRect(origin: anchored, size: clipView.bounds.size)
+        ).origin
+        if !Self.nearlyEqual(constrained, clipView.bounds.origin) {
+          let wasSuppressed = suppressesScrollPublication
+          suppressesScrollPublication = true
+          clipView.scroll(to: constrained)
+          scrollView.reflectScrolledClipView(clipView)
+          lastPublishedScrollPosition = constrained
+          suppressesScrollPublication = wasSuppressed
+        }
+      }
+      return changesTextMetrics
     }
 
     func configureVim(for textView: NSTextView) {
@@ -1743,6 +1976,20 @@ struct CodeTextEditor: NSViewRepresentable {
         cancelVimComposition(in: textView, controller: controller)
         publishVimError(error, controller: controller, textView: textView)
         return true
+      }
+    }
+
+    func scheduleMarkedTextPublication(in textView: NSTextView) {
+      markedTextPublicationTask?.cancel()
+      markedTextPublicationTask = Task { @MainActor [weak self, weak textView] in
+        await Task.yield()
+        guard let self else { return }
+        self.markedTextPublicationTask = nil
+        guard !Task.isCancelled, let textView,
+          self.observedTextView === textView,
+          !self.isApplyingExternalUpdate
+        else { return }
+        self.handleObservedTextChange(in: textView)
       }
     }
 
@@ -2437,7 +2684,7 @@ struct CodeTextEditor: NSViewRepresentable {
 
         if let selection { self.parent.onSelectionChange(selection) }
         if let scrollPosition {
-          self.parent.onScrollChange(Double(scrollPosition.x), Double(scrollPosition.y))
+          self.sendScrollPositionToParent(scrollPosition)
         }
         if publishesVimState { self.parent.onVimStateChange() }
       }
@@ -2445,12 +2692,13 @@ struct CodeTextEditor: NSViewRepresentable {
 
     private func updateVimViewport(
       _ controller: VimKeymapController,
-      in textView: NSTextView
+      in textView: NSTextView,
+      updatesWindowPresentation: Bool = true
     ) {
       if let range = CalciteVimViewportProvider.visibleUTF16Range(in: textView) {
         controller.engine.updateViewport(visibleUTF16Range: range)
       }
-      if let clipView = textView.enclosingScrollView?.contentView {
+      if updatesWindowPresentation, let clipView = textView.enclosingScrollView?.contentView {
         controller.engine.updateWindowPresentation(
           horizontalScrollOffset: Double(
             normalizedHorizontalScrollOffset(clipView.bounds.origin.x, in: textView)
@@ -2471,13 +2719,16 @@ struct CodeTextEditor: NSViewRepresentable {
       let controllerID = ObjectIdentifier(controller)
       vimWindowRestorationTask?.cancel()
       vimWindowRestorationTask = Task { @MainActor [weak self, weak textView, weak scrollView] in
-        await Task.yield()
+        for _ in 0..<3 { await Task.yield() }
         guard let self, self.parent.isActiveSurface,
           let textView, let scrollView, textView.superview != nil,
           generation == self.bindingGeneration,
           interactionRevision == self.scrollInteractionRevision,
           self.vimController.map(ObjectIdentifier.init) == controllerID
         else { return }
+        if let codeScrollView = scrollView as? CodeTextScrollView {
+          codeScrollView.synchronizeDocumentSize()
+        }
         let clipView = scrollView.contentView
         let requested = NSRect(
           x: self.normalizedHorizontalScrollOffset(
@@ -2494,7 +2745,11 @@ struct CodeTextEditor: NSViewRepresentable {
         )
         clipView.scroll(to: restoredOrigin)
         scrollView.reflectScrolledClipView(clipView)
-        self.updateVimViewport(controller, in: textView)
+        self.updateVimViewport(
+          controller,
+          in: textView,
+          updatesWindowPresentation: false
+        )
         self.vimWindowRestorationTask = nil
       }
     }

@@ -261,13 +261,25 @@ actor EditorWorkspaceSessionStore {
           horizontalScrollOffset: max(0, editor.horizontalScrollOffset),
           verticalScrollOffset: max(0, editor.verticalScrollOffset),
           zoomScale: min(max(editor.zoomScale, 0.5), 2),
+          viewportAnchor: editor.viewportAnchor.map { anchor in
+            WorkspaceEditorViewportAnchorSnapshot(
+              characterOffset: max(0, anchor.characterOffset),
+              verticalOffset: anchor.verticalOffset.isFinite ? anchor.verticalOffset : 0
+            )
+          },
           documentPresentations: editor.documentPresentations.prefix(100).map { state in
             WorkspaceDocumentPresentationSnapshot(
               documentID: state.documentID,
               selectedRange: WorkspaceTextRangeSnapshot(state.selectedRange.nsRange),
               horizontalScrollOffset: max(0, state.horizontalScrollOffset),
               verticalScrollOffset: max(0, state.verticalScrollOffset),
-              zoomScale: min(max(state.zoomScale, 0.5), 2)
+              zoomScale: min(max(state.zoomScale, 0.5), 2),
+              viewportAnchor: state.viewportAnchor.map { anchor in
+                WorkspaceEditorViewportAnchorSnapshot(
+                  characterOffset: max(0, anchor.characterOffset),
+                  verticalOffset: anchor.verticalOffset.isFinite ? anchor.verticalOffset : 0
+                )
+              }
             )
           }
         )
@@ -282,6 +294,7 @@ actor EditorWorkspaceSessionStore {
           editorIDs.contains($0) ? $0 : nil
         },
         activeSectionID: window.activeSectionID,
+        sectionalLayout: window.sectionalLayout,
         editors: editors,
         sectionAssignments: Array(assignments)
       )

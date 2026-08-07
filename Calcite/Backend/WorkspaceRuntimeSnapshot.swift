@@ -24,12 +24,18 @@ nonisolated struct WorkspaceDocumentRuntimeSnapshot: Equatable, Sendable {
   var diskModificationTime: TimeInterval?
 }
 
+nonisolated struct WorkspaceEditorViewportAnchorSnapshot: Codable, Equatable, Sendable {
+  var characterOffset: Int
+  var verticalOffset: Double
+}
+
 nonisolated struct WorkspaceDocumentPresentationSnapshot: Codable, Equatable, Sendable {
   var documentID: UUID
   var selectedRange: WorkspaceTextRangeSnapshot
   var horizontalScrollOffset: Double
   var verticalScrollOffset: Double
   var zoomScale: Double
+  var viewportAnchor: WorkspaceEditorViewportAnchorSnapshot? = nil
 }
 
 nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Sendable {
@@ -39,6 +45,7 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
   var horizontalScrollOffset: Double
   var verticalScrollOffset: Double
   var zoomScale: Double
+  var viewportAnchor: WorkspaceEditorViewportAnchorSnapshot?
   var vimRuntime: VimViewRuntimeSnapshot?
   var documentPresentations: [WorkspaceDocumentPresentationSnapshot]
 
@@ -49,6 +56,7 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
     horizontalScrollOffset: Double,
     verticalScrollOffset: Double,
     zoomScale: Double,
+    viewportAnchor: WorkspaceEditorViewportAnchorSnapshot? = nil,
     vimRuntime: VimViewRuntimeSnapshot? = nil,
     documentPresentations: [WorkspaceDocumentPresentationSnapshot] = []
   ) {
@@ -58,6 +66,7 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
     self.horizontalScrollOffset = horizontalScrollOffset
     self.verticalScrollOffset = verticalScrollOffset
     self.zoomScale = zoomScale
+    self.viewportAnchor = viewportAnchor
     self.vimRuntime = vimRuntime
     self.documentPresentations = documentPresentations
   }
@@ -69,6 +78,7 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
     case horizontalScrollOffset
     case verticalScrollOffset
     case zoomScale
+    case viewportAnchor
     case vimRuntime
     case documentPresentations
   }
@@ -81,6 +91,10 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
     horizontalScrollOffset = try container.decode(Double.self, forKey: .horizontalScrollOffset)
     verticalScrollOffset = try container.decode(Double.self, forKey: .verticalScrollOffset)
     zoomScale = try container.decode(Double.self, forKey: .zoomScale)
+    viewportAnchor = try container.decodeIfPresent(
+      WorkspaceEditorViewportAnchorSnapshot.self,
+      forKey: .viewportAnchor
+    )
     vimRuntime = try container.decodeIfPresent(VimViewRuntimeSnapshot.self, forKey: .vimRuntime)
     documentPresentations =
       try container.decodeIfPresent(
@@ -97,6 +111,7 @@ nonisolated struct WorkspaceEditorPresentationSnapshot: Codable, Equatable, Send
     try container.encode(horizontalScrollOffset, forKey: .horizontalScrollOffset)
     try container.encode(verticalScrollOffset, forKey: .verticalScrollOffset)
     try container.encode(zoomScale, forKey: .zoomScale)
+    try container.encodeIfPresent(viewportAnchor, forKey: .viewportAnchor)
     try container.encodeIfPresent(vimRuntime, forKey: .vimRuntime)
     if !documentPresentations.isEmpty {
       try container.encode(documentPresentations, forKey: .documentPresentations)
@@ -113,6 +128,7 @@ nonisolated struct WorkspaceWindowPresentationSnapshot: Codable, Equatable, Send
   var windowSessionID: UUID
   var activeEditorSessionID: UUID?
   var activeSectionID: UUID?
+  var sectionalLayout: MainSectionalLayoutSnapshot?
   var editors: [WorkspaceEditorPresentationSnapshot]
   var sectionAssignments: [WorkspaceSectionEditorAssignmentSnapshot]
 }

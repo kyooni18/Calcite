@@ -106,6 +106,7 @@ final class EditorTab: ObservableObject, Identifiable {
   private var lineIndex: EditorLineIndex
   var onDiagnosticsChange: (() -> Void)?
   var onContentStateChange: (() -> Void)?
+  var onTextChange: ((UInt64) -> Void)?
 
   var title: String { url.lastPathComponent }
   var errorCount: Int { diagnostics.filter { $0.severity == .error }.count }
@@ -1198,6 +1199,7 @@ final class EditorTab: ObservableObject, Identifiable {
     if rebuildLineIndex { lineIndex.rebuild(with: value) }
     textRevision &+= 1
     text = value
+    onTextChange?(textRevision)
   }
 
   private func advancePresentationRevision() {

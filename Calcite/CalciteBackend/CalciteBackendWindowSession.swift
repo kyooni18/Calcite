@@ -71,15 +71,17 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     @Published private(set) var documentID: UUID
 
     @Published private(set) var selectedRange: NSRange
-    @Published private(set) var horizontalScrollOffset: Double
-    @Published private(set) var verticalScrollOffset: Double
+    private(set) var horizontalScrollOffset: Double
+    private(set) var verticalScrollOffset: Double
     @Published private(set) var zoomScale: Double
+    private(set) var viewportAnchor: WorkspaceEditorViewportAnchorSnapshot?
 
     private struct DocumentPresentationState {
       var selectedRange: NSRange
       var horizontalScrollOffset: Double
       var verticalScrollOffset: Double
       var zoomScale: Double
+      var viewportAnchor: WorkspaceEditorViewportAnchorSnapshot?
     }
 
     private var documentPresentationStates: [UUID: DocumentPresentationState] = [:]
@@ -100,6 +102,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       horizontalScrollOffset: Double = 0,
       verticalScrollOffset: Double = 0,
       zoomScale: Double = 1,
+      viewportAnchor: WorkspaceEditorViewportAnchorSnapshot? = nil,
       windowSession: CalciteBackendWindowSession
     ) {
       self.id = id
@@ -108,6 +111,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       self.horizontalScrollOffset = max(0, horizontalScrollOffset)
       self.verticalScrollOffset = max(0, verticalScrollOffset)
       self.zoomScale = Self.clampedZoom(zoomScale)
+      self.viewportAnchor = viewportAnchor
       self.windowSession = windowSession
       persistCurrentPresentation()
     }
@@ -125,6 +129,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         horizontalScrollOffset = max(0, stored.horizontalScrollOffset)
         verticalScrollOffset = max(0, stored.verticalScrollOffset)
         zoomScale = Self.clampedZoom(stored.zoomScale)
+        viewportAnchor = stored.viewportAnchor
       } else {
         selectedRange = Self.clamped(
           document.selectedRange,
@@ -133,6 +138,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         horizontalScrollOffset = 0
         verticalScrollOffset = 0
         zoomScale = 1
+        viewportAnchor = nil
       }
       persistCurrentPresentation()
     }
@@ -171,13 +177,19 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
           selectedRange: clamped,
           horizontalScrollOffset: 0,
           verticalScrollOffset: 0,
-          zoomScale: 1
+          zoomScale: 1,
+          viewportAnchor: nil
         )
       state.selectedRange = clamped
       documentPresentationStates[document.id] = state
     }
 
-    func updateScroll(horizontal: Double? = nil, vertical: Double? = nil) {
+    func updateScroll(
+      horizontal: Double? = nil,
+      vertical: Double? = nil,
+      anchorCharacterOffset: Int? = nil,
+      anchorVerticalOffset: Double? = nil
+    ) {
       var changed = false
       if let horizontal, horizontal.isFinite {
         let value = max(0, horizontal)
@@ -193,7 +205,22 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
           changed = true
         }
       }
-      if changed { persistCurrentPresentation() }
+      if let anchorCharacterOffset, anchorCharacterOffset >= 0,
+        let anchorVerticalOffset, anchorVerticalOffset.isFinite
+      {
+        let nextAnchor = WorkspaceEditorViewportAnchorSnapshot(
+          characterOffset: anchorCharacterOffset,
+          verticalOffset: anchorVerticalOffset
+        )
+        if viewportAnchor != nextAnchor {
+          viewportAnchor = nextAnchor
+          changed = true
+        }
+      }
+      if changed {
+        persistCurrentPresentation()
+        windowSession?.backend?.controller.schedulePresentationPersistence()
+      }
     }
 
     func updateZoom(_ scale: Double) {
@@ -254,6 +281,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         horizontalScrollOffset: horizontalScrollOffset,
         verticalScrollOffset: verticalScrollOffset,
         zoomScale: zoomScale,
+        viewportAnchor: viewportAnchor,
         vimRuntime: vimRuntime,
         documentPresentations: documentPresentationStates.map { documentID, state in
           WorkspaceDocumentPresentationSnapshot(
@@ -261,7 +289,8 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
             selectedRange: WorkspaceTextRangeSnapshot(state.selectedRange),
             horizontalScrollOffset: state.horizontalScrollOffset,
             verticalScrollOffset: state.verticalScrollOffset,
-            zoomScale: state.zoomScale
+            zoomScale: state.zoomScale,
+            viewportAnchor: state.viewportAnchor
           )
         }.sorted { lhs, rhs in
           lhs.documentID.uuidString < rhs.documentID.uuidString
@@ -282,7 +311,13 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
           ),
           horizontalScrollOffset: max(0, value.horizontalScrollOffset),
           verticalScrollOffset: max(0, value.verticalScrollOffset),
-          zoomScale: Self.clampedZoom(value.zoomScale)
+          zoomScale: Self.clampedZoom(value.zoomScale),
+          viewportAnchor: value.viewportAnchor.map { anchor in
+            WorkspaceEditorViewportAnchorSnapshot(
+              characterOffset: min(max(0, anchor.characterOffset), document.text.utf16.count),
+              verticalOffset: anchor.verticalOffset.isFinite ? anchor.verticalOffset : 0
+            )
+          }
         )
       }
       if let current = documentPresentationStates[documentID] {
@@ -290,6 +325,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         horizontalScrollOffset = current.horizontalScrollOffset
         verticalScrollOffset = current.verticalScrollOffset
         zoomScale = current.zoomScale
+        viewportAnchor = current.viewportAnchor
       }
       persistCurrentPresentation()
     }
@@ -311,7 +347,8 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         selectedRange: selectedRange,
         horizontalScrollOffset: horizontalScrollOffset,
         verticalScrollOffset: verticalScrollOffset,
-        zoomScale: zoomScale
+        zoomScale: zoomScale,
+        viewportAnchor: viewportAnchor
       )
     }
 
@@ -613,6 +650,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
 
   func backendDidClose() {
     guard !isClosed else { return }
+    sectionalLayout.flushPendingPersistence()
     isClosed = true
     nowPlaying.stop()
     observations.removeAll()
@@ -640,6 +678,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
       windowSessionID: id,
       activeEditorSessionID: activeEditorSessionID,
       activeSectionID: sectionalLayout.activeSectionID,
+      sectionalLayout: sectionalLayout.captureSnapshot(),
       editors: editorSessions.map { editor in
         let vimRuntime =
           vimSessionCoordinator.runtimeSnapshot(
@@ -665,6 +704,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
   func restoreRuntimePresentationSnapshot(_ snapshot: WorkspaceWindowPresentationSnapshot) {
     guard !isClosed, let backend else { return }
 
+    if let savedLayout = snapshot.sectionalLayout {
+      sectionalLayout.restoreSnapshot(savedLayout, persistWorkspaceFallback: false)
+      showsSidebar = sectionalLayout.containsVisible(.sidebar)
+    }
+
     for editor in editorSessions {
       vimSessionCoordinator.removeWindow(VimWindowID(editor.id))
     }
@@ -686,6 +730,7 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
         horizontalScrollOffset: value.horizontalScrollOffset,
         verticalScrollOffset: value.verticalScrollOffset,
         zoomScale: value.zoomScale,
+        viewportAnchor: value.viewportAnchor,
         windowSession: self
       )
       editor.restoreDocumentPresentations(value.documentPresentations)
@@ -2035,6 +2080,11 @@ final class CalciteBackendWindowSession: ObservableObject, Identifiable {
     forwardChanges(from: commandExecutor)
     forwardChanges(from: nowPlaying)
     forwardChanges(from: sectionalLayout)
+    sectionalLayout.objectWillChange
+      .sink { [weak self] _ in
+        self?.backend?.controller.schedulePresentationPersistence()
+      }
+      .store(in: &observations)
 
     if let controller = backend?.controller {
       controller.$profile

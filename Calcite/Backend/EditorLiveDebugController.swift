@@ -10,6 +10,7 @@ final class EditorLiveDebugController: ObservableObject {
   private let rootResolver: RootResolver
   private let filter: Filter
   private let applyChanges: ApplyChanges
+  private let settleDelay: Duration
   @Published private(set) var phase: EditorLiveDebugPhase = .disabled
   private var monitors: [ProjectFileSystemMonitor] = []
   private var changes = EditorLiveDebugChangeAccumulator()
@@ -21,10 +22,12 @@ final class EditorLiveDebugController: ObservableObject {
   init(
     rootResolver: @escaping RootResolver,
     filter: @escaping Filter,
+    settleDelay: Duration = .milliseconds(220),
     applyChanges: @escaping ApplyChanges
   ) {
     self.rootResolver = rootResolver
     self.filter = filter
+    self.settleDelay = max(settleDelay, .milliseconds(50))
     self.applyChanges = applyChanges
   }
 
@@ -107,7 +110,7 @@ final class EditorLiveDebugController: ObservableObject {
     while isEnabled, generation == taskGeneration, !Task.isCancelled {
       var observed = changes.generation
       while true {
-        do { try await Task.sleep(for: .milliseconds(450)) } catch { return }
+        do { try await Task.sleep(for: settleDelay) } catch { return }
         guard generation == taskGeneration, !Task.isCancelled else { return }
         if observed == changes.generation { break }
         observed = changes.generation

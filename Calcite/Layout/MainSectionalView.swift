@@ -274,134 +274,184 @@ private struct MainSectionLayoutNodeView: View {
 
   @ViewBuilder
   private var splitView: some View {
-    if visibleChildren.count == 1, let child = visibleChildren.first {
-      MainSectionLayoutNodeView(
-        node: child,
-        backend: backend,
-        windowSession: windowSession,
-        layout: layout,
-        parentSplitAxis: node.splitAxis
-      )
+    if visibleChildren.isEmpty {
+      EmptyView()
     } else {
-      switch node.splitAxis ?? .horizontal {
-      case .horizontal:
-        HSplitView { splitChildren }
-          .background(splitAutosaveInstaller.allowsHitTesting(false))
-      case .vertical:
-        VSplitView { splitChildren }
-          .background(splitAutosaveInstaller.allowsHitTesting(false))
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var splitChildren: some View {
-    ForEach(visibleChildren) { child in
-      MainSectionLayoutNodeView(
-        node: child,
-        backend: backend,
-        windowSession: windowSession,
-        layout: layout,
-        parentSplitAxis: node.splitAxis
+      let axis = node.splitAxis ?? .horizontal
+      let childIDs = visibleChildren.map(\.id)
+      let configurationID = node.geometryVisibilitySignature(visibleOnly: true)
+      let defaultSecondaryFraction = windowSession.layoutProfile.defaultSecondaryFraction(
+        for: node.splitAxis,
+        childCount: visibleChildren.count
       )
-    }
-  }
-
-  private var splitAutosaveInstaller: some View {
-    let childIDs = visibleChildren.map(\.id)
-    let defaultSecondaryFraction = windowSession.layoutProfile.defaultSecondaryFraction(
-      for: node.splitAxis,
-      childCount: visibleChildren.count
-    )
-    return MainSectionSplitGeometryInstaller(
-      splitID: node.id,
-      childIDs: childIDs,
-      isGeometryEnabled: visibleChildren.allSatisfy(\.hasVisibleContent),
-      fractions: layout.splitFractions(
+      let fractions = layout.splitFractions(
         for: node.id,
         visibleChildIDs: childIDs,
+        configurationID: configurationID,
         defaultSecondaryFraction: defaultSecondaryFraction.map { Double($0) }
-      ),
-      onFractionsChanged: { fractions in
-        layout.updateSplitFractions(
-          splitID: node.id,
-          visibleChildIDs: childIDs,
-          fractions: fractions
+      )
+      let children = visibleChildren.map { child in
+        MainSectionOwnedSplitChild(
+          id: child.id,
+          content: AnyView(
+            MainSectionLayoutNodeView(
+              node: child,
+              backend: backend,
+              windowSession: windowSession,
+              layout: layout,
+              parentSplitAxis: axis
+            )
+            .id(child.id)
+          ),
+          minimumThickness: child.minimumThickness(in: axis),
+          holdingPriority: child.splitHoldingPriority
         )
       }
-    )
-  }
-}
 
-/// Bridges SwiftUI's `HSplitView` / `VSplitView` to the controller-owned geometry model. AppKit
-/// remains responsible for interactive divider dragging, while persisted fractions are keyed by
-/// stable split and child IDs instead of by temporary SwiftUI view identity.
-@MainActor
-private struct MainSectionSplitGeometryInstaller: NSViewRepresentable {
-  let splitID: UUID
-  let childIDs: [UUID]
-  let isGeometryEnabled: Bool
-  let fractions: [Double]
-  let onFractionsChanged: ([Double]) -> Void
-
-  func makeNSView(context: Context) -> MainSectionSplitGeometryLocatorView {
-    MainSectionSplitGeometryLocatorView(
-      splitID: splitID,
-      childIDs: childIDs,
-      isGeometryEnabled: isGeometryEnabled,
-      fractions: fractions,
-      onFractionsChanged: onFractionsChanged
-    )
-  }
-
-  func updateNSView(
-    _ nsView: MainSectionSplitGeometryLocatorView,
-    context: Context
-  ) {
-    nsView.splitID = splitID
-    nsView.childIDs = childIDs
-    nsView.isGeometryEnabled = isGeometryEnabled
-    nsView.fractions = fractions
-    nsView.onFractionsChanged = onFractionsChanged
-    nsView.scheduleInstallation()
-  }
-}
-
-@MainActor
-private final class MainSectionSplitGeometryLocatorView: NSView {
-  var splitID: UUID
-  var childIDs: [UUID]
-  var isGeometryEnabled: Bool {
-    didSet {
-      if oldValue != isGeometryEnabled { lastAppliedSignature = "" }
+      // Keep the split host alive even with a single visible child. Removing the wrapper used to
+      // destroy and recreate the editor NSTextView whenever a sidebar/fast panel was toggled.
+      MainSectionOwnedSplitView(
+        splitID: node.id,
+        axis: axis,
+        configurationID: configurationID,
+        children: children,
+        preferredFractions: fractions,
+        onPreferredFractionsChanged: { changedFractions in
+          layout.updateSplitFractions(
+            splitID: node.id,
+            visibleChildIDs: childIDs,
+            configurationID: configurationID,
+            fractions: changedFractions
+          )
+        }
+      )
     }
   }
-  var fractions: [Double]
-  var onFractionsChanged: ([Double]) -> Void
 
-  private weak var installedSplitView: NSSplitView?
-  private var mouseEventMonitor: Any?
-  private var installationWorkItem: DispatchWorkItem?
-  private var captureWorkItem: DispatchWorkItem?
-  private var geometryReleaseWorkItem: DispatchWorkItem?
-  private var geometryApplyGeneration: UInt64 = 0
-  private var isApplyingGeometry = false
-  private var isUserResizing = false
-  private var lastAppliedSignature = ""
+}
 
-  init(
-    splitID: UUID,
-    childIDs: [UUID],
-    isGeometryEnabled: Bool,
-    fractions: [Double],
-    onFractionsChanged: @escaping ([Double]) -> Void
-  ) {
-    self.splitID = splitID
-    self.childIDs = childIDs
-    self.isGeometryEnabled = isGeometryEnabled
-    self.fractions = fractions
-    self.onFractionsChanged = onFractionsChanged
-    super.init(frame: .zero)
+extension MainSectionLayoutNode {
+  fileprivate func minimumThickness(in parentAxis: MainSectionSplitAxis) -> CGFloat {
+    switch type {
+    case .section:
+      guard hasVisibleContent else {
+        return parentAxis == .horizontal ? 28 : 24
+      }
+      let kinds = visibleTabs.map(\.kind)
+      switch parentAxis {
+      case .horizontal:
+        return CGFloat(kinds.map(\.minimumWidth).max() ?? MainSectionKind.empty.minimumWidth)
+      case .vertical:
+        return CGFloat(kinds.map(\.minimumHeight).max() ?? MainSectionKind.empty.minimumHeight)
+      }
+
+    case .split:
+      let renderedChildren = children.filter {
+        $0.hasVisibleContent || !$0.fastPanelSectionIDs.isEmpty
+      }
+      guard !renderedChildren.isEmpty else { return 1 }
+      let childMinimums = renderedChildren.map { $0.minimumThickness(in: parentAxis) }
+      if splitAxis == parentAxis {
+        return childMinimums.reduce(0, +) + CGFloat(max(0, childMinimums.count - 1))
+      }
+      return childMinimums.max() ?? 1
+    }
+  }
+
+  fileprivate var splitHoldingPriority: NSLayoutConstraint.Priority {
+    if contains(kind: .workspace, visibleOnly: true) || contains(kind: .editor, visibleOnly: true) {
+      // Editor/workspace panes intentionally absorb window growth and shrinkage first.
+      return NSLayoutConstraint.Priority(rawValue: 250)
+    }
+    if sectionKinds.contains(.sidebar) || sectionKinds.contains(.symbols) {
+      return NSLayoutConstraint.Priority(rawValue: 360)
+    }
+    if sectionKinds.contains(where: \.isBottomPanelKind) || sectionKinds.contains(.debug) {
+      return NSLayoutConstraint.Priority(rawValue: 350)
+    }
+    if sectionKinds.contains(.settings) || sectionKinds.contains(.themeBuilder) {
+      return NSLayoutConstraint.Priority(rawValue: 330)
+    }
+    return NSLayoutConstraint.Priority(rawValue: 300)
+  }
+}
+
+/// One split pane hosted by Calcite's AppKit-owned split renderer. `AnyView` is deliberate here:
+/// the hosting view remains stable by child UUID while SwiftUI is free to update the pane content.
+struct MainSectionOwnedSplitChild {
+  let id: UUID
+  let content: AnyView
+  let minimumThickness: CGFloat
+  let holdingPriority: NSLayoutConstraint.Priority
+}
+
+/// Owns the actual `NSSplitView` instead of reaching through SwiftUI's `HSplitView` / `VSplitView`
+/// implementation. Preferred geometry only crosses the SwiftUI/AppKit boundary for initial restore,
+/// explicit profile/undo changes, and one final commit after a user divider drag.
+@MainActor
+private struct MainSectionOwnedSplitView: NSViewRepresentable {
+  let splitID: UUID
+  let axis: MainSectionSplitAxis
+  let configurationID: String
+  let children: [MainSectionOwnedSplitChild]
+  let preferredFractions: [Double]
+  let onPreferredFractionsChanged: ([Double]) -> Void
+
+  func makeNSView(context: Context) -> MainSectionOwnedNSSplitView {
+    let splitView = MainSectionOwnedNSSplitView(frame: .zero)
+    splitView.configure(
+      splitID: splitID,
+      axis: axis,
+      configurationID: configurationID,
+      children: children,
+      preferredFractions: preferredFractions,
+      onPreferredFractionsChanged: onPreferredFractionsChanged
+    )
+    return splitView
+  }
+
+  func updateNSView(_ nsView: MainSectionOwnedNSSplitView, context: Context) {
+    nsView.configure(
+      splitID: splitID,
+      axis: axis,
+      configurationID: configurationID,
+      children: children,
+      preferredFractions: preferredFractions,
+      onPreferredFractionsChanged: onPreferredFractionsChanged
+    )
+  }
+}
+
+@MainActor
+final class MainSectionOwnedNSSplitView: NSSplitView, NSSplitViewDelegate {
+  private enum GeometryState: String {
+    case uninitialized
+    case restoring
+    case ready
+    case userDragging
+  }
+
+  private var splitID = UUID()
+  private var axis: MainSectionSplitAxis = .horizontal
+  private var configurationID = ""
+  private var childIDs: [UUID] = []
+  private var hostingViews: [UUID: NSHostingView<AnyView>] = [:]
+  private var minimumThicknesses: [CGFloat] = []
+  private var modelFractions: [Double] = []
+  private var preferredFractions: [Double] = []
+  private var lastSubmittedFractions: [Double]?
+  private var needsPreferredGeometryApplication = false
+  private var isApplyingPreferredGeometry = false
+  private var state: GeometryState = .uninitialized
+  private var sawWindowLiveResize = false
+  private var onPreferredFractionsChanged: ([Double]) -> Void = { _ in }
+
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    dividerStyle = .thin
+    arrangesAllSubviews = false
+    autosaveName = nil
+    delegate = self
   }
 
   @available(*, unavailable)
@@ -409,265 +459,414 @@ private final class MainSectionSplitGeometryLocatorView: NSView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func viewWillMove(toWindow newWindow: NSWindow?) {
-    if newWindow == nil {
-      tearDownObservation()
+  func configure(
+    splitID: UUID,
+    axis: MainSectionSplitAxis,
+    configurationID: String,
+    children: [MainSectionOwnedSplitChild],
+    preferredFractions: [Double],
+    onPreferredFractionsChanged: @escaping ([Double]) -> Void
+  ) {
+    let nextChildIDs = children.map(\.id)
+    let topologyChanged =
+      self.splitID != splitID || self.axis != axis || childIDs != nextChildIDs
+    let geometryConfigurationChanged = self.configurationID != configurationID
+
+    self.splitID = splitID
+    self.axis = axis
+    self.configurationID = configurationID
+    self.onPreferredFractionsChanged = onPreferredFractionsChanged
+    isVertical = axis == .horizontal
+
+    if topologyChanged {
+      childIDs = nextChildIDs
+      reconcileChildren(children)
+      minimumThicknesses = children.map(\.minimumThickness)
+      applyHoldingPriorities(children)
+      let normalized = normalizedFractions(preferredFractions, count: children.count)
+      modelFractions = normalized
+      self.preferredFractions = normalized
+      lastSubmittedFractions = nil
+      needsPreferredGeometryApplication = children.count > 1
+      state = children.count > 1 ? .restoring : .ready
+      log(
+        "Split topology installed",
+        metadata: ["children": String(children.count), "axis": axis.rawValue]
+      )
+      needsLayout = true
+      applyPreferredGeometryIfPossible()
+      return
     }
-    super.viewWillMove(toWindow: newWindow)
-  }
 
-  private func tearDownObservation() {
-    installationWorkItem?.cancel()
-    installationWorkItem = nil
-    captureWorkItem?.cancel()
-    captureWorkItem = nil
-    geometryReleaseWorkItem?.cancel()
-    geometryReleaseWorkItem = nil
-    if let mouseEventMonitor {
-      NSEvent.removeMonitor(mouseEventMonitor)
-      self.mouseEventMonitor = nil
+    updateHostedContent(children)
+    minimumThicknesses = children.map(\.minimumThickness)
+    applyHoldingPriorities(children)
+
+    let normalizedModel = normalizedFractions(preferredFractions, count: children.count)
+    if geometryConfigurationChanged {
+      // A fast-panel visibility change can leave the rendered child IDs unchanged. The geometry
+      // configuration identity is therefore part of the restore trigger even when the numeric
+      // fractions happen to equal the previous state's preferred fractions.
+      modelFractions = normalizedModel
+      self.preferredFractions = normalizedModel
+      lastSubmittedFractions = nil
+      needsPreferredGeometryApplication = children.count > 1
+      state = children.count > 1 ? .restoring : .ready
+      needsLayout = true
+      applyPreferredGeometryIfPossible()
+      return
     }
-    installedSplitView = nil
-    isUserResizing = false
-  }
 
-  override func viewDidMoveToSuperview() {
-    super.viewDidMoveToSuperview()
-    scheduleInstallation()
-  }
+    guard !fractionsApproximatelyEqual(normalizedModel, modelFractions) else { return }
+    modelFractions = normalizedModel
 
-  override func viewDidMoveToWindow() {
-    super.viewDidMoveToWindow()
-    scheduleInstallation()
-  }
+    if let submitted = lastSubmittedFractions,
+      fractionsApproximatelyEqual(normalizedModel, submitted)
+    {
+      // The AppKit split already has this geometry: this update is the model acknowledging the
+      // completed user drag, not a command to move the divider again.
+      self.preferredFractions = normalizedModel
+      lastSubmittedFractions = nil
+      needsPreferredGeometryApplication = false
+      state = .ready
+      return
+    }
 
-  override var acceptsFirstResponder: Bool { false }
-
-  override func hitTest(_ point: NSPoint) -> NSView? {
-    // This view only discovers its containing NSSplitView. It must never become
-    // an input surface, otherwise it can swallow clicks intended for NSTextView.
-    nil
+    // Undo, redo, profile changes and window-session restoration are authoritative model changes.
+    self.preferredFractions = normalizedModel
+    needsPreferredGeometryApplication = children.count > 1
+    state = children.count > 1 ? .restoring : .ready
+    needsLayout = true
+    applyPreferredGeometryIfPossible()
   }
 
   override func layout() {
     super.layout()
-    scheduleInstallation()
+    if window?.inLiveResize == true {
+      sawWindowLiveResize = true
+    }
+    applyPreferredGeometryIfPossible()
   }
 
-  func scheduleInstallation() {
-    // SwiftUI can rebuild a split and report several transient frames in the same run-loop turn.
-    // Apply once after the hierarchy has settled instead of pushing persisted geometry into each
-    // intermediate frame.
-    guard installationWorkItem == nil else { return }
-    let workItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        self.installationWorkItem = nil
-        self.installAndApplyGeometry()
+  override func viewDidEndLiveResize() {
+    super.viewDidEndLiveResize()
+    guard sawWindowLiveResize else { return }
+    sawWindowLiveResize = false
+    restorePreferredGeometryAfterResizeIfPossible()
+  }
+
+  func restorePreferredGeometryAfterResizeIfPossible() {
+    guard state == .ready, childIDs.count > 1 else { return }
+    let availableLength = currentAvailableLength
+    guard canSatisfyPreferredGeometry(availableLength: availableLength) else { return }
+    // Window resizing is not a user divider edit. Re-apply the user's preferred geometry once,
+    // after the resize transaction ends, instead of fighting AppKit on every intermediate frame.
+    needsPreferredGeometryApplication = true
+    state = .restoring
+    applyPreferredGeometryIfPossible()
+  }
+
+  override func mouseDown(with event: NSEvent) {
+    let point = convert(event.locationInWindow, from: nil)
+    let isDividerInteraction = pointIsOnDivider(point)
+    if isDividerInteraction {
+      state = .userDragging
+      needsPreferredGeometryApplication = false
+      log("Split drag began")
+    }
+
+    super.mouseDown(with: event)
+
+    if isDividerInteraction {
+      finishUserDrag()
+    }
+  }
+
+  private func reconcileChildren(_ children: [MainSectionOwnedSplitChild]) {
+    let nextIDs = Set(children.map(\.id))
+
+    // Remove only panes that actually disappeared. Keeping the existing hosting view for panes
+    // that remain visible preserves the editor's NSTextView, first responder and scroll state.
+    let removedIDs = hostingViews.keys.filter { !nextIDs.contains($0) }
+    for id in removedIDs {
+      guard let hostingView = hostingViews.removeValue(forKey: id) else { continue }
+      if arrangedSubviews.contains(hostingView) {
+        removeArrangedSubview(hostingView)
       }
+      hostingView.removeFromSuperview()
     }
-    installationWorkItem = workItem
-    DispatchQueue.main.async(execute: workItem)
-  }
 
-  private func installAndApplyGeometry() {
-    guard let splitView = containingSplitView() else { return }
-    if installedSplitView !== splitView { installObserver(for: splitView) }
-    applyGeometry(to: splitView)
-  }
-
-  private func containingSplitView() -> NSSplitView? {
-    var candidate = superview
-    while let view = candidate {
-      if let splitView = view as? NSSplitView { return splitView }
-      candidate = view.superview
-    }
-    return nil
-  }
-
-  private func installObserver(for splitView: NSSplitView) {
-    if let mouseEventMonitor { NSEvent.removeMonitor(mouseEventMonitor) }
-    installedSplitView = splitView
-    isUserResizing = false
-    lastAppliedSignature = ""
-    mouseEventMonitor = NSEvent.addLocalMonitorForEvents(
-      matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-    ) { [weak self, weak splitView] event in
-      guard let self, let splitView, event.window === splitView.window else { return event }
-      switch event.type {
-      case .leftMouseDown:
-        let point = splitView.convert(event.locationInWindow, from: nil)
-        guard self.isPointOnDivider(point, in: splitView) else { return event }
-        self.captureWorkItem?.cancel()
-        self.captureWorkItem = nil
-        self.isUserResizing = true
-      case .leftMouseUp:
-        guard self.isUserResizing else { return event }
-        self.finishUserResize(in: splitView)
-      case .leftMouseDragged:
-        break
-      default:
-        break
-      }
-      return event
-    }
-  }
-
-  private func finishUserResize(in splitView: NSSplitView) {
-    captureWorkItem?.cancel()
-    let workItem = DispatchWorkItem { [weak self, weak splitView] in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        defer {
-          self.isUserResizing = false
-          self.captureWorkItem = nil
-          self.scheduleInstallation()
-        }
-        guard let splitView, !self.isApplyingGeometry,
-          self.installedSplitView === splitView
-        else { return }
-        self.captureGeometry(from: splitView)
-      }
-    }
-    captureWorkItem = workItem
-    // Let NSSplitView finish the mouse-up layout before reading its final frames.
-    DispatchQueue.main.async(execute: workItem)
-  }
-
-  private func isPointOnDivider(_ point: NSPoint, in splitView: NSSplitView) -> Bool {
-    let subviews = splitView.arrangedSubviews
-    guard subviews.count > 1 else { return false }
-    let hitSlop: CGFloat = 4
-    let thickness = max(1, splitView.dividerThickness)
-
-    for index in 0..<(subviews.count - 1) {
-      let first = subviews[index].frame
-      let second = subviews[index + 1].frame
-      let dividerRect: NSRect
-      if splitView.isVertical {
-        let dividerCenter: CGFloat
-        if first.maxX <= second.minX {
-          dividerCenter = (first.maxX + second.minX) / 2
-        } else if second.maxX <= first.minX {
-          dividerCenter = (second.maxX + first.minX) / 2
-        } else {
-          dividerCenter = (first.midX + second.midX) / 2
-        }
-        dividerRect = NSRect(
-          x: dividerCenter - thickness / 2 - hitSlop,
-          y: splitView.bounds.minY,
-          width: thickness + hitSlop * 2,
-          height: splitView.bounds.height
-        )
+    for (index, child) in children.enumerated() {
+      let hostingView: NSHostingView<AnyView>
+      if let existing = hostingViews[child.id] {
+        hostingView = existing
+        hostingView.rootView = child.content
       } else {
-        let dividerCenter: CGFloat
-        if first.maxY <= second.minY {
-          dividerCenter = (first.maxY + second.minY) / 2
-        } else if second.maxY <= first.minY {
-          dividerCenter = (second.maxY + first.minY) / 2
-        } else {
-          dividerCenter = (first.midY + second.midY) / 2
-        }
-        dividerRect = NSRect(
-          x: splitView.bounds.minX,
-          y: dividerCenter - thickness / 2 - hitSlop,
-          width: splitView.bounds.width,
-          height: thickness + hitSlop * 2
-        )
+        let created = NSHostingView(rootView: child.content)
+        created.translatesAutoresizingMaskIntoConstraints = true
+        hostingViews[child.id] = created
+        hostingView = created
       }
-      if dividerRect.contains(point) { return true }
+
+      let currentIndex = arrangedSubviews.firstIndex(of: hostingView)
+      if currentIndex != index {
+        // NSSplitView moves an already-arranged view when inserted at a different index, so the
+        // surviving hosting view never needs to be detached from the hierarchy.
+        insertArrangedSubview(hostingView, at: min(index, arrangedSubviews.count))
+      }
     }
-    return false
   }
 
-  private func applyGeometry(to splitView: NSSplitView) {
-    guard isGeometryEnabled, !isApplyingGeometry, !isUserResizing,
+  private func updateHostedContent(_ children: [MainSectionOwnedSplitChild]) {
+    for child in children {
+      hostingViews[child.id]?.rootView = child.content
+    }
+  }
+
+  private func applyHoldingPriorities(_ children: [MainSectionOwnedSplitChild]) {
+    guard arrangedSubviews.count == children.count else { return }
+    for (index, child) in children.enumerated() {
+      setHoldingPriority(child.holdingPriority, forSubviewAt: index)
+    }
+  }
+
+  private func applyPreferredGeometryIfPossible() {
+    guard needsPreferredGeometryApplication,
+      !isApplyingPreferredGeometry,
+      state != .userDragging,
+      arrangedSubviews.count == childIDs.count,
       childIDs.count > 1,
-      splitView.arrangedSubviews.count == childIDs.count,
-      fractions.count == childIDs.count
+      preferredFractions.count == childIDs.count
     else { return }
 
-    let boundsLength = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
-    let dividerCount = normalizedDividerCount(childCount: childIDs.count)
-    let dividerTotal = splitView.dividerThickness * CGFloat(dividerCount)
-    let availableLength = boundsLength - dividerTotal
+    let totalLength = isVertical ? bounds.width : bounds.height
+    let dividerTotal = dividerThickness * CGFloat(max(0, childIDs.count - 1))
+    let availableLength = totalLength - dividerTotal
     guard availableLength > 1 else { return }
-    let normalized = normalizedFractions(fractions)
-    let signature =
-      "\(splitID.uuidString)|\(childIDs.map(\.uuidString).joined(separator: ","))|"
-      + normalized.map { String(format: "%.6f", $0) }.joined(separator: ",")
-      + "|\(Int(boundsLength.rounded()))"
-    guard signature != lastAppliedSignature else { return }
 
-    geometryApplyGeneration &+= 1
-    let applyGeneration = geometryApplyGeneration
-    geometryReleaseWorkItem?.cancel()
-    isApplyingGeometry = true
+    isApplyingPreferredGeometry = true
+    defer { isApplyingPreferredGeometry = false }
+
+    let normalized = resolvedFractions(
+      preferredFractions,
+      availableLength: availableLength
+    )
     var cumulative = 0.0
     for dividerIndex in 0..<(normalized.count - 1) {
       cumulative += normalized[dividerIndex]
       let position: CGFloat
-      if splitView.isVertical {
-        // Left-to-right content: preceding content plus the preceding dividers.
-        position =
-          availableLength * cumulative
-          + splitView.dividerThickness * CGFloat(dividerIndex)
+      if isVertical {
+        position = availableLength * cumulative + dividerThickness * CGFloat(dividerIndex)
       } else {
-        // Top-to-bottom content: AppKit measures from the lower edge, so count the content and
-        // dividers that remain below this divider.
+        // NSSplitView numbers horizontal panes from top to bottom but its Y coordinates originate
+        // at the lower edge, so the remaining content below the divider determines its position.
         let dividersBelow = normalized.count - dividerIndex - 2
         position =
           availableLength * (1 - cumulative)
-          + splitView.dividerThickness * CGFloat(dividersBelow)
+          + dividerThickness * CGFloat(dividersBelow)
       }
-      splitView.setPosition(position, ofDividerAt: dividerIndex)
+      setPosition(position, ofDividerAt: dividerIndex)
     }
-    lastAppliedSignature = signature
-    let releaseWorkItem = DispatchWorkItem { [weak self] in
-      MainActor.assumeIsolated {
-        guard let self, self.geometryApplyGeneration == applyGeneration else { return }
-        self.isApplyingGeometry = false
-        self.geometryReleaseWorkItem = nil
-      }
-    }
-    geometryReleaseWorkItem = releaseWorkItem
-    DispatchQueue.main.async(execute: releaseWorkItem)
+
+    needsPreferredGeometryApplication = false
+    state = .ready
+    log("Preferred split geometry applied")
   }
 
-  private func captureGeometry(from splitView: NSSplitView) {
-    guard isGeometryEnabled,
-      !isApplyingGeometry,
-      splitView.arrangedSubviews.count == childIDs.count,
-      childIDs.count > 1
-    else { return }
-    let sizes = splitView.arrangedSubviews.map { view in
-      Double(splitView.isVertical ? view.frame.width : view.frame.height)
+  private func finishUserDrag() {
+    defer { state = .ready }
+    guard arrangedSubviews.count == childIDs.count, childIDs.count > 1 else { return }
+    let sizes = arrangedSubviews.map { view in
+      Double(isVertical ? view.frame.width : view.frame.height)
     }
     let total = sizes.reduce(0, +)
     guard total > 1 else { return }
-    let captured = sizes.map { $0 / total }
-    let normalizedCurrent = normalizedFractions(fractions)
-    guard
-      zip(captured, normalizedCurrent).contains(
-        where: { pair in abs(pair.0 - pair.1) > 0.001 }
-      )
-    else {
-      return
+    let captured = normalizedFractions(sizes.map { $0 / total }, count: sizes.count)
+
+    preferredFractions = captured
+    needsPreferredGeometryApplication = false
+    guard !fractionsApproximatelyEqual(captured, modelFractions) else { return }
+
+    lastSubmittedFractions = captured
+    log(
+      "Split drag committed",
+      metadata: ["fractions": captured.map { String(format: "%.4f", $0) }.joined(separator: ",")]
+    )
+    onPreferredFractionsChanged(captured)
+  }
+
+  private func pointIsOnDivider(_ point: NSPoint) -> Bool {
+    let views = arrangedSubviews
+    guard views.count > 1 else { return false }
+    let hitSlop: CGFloat = 4
+    let thickness = max(1, dividerThickness)
+
+    for index in 0..<(views.count - 1) {
+      let first = views[index].frame
+      let second = views[index + 1].frame
+      let rect: NSRect
+      if isVertical {
+        let center = (first.maxX + second.minX) / 2
+        rect = NSRect(
+          x: center - thickness / 2 - hitSlop,
+          y: bounds.minY,
+          width: thickness + hitSlop * 2,
+          height: bounds.height
+        )
+      } else {
+        let upper = max(first.minY, second.minY)
+        let lower = min(first.maxY, second.maxY)
+        let center = (upper + lower) / 2
+        rect = NSRect(
+          x: bounds.minX,
+          y: center - thickness / 2 - hitSlop,
+          width: bounds.width,
+          height: thickness + hitSlop * 2
+        )
+      }
+      if rect.contains(point) { return true }
     }
-    fractions = captured
-    lastAppliedSignature = ""
-    onFractionsChanged(captured)
+    return false
   }
 
-  private func normalizedDividerCount(childCount: Int) -> Int {
-    max(0, childCount - 1)
+  func splitView(
+    _ splitView: NSSplitView,
+    constrainSplitPosition proposedPosition: CGFloat,
+    ofSubviewAt dividerIndex: Int
+  ) -> CGFloat {
+    guard minimumThicknesses.count == arrangedSubviews.count,
+      minimumThicknesses.indices.contains(dividerIndex),
+      dividerIndex + 1 < minimumThicknesses.count
+    else { return proposedPosition }
+
+    let divider = splitView.dividerThickness
+    let count = minimumThicknesses.count
+    let prefix = minimumThicknesses[0...dividerIndex].reduce(0, +)
+    let suffix = minimumThicknesses[(dividerIndex + 1)..<count].reduce(0, +)
+    let totalLength = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+
+    let minimumPosition: CGFloat
+    let maximumPosition: CGFloat
+    if splitView.isVertical {
+      minimumPosition = prefix + divider * CGFloat(dividerIndex)
+      maximumPosition = totalLength - suffix - divider * CGFloat(count - dividerIndex - 1)
+    } else {
+      minimumPosition = suffix + divider * CGFloat(max(0, count - dividerIndex - 2))
+      maximumPosition = totalLength - prefix - divider * CGFloat(dividerIndex + 1)
+    }
+
+    guard minimumPosition <= maximumPosition else { return proposedPosition }
+    return min(max(proposedPosition, minimumPosition), maximumPosition)
   }
 
-  private func normalizedFractions(_ values: [Double]) -> [Double] {
-    let sanitized = values.map { $0.isFinite && $0 > 0 ? $0 : 0 }
+  func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+    false
+  }
+
+  func splitView(
+    _ splitView: NSSplitView,
+    additionalEffectiveRectOfDividerAt dividerIndex: Int
+  ) -> NSRect {
+    guard arrangedSubviews.indices.contains(dividerIndex),
+      arrangedSubviews.indices.contains(dividerIndex + 1)
+    else { return .zero }
+    let first = arrangedSubviews[dividerIndex].frame
+    let second = arrangedSubviews[dividerIndex + 1].frame
+    if isVertical {
+      let center = (first.maxX + second.minX) / 2
+      return NSRect(x: center - 4, y: bounds.minY, width: 8, height: bounds.height)
+    }
+    let center = (first.minY + second.maxY) / 2
+    return NSRect(x: bounds.minX, y: center - 4, width: bounds.width, height: 8)
+  }
+
+  private func canSatisfyPreferredGeometry(availableLength: CGFloat) -> Bool {
+    guard availableLength > 1,
+      minimumThicknesses.count == preferredFractions.count,
+      preferredFractions.count == childIDs.count
+    else { return false }
+    let normalized = normalizedFractions(preferredFractions, count: childIDs.count)
+    return zip(normalized, minimumThicknesses).allSatisfy { fraction, minimum in
+      availableLength * CGFloat(fraction) + 0.5 >= minimum
+    }
+  }
+
+  private func resolvedFractions(
+    _ fractions: [Double],
+    availableLength: CGFloat
+  ) -> [Double] {
+    let normalized = normalizedFractions(fractions, count: childIDs.count)
+    guard availableLength > 1,
+      minimumThicknesses.count == childIDs.count,
+      childIDs.count > 1
+    else { return normalized }
+
+    let minimumTotal = minimumThicknesses.reduce(0, +)
+    guard minimumTotal < availableLength else { return normalized }
+
+    let desiredSizes = normalized.map { availableLength * CGFloat($0) }
+    if zip(desiredSizes, minimumThicknesses).allSatisfy({ $0.0 + 0.5 >= $0.1 }) {
+      return normalized
+    }
+
+    let remaining = availableLength - minimumTotal
+    let desiredExtras = zip(desiredSizes, minimumThicknesses).map { desired, minimum in
+      max(0, desired - minimum)
+    }
+    let desiredExtraTotal = desiredExtras.reduce(0, +)
+    let sizes: [CGFloat]
+    if desiredExtraTotal > 0.5 {
+      sizes = zip(minimumThicknesses, desiredExtras).map { minimum, extra in
+        minimum + remaining * (extra / desiredExtraTotal)
+      }
+    } else {
+      let extra = remaining / CGFloat(max(1, childIDs.count))
+      sizes = minimumThicknesses.map { $0 + extra }
+    }
+    return sizes.map { Double($0 / availableLength) }
+  }
+
+  private var currentAvailableLength: CGFloat {
+    let totalLength = isVertical ? bounds.width : bounds.height
+    return max(0, totalLength - dividerThickness * CGFloat(max(0, childIDs.count - 1)))
+  }
+
+  private func effectiveFractions() -> [Double] {
+    guard arrangedSubviews.count == childIDs.count, !childIDs.isEmpty else { return [] }
+    let sizes = arrangedSubviews.map { view in
+      Double(isVertical ? view.frame.width : view.frame.height)
+    }
+    return normalizedFractions(sizes, count: sizes.count)
+  }
+
+  private func normalizedFractions(_ values: [Double], count: Int) -> [Double] {
+    guard count > 0 else { return [] }
+    let sanitized: [Double]
+    if values.count == count {
+      sanitized = values.map { $0.isFinite && $0 > 0 ? $0 : 0 }
+    } else {
+      sanitized = Array(repeating: 1, count: count)
+    }
     let total = sanitized.reduce(0, +)
-    guard total > 0 else { return Array(repeating: 1 / Double(values.count), count: values.count) }
+    guard total > 0 else { return Array(repeating: 1 / Double(count), count: count) }
     return sanitized.map { $0 / total }
+  }
+
+  private func fractionsApproximatelyEqual(_ lhs: [Double], _ rhs: [Double]) -> Bool {
+    lhs.count == rhs.count
+      && zip(lhs, rhs).allSatisfy { abs($0.0 - $0.1) <= 0.000_5 }
+  }
+
+  private func log(_ message: String, metadata: [String: String] = [:]) {
+    var nextMetadata = metadata
+    nextMetadata["split_id"] = splitID.uuidString
+    nextMetadata["state"] = state.rawValue
+    CalciteLogStore.shared.log(
+      .debug,
+      category: "Layout",
+      message: message,
+      metadata: nextMetadata
+    )
   }
 }
 

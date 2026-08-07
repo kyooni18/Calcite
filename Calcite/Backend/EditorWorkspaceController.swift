@@ -654,10 +654,14 @@ var ideWorkspace: EditorIDEWorkspace?
     tab.onDiagnosticsChange = { [weak self] in
       self?.diagnosticsRevision &+= 1
     }
-    tab.onContentStateChange = { [weak self, weak tab] in
+    tab.onContentStateChange = { [weak self] in
       guard let self else { return }
       self.scheduleSessionPersistence()
-      guard self.isLiveDebugEnabled, let tab else { return }
+    }
+    tab.onTextChange = { [weak self, weak tab] _ in
+      guard let self, let tab else { return }
+      self.scheduleSessionPersistence()
+      guard self.isLiveDebugEnabled else { return }
       self.liveDebugController.enqueueFullRestart(
         for: [tab.url.standardizedFileURL]
       )
@@ -3157,7 +3161,7 @@ var ideWorkspace: EditorIDEWorkspace?
       try? await backend.disconnectDebugger()
       await self?.dapReverseRequestHost.terminateActiveTerminalProcess()
     }
-    _ = debugSessionController.replaceProcessLease(with: lease)
+    debugSessionController.replaceProcessLease(with: lease)
   }
 
   private func replaceDebugSession(
@@ -4323,6 +4327,10 @@ var ideWorkspace: EditorIDEWorkspace?
       target = ranges.last(where: { $0.location < cursor }) ?? ranges[ranges.count - 1]
     }
     tab.updateSelection(target)
+  }
+
+  func schedulePresentationPersistence() {
+    scheduleSessionPersistence()
   }
 
   private func scheduleSessionPersistence() {

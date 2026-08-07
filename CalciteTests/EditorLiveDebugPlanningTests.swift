@@ -123,6 +123,31 @@ final class EditorLiveDebugPlanningTests: XCTestCase {
     XCTAssertTrue(accumulator.isEmpty)
   }
 
+  @MainActor
+  func testLiveDebugProcessesAnInMemoryEditWithoutAFileSystemCommit() async throws {
+    let root = try makeTemporaryWorkspace()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("main.swift")
+    try "print(1)".write(to: source, atomically: true, encoding: .utf8)
+
+    let processed = expectation(description: "Live Debug processed the edit")
+    var receivedPaths: Set<URL> = []
+    let controller = EditorLiveDebugController(
+      rootResolver: { _ in [root] },
+      filter: { _, _ in true },
+      settleDelay: .milliseconds(50),
+      applyChanges: { batch, _ in
+        receivedPaths.formUnion(batch.changedPaths)
+        processed.fulfill()
+      }
+    )
+    controller.configure(enabled: true, target: .project)
+    controller.enqueueFullRestart(for: [source])
+
+    await fulfillment(of: [processed], timeout: 1)
+    XCTAssertEqual(receivedPaths, [source.standardizedFileURL])
+  }
+
   private func makeTemporaryWorkspace() throws -> URL {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("CalciteTests")
